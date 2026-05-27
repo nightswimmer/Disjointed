@@ -30,6 +30,8 @@ export interface RenderInput {
   bodyJointDraft: { outline: Vec2[]; preview: Vec2[] | null } | null;
   /** Joint currently being dragged in simulation. */
   driverJoint: number | null;
+  /** Pivot point of an in-progress rotate (drawn as a crosshair), or null. */
+  rotatePivot: Vec2 | null;
   /** Spacing of the world-locked grid (and the snap increment), in world units. */
   gridStep: number;
   /** Whether to draw the world-locked grid. */
@@ -218,6 +220,21 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.setLineDash([]);
     // Hollow center marks a revolute pin.
     if (roles.pinned.has(j.id)) dot(ctx, p, px(2), "#1e1f24");
+  }
+
+  // Rotate pivot crosshair (drawn over everything while rotating about a point).
+  if (input.rotatePivot) {
+    const p = input.rotatePivot;
+    const r = px(8);
+    ctx.strokeStyle = "#ffd166";
+    ctx.lineWidth = px(1.5);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.moveTo(p.x - r * 1.6, p.y);
+    ctx.lineTo(p.x + r * 1.6, p.y);
+    ctx.moveTo(p.x, p.y - r * 1.6);
+    ctx.lineTo(p.x, p.y + r * 1.6);
+    ctx.stroke();
   }
 
   // Control-vertex handles for the selected body (square = draggable corner).

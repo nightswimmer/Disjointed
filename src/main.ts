@@ -1,12 +1,12 @@
 import "./style.css";
-import { Scene, SceneData } from "./model";
+import { Scene, SceneData, BodyClip } from "./model";
 import { solve, Driver } from "./solver";
 import { render } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, lenSq, scale, roundedConvexBody } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
-type Tool = "body" | "joint" | "connect" | "ground" | "slider";
+type Tool = "body" | "joint" | "connect" | "ground" | "slider" | "rotate";
 /** An existing element picked in normal/select mode. */
 type Selection = { kind: "body" | "joint" | "slider"; id: number };
 
@@ -17,11 +17,14 @@ const CLOSE_RADIUS = 12;
 const JOINT_BODY_MIN_MARGIN = 4;
 /** How much the [ and ] keys change a selected body's corner radius, per press. */
 const RADIUS_STEP = 4;
+/** Rotate snaps to a 45° multiple when the body's angle is within this of one (≈2°). */
+const ROTATE_SNAP_TOL = (2 * Math.PI) / 180;
 
 const canvas = document.getElementById("scene") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 const hintEl = document.getElementById("hint")!;
 const toolGroup = document.getElementById("tool-group")!;
+const editGroup = document.getElementById("edit-group")!;
 const gridBtn = document.getElementById("grid-btn") as HTMLButtonElement;
 const snapBtn = document.getElementById("snap-btn") as HTMLButtonElement;
 const gridSizeInput = document.getElementById("grid-size") as HTMLInputElement;
@@ -45,6 +48,24 @@ let selection: Selection | null = null; // element selected in normal mode
 let driver: Driver | null = null;
 /** Body poses saved when entering simulation, restored when leaving. */
 let savedPoses: Map<number, { pos: Vec2; angle: number }> | null = null;
+/** Last body copied (Ctrl+C / Copy button); pasted at the cursor with Ctrl+V / Paste. */
+let clipboard: BodyClip | null = null;
+/**
+ * Active rotate (rotate tool): turning `bodyId` about a fixed `pivot`. `grabAngle` is the
+ * body's angle at grab; `prevPointer` / `accum` track the pointer's accumulated swing about
+ * the pivot (unwrapped); `lastTotal` is the rotation applied so far (lets us apply only the
+ * incremental delta each move while snapping the absolute angle to 45°).
+ */
+type RotateDrag = {
+  bodyId: number;
+  pivot: Vec2;
+  grabAngle: number;
+  prevPointer: number;
+  accum: number;
+  lastTotal: number;
+  moved: boolean;
+};
+let rotateDrag: RotateDrag | null = null;
 
 // --- grid / snapping -------------------------------------------------------
 /** Grid spacing (and snap increment) in world units; mirrors the renderer's grid. */
@@ -133,6 +154,7 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
   ground: "Click a joint to lock its position (it can still rotate).",
   slider: "Click two joints on the same body to create a slider rail.",
+  rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. Snaps to 45°.",
 };
 
 function updateHint(): void {
@@ -155,6 +177,10 @@ document.getElementById("clear-btn")!.addEventListener("click", () => {
 });
 document.getElementById("save-btn")!.addEventListener("click", saveToFile);
 document.getElementById("load-btn")!.addEventListener("click", () => fileInput.click());
+document.getElementById("copy-btn")!.addEventListener("click", copySelection);
+document.getElementById("paste-btn")!.addEventListener("click", () => pasteAt(cursor));
+document.getElementById("mirror-h-btn")!.addEventListener("click", () => mirrorSelection("h"));
+document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorSelection("v"));
 
 gridBtn.addEventListener("click", () => {
   gridVisible = !gridVisible;
@@ -210,13 +236,18 @@ function setMode(next: Mode): void {
     b.classList.toggle("active", b.dataset.mode === mode)
   );
   toolGroup.classList.toggle("hidden", mode === "sim");
+  editGroup.classList.toggle("hidden", mode === "sim");
   canvas.style.cursor = mode === "sim" ? "grab" : "crosshair";
   updateHint();
 }
 
 function setTool(next: Tool): void {
+  // Rotate operates on a selected body, so keep an existing body selection when arming it
+  // (lets you grab one of its control nodes as the pivot right away).
+  const keepSel = next === "rotate" && selection?.kind === "body" ? selection : null;
   tool = next;
   resetTransient();
+  selection = keepSel;
   document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((b) =>
     b.classList.toggle("active", b.dataset.tool === tool)
   );
@@ -241,6 +272,7 @@ function resetTransient(): void {
   sliderDraftIds = [];
   selection = null;
   driver = null;
+  rotateDrag = null;
 }
 
 // --- persistence (save / load / autosave) --------------------------------
@@ -534,6 +566,77 @@ function deleteSelection(): void {
   markDirty();
 }
 
+/** Copy the selected body (with its joints and own constraints) to the clipboard. */
+function copySelection(): void {
+  if (mode !== "draw" || selection?.kind !== "body") return;
+  clipboard = scene.extractBody(selection.id);
+}
+
+/** Paste the clipboard body so its centroid lands at `at` (grid-snapped), then select it. */
+function pasteAt(at: Vec2 | null): void {
+  if (mode !== "draw" || !clipboard) return;
+  const drop = snap(at ?? screenToWorld(view, vec(canvas.clientWidth / 2, canvas.clientHeight / 2)));
+  const id = scene.insertBody(clipboard, drop);
+  if (id !== null) {
+    selection = { kind: "body", id };
+    markDirty();
+  }
+}
+
+/** Mirror the selected body in place across the given axis through its centroid. */
+function mirrorSelection(axis: "h" | "v"): void {
+  if (mode !== "draw" || selection?.kind !== "body") return;
+  scene.mirrorBody(selection.id, axis);
+  markDirty();
+}
+
+/**
+ * Begin a rotate (rotate tool). Pivot: a control node of the already-selected body if the
+ * grab lands on one, otherwise the centroid of whichever body is under the cursor (which
+ * also becomes the selection). No body → nothing happens.
+ */
+function startRotate(p: Vec2): void {
+  let bodyId: number | null = null;
+  let pivot: Vec2 | null = null;
+  const vi = selectedBodyVertexAt(p);
+  if (vi >= 0 && selection?.kind === "body") {
+    bodyId = selection.id;
+    pivot = scene.bodyControlWorld(scene.getBody(bodyId)!)[vi];
+  } else {
+    const body = scene.bodyAt(p);
+    if (body) {
+      bodyId = body.id;
+      pivot = body.pos; // centroid
+      selection = { kind: "body", id: bodyId };
+    }
+  }
+  if (bodyId === null || pivot === null) return;
+  rotateDrag = {
+    bodyId,
+    pivot,
+    grabAngle: scene.getBody(bodyId)!.angle,
+    prevPointer: Math.atan2(p.y - pivot.y, p.x - pivot.x),
+    accum: 0,
+    lastTotal: 0,
+    moved: false,
+  };
+  canvas.style.cursor = "grabbing";
+}
+
+/** Wrap an angle to (−π, π]. */
+function wrapAngle(a: number): number {
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a <= -Math.PI) a += 2 * Math.PI;
+  return a;
+}
+
+/** Snap an angle to the nearest multiple of 45° when within ROTATE_SNAP_TOL of one. */
+function snapAngle(a: number): number {
+  const step = Math.PI / 4;
+  const nearest = Math.round(a / step) * step;
+  return Math.abs(wrapAngle(a - nearest)) < ROTATE_SNAP_TOL ? nearest : a;
+}
+
 /**
  * Body tool click. The first click decides the mode: on an existing joint → build a
  * body from joints; on empty space → freehand polygon. While building from joints,
@@ -614,7 +717,9 @@ canvas.addEventListener("mousedown", (e) => {
 
   if (e.button !== 0) return;
   if (mode === "draw") {
-    if (tool === null) {
+    if (tool === "rotate") {
+      startRotate(world);
+    } else if (tool === null) {
       // A selected body shows draggable corner handles; grabbing one reshapes the body.
       const vi = selectedBodyVertexAt(world);
       if (vi >= 0 && selection?.kind === "body") {
@@ -664,6 +769,19 @@ canvas.addEventListener("mousemove", (e) => {
     return;
   }
 
+  if (rotateDrag) {
+    // Accumulate the pointer's swing about the pivot (unwrapped so it survives crossing ±π),
+    // snap the resulting absolute body angle to 45°, then apply only the incremental delta.
+    const ptr = Math.atan2(world.y - rotateDrag.pivot.y, world.x - rotateDrag.pivot.x);
+    rotateDrag.accum += wrapAngle(ptr - rotateDrag.prevPointer);
+    rotateDrag.prevPointer = ptr;
+    const total = snapAngle(rotateDrag.grabAngle + rotateDrag.accum) - rotateDrag.grabAngle;
+    scene.rotateBody(rotateDrag.bodyId, rotateDrag.pivot, total - rotateDrag.lastTotal);
+    rotateDrag.lastTotal = total;
+    rotateDrag.moved = true;
+    return;
+  }
+
   if (leftDrag) {
     // Snap the dragged anchor to the grid (in absolute terms), preserving where it was grabbed.
     const target = snap(sub(world, leftDrag.grabOffset));
@@ -686,6 +804,11 @@ canvas.addEventListener("mousemove", (e) => {
     const grabbable = selectedBodyVertexAt(world) >= 0 || hoverJoint !== null || hoverBody !== null;
     canvas.style.cursor = grabbable ? "move" : "crosshair";
   }
+  // Rotate tool: a grab cursor over a node of the selected body or any body.
+  if (mode === "draw" && tool === "rotate") {
+    const rotatable = selectedBodyVertexAt(world) >= 0 || scene.bodyAt(world) !== undefined;
+    canvas.style.cursor = rotatable ? "grab" : "crosshair";
+  }
   if (mode === "sim" && driver) driver.target = world;
 });
 
@@ -697,6 +820,11 @@ window.addEventListener("mouseup", (e) => {
   if (e.button === 0 && leftDrag) {
     if (leftDrag.moved) markDirty(); // persist a reposition (a plain click just selects)
     leftDrag = null;
+    canvas.style.cursor = defaultCursor();
+  }
+  if (e.button === 0 && rotateDrag) {
+    if (rotateDrag.moved) markDirty(); // a plain click (no drag) only selected the body
+    rotateDrag = null;
     canvas.style.cursor = defaultCursor();
   }
   if (e.button === 0 && mode === "sim" && driver) {
@@ -753,6 +881,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   c: "connect",
   g: "ground",
   s: "slider",
+  r: "rotate",
 };
 
 window.addEventListener("keydown", (e) => {
@@ -767,6 +896,17 @@ window.addEventListener("keydown", (e) => {
   if (mod && e.key.toLowerCase() === "y") {
     e.preventDefault();
     redo();
+    return;
+  }
+  // Copy / paste the selected body (draw mode). Paste lands at the cursor.
+  if (mod && e.key.toLowerCase() === "c" && mode === "draw" && selection?.kind === "body") {
+    e.preventDefault();
+    copySelection();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === "v" && mode === "draw" && clipboard) {
+    e.preventDefault();
+    pasteAt(cursor);
     return;
   }
   if (e.key === "Escape") {
@@ -831,9 +971,10 @@ function sliderDraftView(): { rail: Vec2[]; cursor: Vec2 } | null {
   return { rail: sliderDraftIds.map((id) => scene.jointWorld(scene.getJoint(id)!)), cursor };
 }
 
-/** Control-vertex handles to show for the body selected in select mode (else null). */
+/** Control-vertex handles to show for the body selected in select / rotate mode (else null). */
 function editVerticesView(): Vec2[] | null {
-  if (mode !== "draw" || tool !== null || selection?.kind !== "body") return null;
+  if (mode !== "draw" || (tool !== null && tool !== "rotate") || selection?.kind !== "body")
+    return null;
   const body = scene.getBody(selection.id);
   return body ? scene.bodyControlWorld(body) : null;
 }
@@ -866,6 +1007,7 @@ function frame(): void {
     sliderDraft: sliderDraftView(),
     bodyJointDraft: bodyJointDraftView(),
     driverJoint: driver?.jointId ?? null,
+    rotatePivot: rotateDrag?.pivot ?? null,
     gridStep,
     gridVisible,
   });

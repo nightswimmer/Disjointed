@@ -20,6 +20,8 @@ and a fillet that handles convex + concave corners without overlapping on thin s
 sliders with end-stops whose rail is either two
 joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded);
 a configurable, toggle-able grid with snap-to-grid for placement and dragging;
+editing utilities (copy/paste a body+its joints/constraints, mirror H/V in place, and a rotate
+tool that turns a body about its centroid or a node and snaps to 45°);
 and a converge-to-tolerance solver. The solver and shape/edit logic are verified
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
 
@@ -62,6 +64,15 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
     joint pinned to them). Editing: `moveBodyVertex`, `insertBodyVertex` (add a control vertex),
     `removeBodyVertex` (drop one, kept ≥ 3), `setBodyRadius`, `moveJoint`, `moveBody` — all go
     through `rebuildBody`, so attached joints stay anchored.
+  - Edit utilities: `rotateBody(id, pivot, delta)` rigidly turns a body about a fixed world
+    point (joints follow; ground anchors rotate too; no rebuild needed). `mirrorBody(id, "h"|"v")`
+    reflects the control polygon + attached joints + their ground anchors across a centroid axis,
+    reversing winding so the fillet/offset stays valid (centroid is fixed, so the body doesn't
+    move). Copy/paste: `extractBody(id)` snapshots a `BodyClip` (control polygon + its joints +
+    the constraints referencing *only* those joints — grounds, fully-internal sliders, intra-body
+    pins; cross-body pins are dropped), stored in world coords relative to the original centroid;
+    `insertBody(clip, at)` translates the whole fragment so the centroid lands at `at` and
+    recreates everything with fresh ids.
   - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
     (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
     `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
@@ -81,12 +92,21 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
   rail joints get a green ring; **a loose free joint gets a muted dashed ring — but a free joint
   that rides a slider or defines a rail drops the dashed ring and renders as anchored**), corner-handle squares
   for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
-  expansion preview, slider rail preview). Cosmetic sizes are divided by the zoom.
+  expansion preview, slider rail preview) and a rotate-pivot crosshair. Cosmetic sizes are
+  divided by the zoom.
 - **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state (tools are one-shot + have
   keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
   pointer + key handling, persistence (save/load/autosave) plus a **snapshot undo/redo history**
   (`pushHistory`/`undo`/`redo`; `markDirty` records a step + autosaves), and the
   requestAnimationFrame render/solve loop. Also a `timedSolve` debug helper.
+  - **Edit utilities**: `copySelection`/`pasteAt` (clipboard is a `BodyClip` held in `main`;
+    paste lands at the cursor, grid-snapped), `mirrorSelection("h"|"v")`, and a **rotate** tool.
+    Rotate is a persistent mode (not one-shot): `startRotate` picks the pivot (a control node of
+    the selected body if grabbed, else the centroid of the body under the cursor) and a
+    `rotateDrag` tracks the pointer's swing about it — accumulated/unwrapped so it survives ±π,
+    with the resulting absolute body angle snapped to 45° (`snapAngle`/`ROTATE_SNAP_TOL`) and only
+    the incremental delta applied per move via `scene.rotateBody`. Copy/paste are also on
+    `Ctrl/Cmd+C`/`V`; rotate on `R`.
   - **Grid / snapping** (session-only state, not persisted): `gridVisible`, `snapEnabled`,
     `gridStep` (clamped 1–200 via `parseGridSize`; number input + a preset `<select>`). `snap(p)`
     rounds a world point to the nearest grid intersection when enabled (identity otherwise) and is
@@ -124,6 +144,15 @@ Select mode (default, no tool armed):
   selected body's control polygon keeps it selected (so an edge double-click isn't lost).
 - `Delete` removes the selection: a body takes its joints/constraints with it; a slider keeps
   its joints; a joint detaches from any rail and any constraints referencing it go.
+- **Edit utilities** (toolbar edit group, act on a selected body): **Copy/Paste**
+  (`Ctrl/Cmd+C`/`V` or buttons) duplicates a body with its joints + own constraints; the copy
+  lands at the cursor (grid-snapped) and is selected. **Mirror H/V** reflects the body + joints
+  in place about its centroid.
+
+Rotate tool (`R`, draw mode — a mode, not one-shot):
+- Drag a body to rotate it about its **centroid**; drag a **control node** of the already-selected
+  body to rotate about that node. The body's absolute angle snaps to the nearest 45° when within
+  ~2°. Joints and ground anchors rotate rigidly with the body. Esc / another tool exits.
 
 Simulate mode:
 - Drag any joint. It becomes the driver; its body follows the cursor and connected bodies
@@ -202,6 +231,10 @@ Persistence:
   simple — no self-intersection — across radii up to 200**) and body editing (`setBodyRadius` /
   `moveBodyVertex` keep attached joints anchored; `insertBodyVertex` / `removeBodyVertex` change
   the control-vertex count, keep joints anchored, and enforce the 3-vertex minimum).
+- **edit-utils.ts** — `rotateBody` (90° about the centroid carries the joint + ground anchor; a
+  pivot node stays fixed), `mirrorBody` (joint reflected, centroid + area preserved), and
+  copy/paste (`extractBody`/`insertBody`: independent offset duplicate, joints/grounds/sliders
+  duplicated with fresh ids, cross-body pins dropped).
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from

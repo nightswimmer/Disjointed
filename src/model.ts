@@ -8,6 +8,7 @@ import {
   add,
   rotate,
   vec,
+  clone,
   sub,
   dist,
   normalize,
@@ -90,6 +91,25 @@ export interface SceneData {
   bodies: Body[];
   joints: Joint[];
   constraints: Constraint[];
+}
+
+/**
+ * A self-contained snapshot of a body for copy/paste: its control polygon, the joints
+ * attached to it, and the constraints that reference *only* those joints (grounds,
+ * fully-internal sliders, intra-body pins). Everything is stored in world coordinates
+ * relative to the original centroid; pasting translates the whole fragment so the
+ * centroid lands at the drop point. `tmp` ids are the original joint ids, remapped to
+ * fresh joints on paste. Cross-body pins can't be reproduced and are dropped.
+ */
+export interface BodyClip {
+  controlWorld: Vec2[];
+  radius: number;
+  round: RoundMode;
+  centroid: Vec2;
+  joints: { tmp: number; world: Vec2 }[];
+  grounds: { joint: number; anchor: Vec2 }[];
+  sliders: { railA: number; railB: number; riders: number[] }[];
+  pins: { a: number; b: number }[];
 }
 
 const FORMAT_VERSION = 5;
@@ -404,6 +424,131 @@ export class Scene {
     for (const c of this.constraints) {
       if (c.kind === "ground" && c.joint === id) c.anchor = vec(w.x, w.y);
     }
+  }
+
+  /**
+   * Rigidly rotate a body by `delta` radians about a fixed world `pivot`: its pose
+   * (centroid + angle) turns about the pivot and attached joints follow automatically
+   * (they live in the local frame). Ground anchors on the body's joints rotate too, so
+   * a grounded part stays grounded where it now sits. No shape rebuild is needed.
+   */
+  rotateBody(bodyId: number, pivot: Vec2, delta: number): void {
+    const body = this.getBody(bodyId);
+    if (!body || delta === 0) return;
+    body.pos = add(pivot, rotate(sub(body.pos, pivot), delta));
+    body.angle += delta;
+    const owned = new Set(this.joints.filter((j) => j.bodyId === bodyId).map((j) => j.id));
+    for (const c of this.constraints) {
+      if (c.kind === "ground" && owned.has(c.joint)) {
+        c.anchor = add(pivot, rotate(sub(c.anchor, pivot), delta));
+      }
+    }
+  }
+
+  /**
+   * Mirror a body across a line through its centroid: `"h"` flips it left↔right (reflect
+   * x), `"v"` flips it top↔bottom (reflect y). The control polygon and every attached
+   * joint (and its ground anchor) are reflected; the polygon winding is reversed so the
+   * fillet/offset rounding stays correct. The centroid is fixed by the reflection, so
+   * the body doesn't move — it just turns into its mirror image in place.
+   */
+  mirrorBody(bodyId: number, axis: "h" | "v"): void {
+    const body = this.getBody(bodyId);
+    if (!body) return;
+    const c = body.pos;
+    const reflect = (w: Vec2): Vec2 =>
+      axis === "h" ? vec(2 * c.x - w.x, w.y) : vec(w.x, 2 * c.y - w.y);
+    // Reflect the control polygon in world space; reverse it to preserve the winding.
+    const ctrlWorld = this.bodyControlWorld(body).map(reflect).reverse();
+    const attached = this.joints.filter((j) => j.bodyId === bodyId);
+    const jointWorlds = new Map(attached.map((j) => [j.id, reflect(this.jointWorld(j))]));
+    const owned = new Set(attached.map((j) => j.id));
+    for (const con of this.constraints) {
+      if (con.kind === "ground" && owned.has(con.joint)) con.anchor = reflect(con.anchor);
+    }
+    // Bake the reflected world geometry back in at angle 0 (a reflection isn't a rotation,
+    // so the prior angle no longer applies), then let rebuildBody re-derive shape/mass and
+    // re-anchor joints to their now-reflected world positions.
+    body.angle = 0;
+    body.controlLocal = ctrlWorld.map((p) => sub(p, c));
+    for (const j of attached) j.local = sub(jointWorlds.get(j.id)!, c);
+    this.rebuildBody(body);
+  }
+
+  /**
+   * Snapshot a body and its dependent features into a copy/paste clip (see `BodyClip`).
+   * Returns null if the body doesn't exist.
+   */
+  extractBody(bodyId: number): BodyClip | null {
+    const body = this.getBody(bodyId);
+    if (!body) return null;
+    const attached = this.joints.filter((j) => j.bodyId === bodyId);
+    const owned = new Set(attached.map((j) => j.id));
+    const grounds: BodyClip["grounds"] = [];
+    const sliders: BodyClip["sliders"] = [];
+    const pins: BodyClip["pins"] = [];
+    for (const c of this.constraints) {
+      if (c.kind === "ground" && owned.has(c.joint)) {
+        grounds.push({ joint: c.joint, anchor: clone(c.anchor) });
+      } else if (c.kind === "slider" && owned.has(c.railA) && owned.has(c.railB)) {
+        sliders.push({
+          railA: c.railA,
+          railB: c.railB,
+          riders: c.riders.filter((r) => owned.has(r)),
+        });
+      } else if (c.kind === "pin" && owned.has(c.jointA) && owned.has(c.jointB)) {
+        pins.push({ a: c.jointA, b: c.jointB });
+      }
+    }
+    return {
+      controlWorld: this.bodyControlWorld(body).map(clone),
+      radius: body.radius,
+      round: body.round,
+      centroid: clone(body.pos),
+      joints: attached.map((j) => ({ tmp: j.id, world: this.jointWorld(j) })),
+      grounds,
+      sliders,
+      pins,
+    };
+  }
+
+  /**
+   * Paste a `BodyClip` so its original centroid lands at `at` (the whole fragment is
+   * translated by `at − clip.centroid`). Recreates the body, its joints, and the clipped
+   * constraints with fresh ids. Returns the new body's id, or null on failure.
+   */
+  insertBody(clip: BodyClip, at: Vec2): number | null {
+    const offset = sub(at, clip.centroid);
+    const body = this.addBody(
+      clip.controlWorld.map((p) => add(p, offset)),
+      clip.radius,
+      clip.round
+    );
+    if (body.local.length < 3) return null;
+    const idMap = new Map<number, number>(); // tmp id → new joint id
+    for (const j of clip.joints) {
+      idMap.set(j.tmp, this.addJoint(body.id, add(j.world, offset)).id);
+    }
+    for (const g of clip.grounds) {
+      const id = idMap.get(g.joint);
+      if (id !== undefined) this.addGround(id, add(g.anchor, offset));
+    }
+    for (const s of clip.sliders) {
+      const a = idMap.get(s.railA);
+      const b = idMap.get(s.railB);
+      if (a === undefined || b === undefined) continue;
+      const sl = this.addSlider(a, b);
+      for (const r of s.riders) {
+        const nr = idMap.get(r);
+        if (nr !== undefined) this.attachSliderRider(sl.id, nr);
+      }
+    }
+    for (const p of clip.pins) {
+      const a = idMap.get(p.a);
+      const b = idMap.get(p.b);
+      if (a !== undefined && b !== undefined) this.addPin(a, b);
+    }
+    return body.id;
   }
 
   /** Remove a body along with its joints, pruning the constraints that used them. */

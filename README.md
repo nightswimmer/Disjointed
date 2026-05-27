@@ -36,6 +36,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
 | **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
+| **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 
 **Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
 **Drag** the selection to move it. A selected body shows **corner handles** — drag one to reshape
@@ -45,6 +46,14 @@ outline by **double-click**: double-click an **edge** to add a node there (snapp
 when Snap is on), or double-click a **node** to remove it (kept to a minimum of 3). Press
 **Delete** to remove the selection: a body takes its joints and constraints with it; a slider rail
 leaves its joints; a joint detaches from any rail.
+
+**Editing utilities** (toolbar edit group, on a selected body):
+- **Copy / Paste** (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`, or the buttons) — duplicate a body together with
+  its joints and the constraints that belong only to it (grounds, fully-internal sliders). The copy
+  lands at the cursor (grid-snapped when Snap is on) and becomes the selection. Cross-body pins
+  aren't reproduced.
+- **Mirror H / V** — reflect the selected body (and its joints) left↔right or top↔bottom, in place
+  about its centroid.
 
 Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
 rail-defining joints get a **green ring**, and a **loose free joint a dashed ring**. Once a free
@@ -85,7 +94,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities
 ```
 
 ## How it works

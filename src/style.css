@@ -118,7 +118,8 @@ select#grid-size-presets {
   white-space: nowrap;
 }
 
-#tool-group.hidden {
+#tool-group.hidden,
+#edit-group.hidden {
   display: none;
 }
 
