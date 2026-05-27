@@ -2,7 +2,7 @@ import "./style.css";
 import { Scene, SceneData } from "./model";
 import { solve, Driver } from "./solver";
 import { render } from "./renderer";
-import { Vec2, add, dist, sub, vec, roundedConvexBody } from "./geometry";
+import { Vec2, add, dist, sub, vec, dot, lenSq, scale, roundedConvexBody } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
@@ -127,7 +127,7 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint to drive the mechanism.",
-  select: "Click to select · drag to move · drag a selected body's corner handles to reshape · [ and ] round corners · Delete to remove.",
+  select: "Click to select · drag to move · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · [ and ] round corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
@@ -467,6 +467,12 @@ function handleSelectClick(p: Vec2): void {
     selection = { kind: "slider", id: s.id };
     return;
   }
+  // Keep the selected body when clicking on/near its control polygon (its edges sit on
+  // the boundary, so a click there can land just outside the filled shape). This lets a
+  // double-click on an edge reach the vertex-edit handler without deselecting first.
+  if (selection?.kind === "body" && (selectedBodyVertexAt(p) >= 0 || selectedBodyEdgeAt(p))) {
+    return;
+  }
   const body = scene.bodyAt(p);
   selection = body ? { kind: "body", id: body.id } : null;
 }
@@ -485,6 +491,36 @@ function selectedBodyVertexAt(p: Vec2): number {
       best = i;
     }
   });
+  return best;
+}
+
+/**
+ * Nearest control-polygon edge of the selected body within pick range of `p`.
+ * Returns the edge's later-vertex index (insertion slot) and the closest point on
+ * the segment, or null. Vertices within pick range are excluded so an edge hit
+ * doesn't shadow a vertex hit (which means "remove" instead of "add").
+ */
+function selectedBodyEdgeAt(p: Vec2): { index: number; point: Vec2 } | null {
+  if (selection?.kind !== "body") return null;
+  const body = scene.getBody(selection.id);
+  if (!body) return null;
+  const verts = scene.bodyControlWorld(body);
+  if (selectedBodyVertexAt(p) >= 0) return null;
+  const r = pickRadius();
+  let best: { index: number; point: Vec2 } | null = null;
+  let bestD = r;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i];
+    const b = verts[(i + 1) % verts.length];
+    const ab = sub(b, a);
+    const t = Math.max(0, Math.min(1, dot(sub(p, a), ab) / Math.max(lenSq(ab), 1e-9)));
+    const point = add(a, scale(ab, t));
+    const d = dist(p, point);
+    if (d < bestD) {
+      bestD = d;
+      best = { index: i + 1, point };
+    }
+  }
   return best;
 }
 
@@ -685,10 +721,29 @@ canvas.addEventListener("mouseleave", () => {
   cursor = null;
 });
 
-canvas.addEventListener("dblclick", () => {
+canvas.addEventListener("dblclick", (e) => {
   // Freehand polygons still close on double-click; joint-built bodies finish by
   // clicking a previously-added node (handled in handleBodyClick).
-  if (mode === "draw" && tool === "body" && jointDraftIds.length === 0) finishBody();
+  if (mode === "draw" && tool === "body" && jointDraftIds.length === 0) {
+    finishBody();
+    return;
+  }
+  // Select mode, body selected: double-click edits the control polygon. On a vertex →
+  // remove it (kept ≥ 3); on an edge → add a node at the click point (grid-snapped).
+  if (mode === "draw" && tool === null && selection?.kind === "body") {
+    const world = eventWorld(e);
+    const vi = selectedBodyVertexAt(world);
+    if (vi >= 0) {
+      scene.removeBodyVertex(selection.id, vi);
+      markDirty();
+      return;
+    }
+    const edge = selectedBodyEdgeAt(world);
+    if (edge) {
+      scene.insertBodyVertex(selection.id, edge.index, snap(edge.point));
+      markDirty();
+    }
+  }
 });
 
 /** Draw-tool shortcuts: each tool is armed by the first letter of its name. */

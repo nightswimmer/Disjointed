@@ -168,6 +168,31 @@ export class Scene {
     this.rebuildBody(body);
   }
 
+  /**
+   * Insert a new control vertex at `index` (world position → local), then rebuild.
+   * Used to add a node on a polygon edge: pass the index it should occupy (i.e. the
+   * later endpoint of the clicked edge).
+   */
+  insertBodyVertex(bodyId: number, index: number, worldPos: Vec2): void {
+    const body = this.getBody(bodyId);
+    if (!body) return;
+    const clamped = Math.min(Math.max(index, 0), body.controlLocal.length);
+    body.controlLocal.splice(clamped, 0, rotate(sub(worldPos, body.pos), -body.angle));
+    this.rebuildBody(body);
+  }
+
+  /**
+   * Remove a control vertex, then rebuild. No-op if it would leave fewer than 3
+   * vertices (the minimum to define a polygon) or the index is out of range.
+   */
+  removeBodyVertex(bodyId: number, index: number): void {
+    const body = this.getBody(bodyId);
+    if (!body || body.controlLocal.length <= 3) return;
+    if (index < 0 || index >= body.controlLocal.length) return;
+    body.controlLocal.splice(index, 1);
+    this.rebuildBody(body);
+  }
+
   /** Set a body's corner radius / margin (clamped ≥ 0), then rebuild its shape. */
   setBodyRadius(bodyId: number, radius: number): void {
     const body = this.getBody(bodyId);

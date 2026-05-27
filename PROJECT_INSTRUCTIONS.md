@@ -15,7 +15,9 @@ Two modes:
 End-to-end draw → simulate works, with: select/move/delete editing; one-shot tools + keyboard
 shortcuts; free (body-less) joints that can be grounded as anchors; bodies built two ways
 (freehand polygon, or from existing joints); rounded corners (editable control polygon +
-radius, re-editable by dragging corner handles); sliders with end-stops whose rail is either two
+radius, re-editable by dragging corner handles, with vertices added/removed by double-click,
+and a fillet that handles convex + concave corners without overlapping on thin shapes);
+sliders with end-stops whose rail is either two
 joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded);
 a configurable, toggle-able grid with snap-to-grid for placement and dragging;
 and a converge-to-tolerance solver. The solver and shape/edit logic are verified
@@ -28,9 +30,16 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
 
 ### Architecture (`src/`)
 - **geometry.ts** — Vec2 math; polygon centroid / area / inertia; point-in-polygon;
-  point-to-line distance; `convexHull`; `roundedConvexBody` (hull + outward rounded offset =
-  Minkowski sum with a disk, sampled adaptively to `margin`); `filletPolygon` (round a
-  polygon's corners in place with clamped tangent arcs — convex and concave/reflex corners).
+  point-to-line distance; `distToSegment` (point to a clamped segment); `convexHull`;
+  `roundedConvexBody` (hull + outward rounded offset = Minkowski sum with a disk, sampled
+  adaptively to `margin`); `filletPolygon` (round a polygon's corners in place with tangent
+  arcs — convex and concave/reflex corners). The fillet runs in passes: per-corner desired
+  tangent length, a **shared-edge budget** (each edge split between its two corners in
+  proportion to demand so neighbouring fillets can't overlap), an **opposite-edge clamp**
+  (a few relaxation passes shrink any corner whose inscribed circle would poke through a
+  non-adjacent edge — stops thin shapes folding at large radii), then arc emission. The
+  fillet centre is always on the bisector of the two edge directions, which is the correct
+  tangent side for both convex (into the body) and reflex (into the notch) corners.
 - **model.ts** — `Scene` owning:
   - `Body` = rigid shape defined by an **editable control polygon** (`controlLocal`) + a
     corner `radius` + a `round` mode (`"fillet"` rounds corners in place; `"offset"` grows the
@@ -50,7 +59,9 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
   - Body construction: `addBody(worldVerts, radius?, round?)` (freehand uses `fillet`);
     `buildBodyFromJoints(jointIds, margin)` stores **one control point per joint** with
     `round: "offset"` (free joints are absorbed; joints on other bodies get a coincident new
-    joint pinned to them). Editing: `moveBodyVertex`, `setBodyRadius`, `moveJoint`, `moveBody`.
+    joint pinned to them). Editing: `moveBodyVertex`, `insertBodyVertex` (add a control vertex),
+    `removeBodyVertex` (drop one, kept ≥ 3), `setBodyRadius`, `moveJoint`, `moveBody` — all go
+    through `rebuildBody`, so attached joints stay anchored.
   - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
     (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
     `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
@@ -108,6 +119,9 @@ Select mode (default, no tool armed):
 - Click a body, joint, or slider rail to **select** it (highlighted); **left-drag** moves the
   selected body or joint. A selected body shows **corner handles** — drag one to reshape it
   (`moveBodyVertex`); **`[` / `]`** decrease / increase its corner radius (round/un-round).
+  **Double-click** an edge of the selected body to add a control node there (`insertBodyVertex`,
+  grid-snapped), or a node to remove it (`removeBodyVertex`, kept ≥ 3). Clicking on/near the
+  selected body's control polygon keeps it selected (so an edge double-click isn't lost).
 - `Delete` removes the selection: a body takes its joints/constraints with it; a slider keeps
   its joints; a joint detaches from any rail and any constraints referencing it go.
 
@@ -183,8 +197,11 @@ Persistence:
 - **build-body.ts** — `buildBodyFromJoints`: free joints absorbed, a coincident pinned joint
   added for a joint on another body, expanded body has area / contains the joints, min-joint
   rejection.
-- **shape-edit.ts** — `filletPolygon` (convex + concave validity, radius 0 passthrough) and
-  body editing (`setBodyRadius` / `moveBodyVertex` keep attached joints anchored).
+- **shape-edit.ts** — `filletPolygon` (convex + concave validity, radius 0 passthrough; a
+  **reflex corner rounds into the notch, not the material**; a **narrow-neck shape stays
+  simple — no self-intersection — across radii up to 200**) and body editing (`setBodyRadius` /
+  `moveBodyVertex` keep attached joints anchored; `insertBodyVertex` / `removeBodyVertex` change
+  the control-vertex count, keep joints anchored, and enforce the 3-vertex minimum).
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
@@ -204,9 +221,16 @@ Persistence:
   as a normal green rider. Also tightened the Connect tool: a second-pick click that lands on the
   already-selected joint now falls through to the slider underneath instead of cancelling (lets a
   free joint sitting right on the rail be attached by clicking it).
+- **Fillet rounded concave (reflex) corners the wrong way.** The corner-rounding flipped the
+  fillet centre's bisector for reflex corners, putting the arc on the material side (and breaking
+  tangency) — so concave junctions like a neck/base "armpit" pinched inward instead of rounding
+  out. Fixed: the centre always sits on the bisector of the two edge directions, which is the
+  correct tangent side for both convex (into the body) and reflex (into the notch) corners.
+- **Fillets overlapped / folded on thin shapes.** Each corner was clamped independently to half
+  its shortest edge, so neighbouring fillets collided on short edges (and could fold a narrow
+  neck). Fixed with a shared-edge budget (proportional split) plus an opposite-edge clamp.
 
 ## Backlog / next steps (not yet built)
-- Add/remove individual vertices of a body (moving them + radius editing already work).
 - Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
   control polygon is a snapshot taken at build time.
 - More joint types as needed.

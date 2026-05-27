@@ -40,9 +40,11 @@ to **Select** mode. Press **Esc** to abort the current placement.
 **Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
 **Drag** the selection to move it. A selected body shows **corner handles** — drag one to reshape
 it, and press **`[` / `]`** to decrease / increase its corner radius (this is how you round a
-freehand polygon: draw it, select it, press `]`). Press **Delete** to remove the selection:
-a body takes its joints and constraints with it; a slider rail leaves its joints; a joint detaches
-from any rail.
+freehand polygon: draw it, select it, press `]`). With a body selected you can also edit its
+outline by **double-click**: double-click an **edge** to add a node there (snapped to the grid
+when Snap is on), or double-click a **node** to remove it (kept to a minimum of 3). Press
+**Delete** to remove the selection: a body takes its joints and constraints with it; a slider rail
+leaves its joints; a joint detaches from any rail.
 
 Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
 rail-defining joints get a **green ring**, and a **loose free joint a dashed ring**. Once a free
@@ -98,6 +100,8 @@ structural constraints, keeping dragging stable even when you pull toward a poin
 can't reach. Sliders are prismatic constraints with end-stops; the rail is either a body (which
 moves) or a world-fixed line built from two grounded free joints. Body outlines are
 generated from a control polygon + corner radius (rounded corners via fillet or outward offset).
+The fillet rounds convex and concave (reflex) corners correctly, and splits each edge between its
+two corners so neighbouring fillets never overlap or fold — even on thin shapes at large radii.
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),
 `renderer.ts`, `main.ts`. Tests live in [`scripts/`](scripts/).

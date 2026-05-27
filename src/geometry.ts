@@ -99,6 +99,14 @@ export function distToLine(p: Vec2, o: Vec2, d: Vec2): number {
   return Math.abs(cross(sub(p, o), d));
 }
 
+/** Distance from point `p` to the segment `a`–`b` (clamped to the endpoints). */
+export function distToSegment(p: Vec2, a: Vec2, b: Vec2): number {
+  const ab = sub(b, a);
+  const l2 = lenSq(ab);
+  const t = l2 > 1e-12 ? Math.max(0, Math.min(1, dot(sub(p, a), ab) / l2)) : 0;
+  return dist(p, add(a, scale(ab, t)));
+}
+
 /** Convex hull of a point set (Andrew's monotone chain). Returns hull vertices in order. */
 export function convexHull(points: Vec2[]): Vec2[] {
   const pts = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
@@ -127,8 +135,12 @@ export function convexHull(points: Vec2[]): Vec2[] {
 export function filletPolygon(verts: Vec2[], radius: number, segPerCorner = 8): Vec2[] {
   const n = verts.length;
   if (n < 3 || radius <= 0) return verts.map((v) => ({ x: v.x, y: v.y }));
-  const winding = Math.sign(polygonArea(verts)) || 1;
-  const out: Vec2[] = [];
+
+  // Pass 1 — per-corner geometry. `half` is half the interior angle; `want` is the
+  // tangent length needed for the requested radius (0 for degenerate / near-straight
+  // corners, which take no fillet and yield their whole edge to their neighbours).
+  const half = new Array<number>(n).fill(0);
+  const want = new Array<number>(n).fill(0);
   for (let i = 0; i < n; i++) {
     const prev = verts[(i - 1 + n) % n];
     const v = verts[i];
@@ -136,24 +148,77 @@ export function filletPolygon(verts: Vec2[], radius: number, segPerCorner = 8): 
     const u1 = normalize(sub(prev, v)); // edge toward prev
     const u2 = normalize(sub(next, v)); // edge toward next
     const angle = Math.acos(Math.max(-1, Math.min(1, dot(u1, u2)))); // 0..π between edges
-    if (angle < 1e-3 || angle > Math.PI - 1e-3) {
-      out.push({ x: v.x, y: v.y }); // degenerate / nearly straight: no fillet
+    if (angle < 1e-3 || angle > Math.PI - 1e-3) continue; // degenerate / nearly straight
+    half[i] = angle / 2;
+    want[i] = radius / Math.tan(half[i]);
+  }
+
+  // Pass 2 — shared-edge budget. On every edge the two corners' tangent lengths must
+  // fit within the edge, split in proportion to demand. Each corner's tangent is then
+  // the smallest share its two edges allow, so neighbouring fillets can never overlap
+  // (this is what prevents narrow shapes from pinching or folding over themselves).
+  const tMax = new Array<number>(n).fill(Infinity);
+  for (let i = 0; i < n; i++) {
+    const a = i;
+    const b = (i + 1) % n;
+    const L = dist(verts[a], verts[b]);
+    const sum = want[a] + want[b];
+    const fit = sum > L && sum > 1e-9 ? L / sum : 1; // shrink both ends to fit the edge
+    tMax[a] = Math.min(tMax[a], want[a] * fit);
+    tMax[b] = Math.min(tMax[b], want[b] * fit);
+  }
+  const t = want.map((w, i) => Math.min(w, tMax[i]));
+
+  // Pass 2b — keep a fillet from poking through a non-adjacent edge (the opposite side
+  // of a thin feature, e.g. a narrow neck). The inscribed circle's centre must stay ≥ r
+  // from every other edge; where it doesn't, shrink that corner's radius. Shrinking pulls
+  // the centre back toward the vertex and re-opens clearance, so a few relaxation passes
+  // settle each corner to the largest radius that still fits. This is what stops thin
+  // shapes from folding over themselves at large radii.
+  for (let pass = 0; pass < 6; pass++) {
+    let changed = false;
+    for (let i = 0; i < n; i++) {
+      if (t[i] < 1e-6) continue;
+      const v = verts[i];
+      const u1 = normalize(sub(verts[(i - 1 + n) % n], v));
+      const u2 = normalize(sub(verts[(i + 1) % n], v));
+      const bis = normalize(add(u1, u2));
+      const r = t[i] * Math.tan(half[i]);
+      const center = add(v, scale(bis, r / Math.sin(half[i])));
+      let minD = Infinity;
+      for (let e = 0; e < n; e++) {
+        if (e === i || e === (i - 1 + n) % n) continue; // skip the two edges meeting at vertex i
+        minD = Math.min(minD, distToSegment(center, verts[e], verts[(e + 1) % n]));
+      }
+      if (minD < r - 1e-6) {
+        t[i] = Math.max(0, minD) / Math.tan(half[i]);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  // Pass 3 — emit the rounded outline (arc per filleted corner).
+  const out: Vec2[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = verts[(i - 1 + n) % n];
+    const v = verts[i];
+    const next = verts[(i + 1) % n];
+    if (want[i] === 0 || t[i] < 1e-6) {
+      out.push({ x: v.x, y: v.y }); // no fillet here
       continue;
     }
-    const half = angle / 2;
-    const maxT = 0.5 * Math.min(dist(prev, v), dist(next, v)); // keep fillets from overlapping
-    const t = Math.min(radius / Math.tan(half), maxT);
-    if (t < 1e-6) {
-      out.push({ x: v.x, y: v.y });
-      continue;
-    }
-    const r = t * Math.tan(half); // actual radius after clamping
-    const t1 = add(v, scale(u1, t));
-    const t2 = add(v, scale(u2, t));
-    // Bisector points to the corner's interior for convex vertices; flip for reflex.
-    const convex = Math.sign(cross(sub(v, prev), sub(next, v))) === winding;
-    const bis = scale(normalize(add(u1, u2)), convex ? 1 : -1);
-    const center = add(v, scale(bis, r / Math.sin(half)));
+    const u1 = normalize(sub(prev, v));
+    const u2 = normalize(sub(next, v));
+    const r = t[i] * Math.tan(half[i]); // actual radius after clamping
+    const t1 = add(v, scale(u1, t[i]));
+    const t2 = add(v, scale(u2, t[i]));
+    // The fillet centre lies along the bisector of the two edge directions. That bisector
+    // points to the correct tangent-circle side for both convex corners (into the body)
+    // and reflex corners (into the notch), so no per-corner flip is needed — the "short
+    // way" arc sweep below then rounds each corner in the right direction.
+    const bis = normalize(add(u1, u2));
+    const center = add(v, scale(bis, r / Math.sin(half[i])));
     const a1 = Math.atan2(t1.y - center.y, t1.x - center.x);
     const a2 = Math.atan2(t2.y - center.y, t2.x - center.x);
     let da = a2 - a1; // sweep the short way
