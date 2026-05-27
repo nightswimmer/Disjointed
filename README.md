@@ -57,6 +57,14 @@ connected body moves with it. Structural constraints always win over the cursor 
 body can only rotate about its ground point, and the dragged joint snaps to the nearest point
 it can actually reach. Your drawn layout is preserved when you switch back to Draw.
 
+### Grid & snapping
+The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**
+toggles snap-to-grid, and the number field (with a preset dropdown) sets the spacing — any value
+from **1 to 200** world units. With Snap on, new joints and freehand vertices land on the grid,
+and dragging snaps too: a per-vertex reshape snaps the grabbed corner, while moving a whole body
+snaps whichever is nearest the grab point — the body's centroid or one of its corners. Visibility
+and snapping are independent (you can snap to a hidden grid).
+
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor.
 - **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode).

@@ -2,7 +2,7 @@ import "./style.css";
 import { Scene, SceneData } from "./model";
 import { solve, Driver } from "./solver";
 import { render } from "./renderer";
-import { Vec2, dist, sub, vec, roundedConvexBody } from "./geometry";
+import { Vec2, add, dist, sub, vec, roundedConvexBody } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
@@ -22,6 +22,10 @@ const canvas = document.getElementById("scene") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 const hintEl = document.getElementById("hint")!;
 const toolGroup = document.getElementById("tool-group")!;
+const gridBtn = document.getElementById("grid-btn") as HTMLButtonElement;
+const snapBtn = document.getElementById("snap-btn") as HTMLButtonElement;
+const gridSizeInput = document.getElementById("grid-size") as HTMLInputElement;
+const gridSizePresets = document.getElementById("grid-size-presets") as HTMLSelectElement;
 
 const scene = new Scene();
 
@@ -42,15 +46,58 @@ let driver: Driver | null = null;
 /** Body poses saved when entering simulation, restored when leaving. */
 let savedPoses: Map<number, { pos: Vec2; angle: number }> | null = null;
 
+// --- grid / snapping -------------------------------------------------------
+/** Grid spacing (and snap increment) in world units; mirrors the renderer's grid. */
+let gridStep = 40;
+/** When true, placements and drags land on the nearest grid intersection. */
+let snapEnabled = false;
+/** When true, the world-locked grid is drawn (snapping still works when hidden). */
+let gridVisible = true;
+
+/** Snap a world point to the nearest grid intersection (identity when snap is off). */
+function snap(p: Vec2): Vec2 {
+  if (!snapEnabled) return p;
+  return vec(Math.round(p.x / gridStep) * gridStep, Math.round(p.y / gridStep) * gridStep);
+}
+
 // --- camera ---------------------------------------------------------------
 const view: View = { scale: 1, tx: 0, ty: 0 };
 /** Active right-button view pan. */
 let pan: { lastScreen: Vec2 } | null = null;
-/** Active left-button drag of a selected element in draw/select mode. */
+/**
+ * Active left-button drag of a selected element in draw/select mode. `grabOffset` is
+ * the cursor-minus-anchor offset captured at grab time, so the dragged anchor can be
+ * snapped to the grid in absolute terms. For a whole-body move the anchor is whichever
+ * of the centroid / control vertices was closest to the grab point, stored as a fixed
+ * `anchorOffset` from the centroid (a plain move only translates, so it stays constant).
+ */
 type LeftDrag =
-  | { kind: "body" | "joint"; id: number; lastWorld: Vec2; moved: boolean }
-  | { kind: "vertex"; bodyId: number; index: number; lastWorld: Vec2; moved: boolean };
+  | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean }
+  | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean }
+  | { kind: "vertex"; bodyId: number; index: number; grabOffset: Vec2; moved: boolean };
 let leftDrag: LeftDrag | null = null;
+
+/** Current world position of a drag's anchor (the point that snaps to the grid). */
+function dragAnchorWorld(d: LeftDrag): Vec2 {
+  if (d.kind === "vertex") return scene.bodyControlWorld(scene.getBody(d.bodyId)!)[d.index];
+  if (d.kind === "body") return add(scene.getBody(d.id)!.pos, d.anchorOffset);
+  return scene.jointWorld(scene.getJoint(d.id)!);
+}
+
+/** Body-move snap anchor: the centroid or nearest control vertex to the grab point. */
+function bodyDragAnchor(bodyId: number, grab: Vec2): Vec2 {
+  const body = scene.getBody(bodyId)!;
+  let best = body.pos; // centroid is always a candidate
+  let bestD = dist(grab, best);
+  for (const v of scene.bodyControlWorld(body)) {
+    const d = dist(grab, v);
+    if (d < bestD) {
+      bestD = d;
+      best = v;
+    }
+  }
+  return best;
+}
 
 // --- canvas sizing -------------------------------------------------------
 function resize(): void {
@@ -108,6 +155,38 @@ document.getElementById("clear-btn")!.addEventListener("click", () => {
 });
 document.getElementById("save-btn")!.addEventListener("click", saveToFile);
 document.getElementById("load-btn")!.addEventListener("click", () => fileInput.click());
+
+gridBtn.addEventListener("click", () => {
+  gridVisible = !gridVisible;
+  gridBtn.classList.toggle("active", gridVisible);
+});
+snapBtn.addEventListener("click", () => {
+  snapEnabled = !snapEnabled;
+  snapBtn.classList.toggle("active", snapEnabled);
+});
+const GRID_MIN = 1;
+const GRID_MAX = 200;
+/** Read the grid-size field, clamped to [GRID_MIN, GRID_MAX]; null while it's empty/invalid. */
+function parseGridSize(): number | null {
+  const n = Math.round(Number(gridSizeInput.value));
+  if (!Number.isFinite(n) || gridSizeInput.value.trim() === "") return null;
+  return Math.min(GRID_MAX, Math.max(GRID_MIN, n));
+}
+// Live-update the grid while typing a valid value; normalize the field text on commit.
+gridSizeInput.addEventListener("input", () => {
+  const n = parseGridSize();
+  if (n !== null) gridStep = n;
+});
+gridSizeInput.addEventListener("change", () => {
+  gridStep = parseGridSize() ?? gridStep;
+  gridSizeInput.value = String(gridStep);
+});
+// Picking a preset fills the number field; reset the select so the same preset re-fires.
+gridSizePresets.addEventListener("change", () => {
+  gridStep = Number(gridSizePresets.value) || gridStep;
+  gridSizeInput.value = String(gridStep);
+  gridSizePresets.value = "";
+});
 
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 fileInput.addEventListener("change", () => {
@@ -297,11 +376,12 @@ function handleDrawClick(p: Vec2): void {
       // Inside bodies: a joint in each overlapping body, pinned together (a shared
       // revolute). On empty space: a free, body-less joint (a movable point).
       const bodies = scene.bodiesAt(p);
+      const at = snap(p); // place on the grid; hit-test against the raw click point
       if (bodies.length > 0) {
-        const joints = bodies.map((b) => scene.addJoint(b.id, p));
+        const joints = bodies.map((b) => scene.addJoint(b.id, at));
         for (let i = 1; i < joints.length; i++) scene.addPin(joints[0].id, joints[i].id);
       } else {
-        scene.addFreeJoint(p);
+        scene.addFreeJoint(at);
       }
       placed = true;
       break;
@@ -465,10 +545,11 @@ function addBodyPoint(p: Vec2): void {
     finishBody();
     return;
   }
+  const at = snap(p); // freehand vertices land on the grid when snap is on
   // Ignore near-duplicate points (also de-dupes the 2nd click of a double-click).
   const last = draftBody[draftBody.length - 1];
-  if (last && dist(p, last) < 4 / view.scale) return;
-  draftBody.push(p);
+  if (last && dist(at, last) < 4 / view.scale) return;
+  draftBody.push(at);
 }
 
 function finishBody(): void {
@@ -501,13 +582,25 @@ canvas.addEventListener("mousedown", (e) => {
       // A selected body shows draggable corner handles; grabbing one reshapes the body.
       const vi = selectedBodyVertexAt(world);
       if (vi >= 0 && selection?.kind === "body") {
-        leftDrag = { kind: "vertex", bodyId: selection.id, index: vi, lastWorld: world, moved: false };
+        const anchor = scene.bodyControlWorld(scene.getBody(selection.id)!)[vi];
+        leftDrag = { kind: "vertex", bodyId: selection.id, index: vi, grabOffset: sub(world, anchor), moved: false };
         canvas.style.cursor = "move";
       } else {
         // Otherwise select what's under the cursor; if it's movable, begin a drag of it.
         handleSelectClick(world);
-        if (selection && (selection.kind === "body" || selection.kind === "joint")) {
-          leftDrag = { kind: selection.kind, id: selection.id, lastWorld: world, moved: false };
+        if (selection?.kind === "body") {
+          const anchor = bodyDragAnchor(selection.id, world); // centroid or nearest corner
+          leftDrag = {
+            kind: "body",
+            id: selection.id,
+            anchorOffset: sub(anchor, scene.getBody(selection.id)!.pos),
+            grabOffset: sub(world, anchor),
+            moved: false,
+          };
+          canvas.style.cursor = "move";
+        } else if (selection?.kind === "joint") {
+          const anchor = scene.jointWorld(scene.getJoint(selection.id)!);
+          leftDrag = { kind: "joint", id: selection.id, grabOffset: sub(world, anchor), moved: false };
           canvas.style.cursor = "move";
         }
       }
@@ -536,11 +629,12 @@ canvas.addEventListener("mousemove", (e) => {
   }
 
   if (leftDrag) {
-    const delta = sub(world, leftDrag.lastWorld);
+    // Snap the dragged anchor to the grid (in absolute terms), preserving where it was grabbed.
+    const target = snap(sub(world, leftDrag.grabOffset));
+    const delta = sub(target, dragAnchorWorld(leftDrag));
     if (leftDrag.kind === "vertex") scene.moveBodyVertex(leftDrag.bodyId, leftDrag.index, delta);
     else if (leftDrag.kind === "body") scene.moveBody(leftDrag.id, delta);
     else scene.moveJoint(leftDrag.id, delta);
-    leftDrag.lastWorld = world;
     leftDrag.moved = true;
     return;
   }
@@ -717,6 +811,8 @@ function frame(): void {
     sliderDraft: sliderDraftView(),
     bodyJointDraft: bodyJointDraftView(),
     driverJoint: driver?.jointId ?? null,
+    gridStep,
+    gridVisible,
   });
   requestAnimationFrame(frame);
 }

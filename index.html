@@ -19,6 +19,26 @@
           <button data-tool="ground" class="tool-btn" title="Ground a joint — fixed position, free rotation (G)">Ground</button>
           <button data-tool="slider" class="tool-btn" title="Constrain a joint to slide along a line (S)">Slider</button>
         </div>
+        <div class="group" id="grid-group">
+          <button id="grid-btn" class="active" title="Show or hide the grid (toggle)">Grid</button>
+          <button id="snap-btn" title="Snap placement and dragging to the grid (toggle)">Snap</button>
+          <label class="select-label" title="Grid spacing in world units (1–200)">
+            <input id="grid-size" type="number" min="1" max="200" step="1" value="40" />
+            <select id="grid-size-presets" title="Pick a preset grid size">
+              <option value="" selected disabled hidden>·</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="5">5</option>
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="25">25</option>
+              <option value="40">40</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+        </div>
         <div class="group">
           <button id="save-btn" title="Save mechanism to a file">Save</button>
           <button id="load-btn" title="Load mechanism from a file">Load</button>

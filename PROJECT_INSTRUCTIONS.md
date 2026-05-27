@@ -17,6 +17,7 @@ shortcuts; free (body-less) joints that can be grounded as anchors; bodies built
 (freehand polygon, or from existing joints); rounded corners (editable control polygon +
 radius, re-editable by dragging corner handles); sliders with end-stops whose rail is either two
 joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded);
+a configurable, toggle-able grid with snap-to-grid for placement and dragging;
 and a converge-to-tolerance solver. The solver and shape/edit logic are verified
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
 
@@ -62,7 +63,8 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
   fixed world point — which unifies pin/ground/slider/driver. See "Solver notes" below.
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.2..5).
-- **renderer.ts** — draws under the camera transform in world space: world-locked grid,
+- **renderer.ts** — draws under the camera transform in world space: world-locked grid
+  (spacing = `gridStep`, drawn only when `gridVisible`),
   bodies (selected/hovered highlighted), slider rails as bounded segments with end-caps,
   ground symbols, joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
   rail joints get a green ring; **a loose free joint gets a muted dashed ring — but a free joint
@@ -74,6 +76,14 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
   pointer + key handling, persistence (save/load/autosave) plus a **snapshot undo/redo history**
   (`pushHistory`/`undo`/`redo`; `markDirty` records a step + autosaves), and the
   requestAnimationFrame render/solve loop. Also a `timedSolve` debug helper.
+  - **Grid / snapping** (session-only state, not persisted): `gridVisible`, `snapEnabled`,
+    `gridStep` (clamped 1–200 via `parseGridSize`; number input + a preset `<select>`). `snap(p)`
+    rounds a world point to the nearest grid intersection when enabled (identity otherwise) and is
+    applied to placements (free/attached joints, freehand vertices) and to drags. Drags snap an
+    **anchor** in absolute terms via a `grabOffset` captured at mousedown: a vertex reshape snaps
+    the grabbed control vertex; a whole-body move snaps whichever of the centroid / control
+    vertices is nearest the grab point (`bodyDragAnchor`), stored as a fixed `anchorOffset` from
+    the centroid (`dragAnchorWorld` reconstructs its live position).
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or first-letter shortcut —
@@ -110,6 +120,11 @@ Navigation (both modes):
 - **Mouse wheel** zooms toward the cursor.
 - **Right-drag always pans** the view (anywhere). Moving elements is left-drag in select mode
   (above); there is no right-drag-to-move.
+
+Grid (toolbar grid group):
+- **Grid** button toggles grid visibility; **Snap** button toggles snap-to-grid; a number field
+  (1–200, with a preset dropdown) sets the spacing — both the drawn grid and the snap increment.
+  Visibility and snapping are independent. See main.ts "Grid / snapping" above for what snaps.
 
 Undo / redo (draw mode):
 - `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+Shift+Z` / `Ctrl/Cmd+Y` redo. Snapshot-based: every mutation

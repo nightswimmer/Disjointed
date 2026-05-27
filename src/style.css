@@ -76,6 +76,38 @@ button.active {
   font-weight: 600;
 }
 
+.select-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+select,
+input[type="number"] {
+  background: #34373f;
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+input[type="number"]#grid-size {
+  width: 56px;
+  cursor: text;
+}
+
+.select-label {
+  gap: 2px;
+}
+
+select#grid-size-presets {
+  padding: 5px 2px;
+}
+
 .spacer {
   flex: 1;
 }

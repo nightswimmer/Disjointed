@@ -30,11 +30,14 @@ export interface RenderInput {
   bodyJointDraft: { outline: Vec2[]; preview: Vec2[] | null } | null;
   /** Joint currently being dragged in simulation. */
   driverJoint: number | null;
+  /** Spacing of the world-locked grid (and the snap increment), in world units. */
+  gridStep: number;
+  /** Whether to draw the world-locked grid. */
+  gridVisible: boolean;
 }
 
 /** On-screen joint radius in CSS pixels (kept constant regardless of zoom). */
 const JOINT_R = 6;
-const GRID_STEP = 40; // world units
 
 interface JointRoles {
   pinned: Set<number>;
@@ -85,7 +88,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   const right = (w - view.tx) / s;
   const bottom = (h - view.ty) / s;
 
-  drawGrid(ctx, left, top, right, bottom, px(1));
+  if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep);
 
   // Bodies.
   const selectedBody =
@@ -238,16 +241,17 @@ function drawGrid(
   top: number,
   right: number,
   bottom: number,
-  lineWidth: number
+  lineWidth: number,
+  step: number
 ): void {
   ctx.strokeStyle = "#26282f";
   ctx.lineWidth = lineWidth;
   ctx.beginPath();
-  for (let x = Math.floor(left / GRID_STEP) * GRID_STEP; x <= right; x += GRID_STEP) {
+  for (let x = Math.floor(left / step) * step; x <= right; x += step) {
     ctx.moveTo(x, top);
     ctx.lineTo(x, bottom);
   }
-  for (let y = Math.floor(top / GRID_STEP) * GRID_STEP; y <= bottom; y += GRID_STEP) {
+  for (let y = Math.floor(top / step) * step; y <= bottom; y += step) {
     ctx.moveTo(left, y);
     ctx.lineTo(right, y);
   }
