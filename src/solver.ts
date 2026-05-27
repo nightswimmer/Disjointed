@@ -9,7 +9,7 @@
  * Looping over all constraints several times converges the whole mechanism.
  */
 import { Body, Scene } from "./model";
-import { Vec2, add, cross, perp, scale, sub, normalize, len } from "./geometry";
+import { Vec2, add, cross, perp, scale, sub, len, dot } from "./geometry";
 
 export interface Driver {
   jointId: number;
@@ -75,17 +75,54 @@ function solveCoincident(
   if (bodyB && rB) applyImpulse(bodyB, rB, scale(lambda, -1));
 }
 
-/** Keep world point `pA` on `bodyA` on the infinite line (origin + unit dir). */
-function solveOnLine(pA: Vec2, bodyA: Body, origin: Vec2, dir: Vec2, relax: number): void {
-  const n = normalize(perp(dir)); // line normal
-  const rA = sub(pA, bodyA.pos);
-  const c = cross(sub(pA, origin), dir); // signed perpendicular distance
-  const rn = cross(rA, n);
-  const w = bodyA.invMass + bodyA.invInertia * rn * rn;
+/**
+ * Apply a scalar positional impulse driving the constraint `C = c → 0` along a
+ * unit direction `u` that is fixed in `bodyR`'s frame (so it rotates with it).
+ * Couples `bodyQ` (feels +u at pQ) and `bodyR` (feels −u). The rail-body angular
+ * Jacobian reduces to cross(u, pQ − posR); with `bodyR` grounded it becomes a
+ * single-body line constraint.
+ */
+function solveAxis(pQ: Vec2, bodyQ: Body, u: Vec2, bodyR: Body, c: number, relax: number): void {
+  const jQ = cross(sub(pQ, bodyQ.pos), u);
+  const jR = cross(u, sub(pQ, bodyR.pos));
+  const w =
+    bodyQ.invMass + bodyQ.invInertia * jQ * jQ +
+    bodyR.invMass + bodyR.invInertia * jR * jR;
   if (w < 1e-12) return;
-  // δc = -λ_s·w, so λ_s = c/w drives the perpendicular distance c to zero.
-  const lambda = scale(n, (c / w) * relax);
-  applyImpulse(bodyA, rA, lambda);
+  const lambda = (-c / w) * relax;
+  bodyQ.pos = add(bodyQ.pos, scale(u, bodyQ.invMass * lambda));
+  bodyQ.angle += bodyQ.invInertia * jQ * lambda;
+  bodyR.pos = add(bodyR.pos, scale(u, -bodyR.invMass * lambda));
+  bodyR.angle += bodyR.invInertia * jR * lambda;
+}
+
+/**
+ * Slider/prismatic constraint with end-stops: keep `pQ` (a joint on `bodyQ`) on
+ * the line through rail points `pA`,`pB` (two joints on `bodyR`) AND between them.
+ * The perpendicular part holds it on the rail; the tangential part is one-sided —
+ * it only activates once `pQ` passes an endpoint, clamping it back into the span.
+ */
+function solveSliderRail(
+  pQ: Vec2,
+  bodyQ: Body,
+  pA: Vec2,
+  pB: Vec2,
+  bodyR: Body,
+  relax: number
+): void {
+  const d = sub(pB, pA);
+  const dl = len(d);
+  if (dl < 1e-9) return; // degenerate rail (rail joints coincide)
+  const dir = scale(d, 1 / dl);
+  const n = perp(dir); // unit normal to the rail
+
+  // Hold the rider on the rail line (n ⊥ dir, so this doesn't change the position along dir).
+  solveAxis(pQ, bodyQ, n, bodyR, dot(sub(pQ, pA), n), relax);
+
+  // Clamp the rider between the endpoints: only correct when it has overshot one.
+  const s = dot(sub(pQ, pA), dir); // signed position along the rail from pA
+  if (s < 0) solveAxis(pQ, bodyQ, dir, bodyR, s, relax);
+  else if (s > dl) solveAxis(pQ, bodyQ, dir, bodyR, s - dl, relax);
 }
 
 /** One Gauss-Seidel sweep over the structural constraints (pin / ground / slider). */
@@ -104,10 +141,26 @@ function sweepStructural(scene: Scene, relax: number): void {
       const body = scene.getBody(j.bodyId)!;
       solveCoincident(scene.jointWorld(j), body, con.anchor, null, relax);
     } else if (con.kind === "slider") {
-      const j = scene.getJoint(con.joint);
-      if (!j) continue;
-      const body = scene.getBody(j.bodyId)!;
-      solveOnLine(scene.jointWorld(j), body, con.origin, con.dir, relax);
+      const ja = scene.getJoint(con.railA);
+      const jb = scene.getJoint(con.railB);
+      if (!ja || !jb) continue;
+      if (ja.bodyId !== jb.bodyId) continue; // rail joints must share a body
+      const bodyR = scene.getBody(ja.bodyId)!;
+      for (const riderId of con.riders) {
+        const jq = scene.getJoint(riderId);
+        if (!jq) continue;
+        const bodyQ = scene.getBody(jq.bodyId)!;
+        if (bodyQ.id === bodyR.id) continue; // rider on the rail body: nothing to do
+        // Recompute the rail each rider, since a rider's reaction can move the rail body.
+        solveSliderRail(
+          scene.jointWorld(jq),
+          bodyQ,
+          scene.jointWorld(ja),
+          scene.jointWorld(jb),
+          bodyR,
+          relax
+        );
+      }
     }
   }
 }
@@ -119,15 +172,55 @@ function sweepStructural(scene: Scene, relax: number): void {
  * around a ground point) instead of overshooting and spinning the body.
  */
 const DRIVER_MAX_STEP = 8;
-/** Structural-only sweeps run after driving, guaranteeing hard constraints hold exactly. */
-const CLEANUP_SWEEPS = 30;
+/** Convergence target: keep sweeping until the worst constraint error is below this (world units). */
+const STRUCTURAL_TOL = 1e-4;
+/** Safety cap on convergence sweeps so an over-constrained scene can't loop forever. */
+const MAX_CLEANUP_SWEEPS = 1000;
+
+/** Largest positional error across all structural constraints (world units). */
+function structuralResidual(scene: Scene): number {
+  let max = 0;
+  for (const con of scene.constraints) {
+    if (con.kind === "pin") {
+      const ja = scene.getJoint(con.jointA);
+      const jb = scene.getJoint(con.jointB);
+      if (!ja || !jb) continue;
+      max = Math.max(max, len(sub(scene.jointWorld(ja), scene.jointWorld(jb))));
+    } else if (con.kind === "ground") {
+      const j = scene.getJoint(con.joint);
+      if (!j) continue;
+      max = Math.max(max, len(sub(scene.jointWorld(j), con.anchor)));
+    } else if (con.kind === "slider") {
+      const ja = scene.getJoint(con.railA);
+      const jb = scene.getJoint(con.railB);
+      if (!ja || !jb) continue;
+      const a = scene.jointWorld(ja);
+      const d = sub(scene.jointWorld(jb), a);
+      const dl = len(d);
+      if (dl < 1e-9) continue;
+      const dir = scale(d, 1 / dl);
+      for (const riderId of con.riders) {
+        const jq = scene.getJoint(riderId);
+        if (!jq) continue;
+        const q = sub(scene.jointWorld(jq), a);
+        const perpDist = Math.abs(dot(q, perp(dir))); // off the rail line
+        const s = dot(q, dir); // position along the rail
+        const overshoot = s < 0 ? -s : s > dl ? s - dl : 0; // past an endpoint
+        max = Math.max(max, perpDist, overshoot);
+      }
+    }
+  }
+  return max;
+}
 
 /**
  * Run the solver. `iterations` Gauss-Seidel sweeps over the structural
  * constraints (plus the optional soft mouse driver). `relax` under-relaxes the
- * structural corrections. After driving, extra structural-only sweeps ensure
- * ground/pin/slider constraints are satisfied exactly — the driver yields to
- * them, so it can never drag a ground point (or break a pin/slider) away.
+ * structural corrections. Afterwards, structural-only sweeps keep running until
+ * the worst constraint error falls below STRUCTURAL_TOL (or MAX_CLEANUP_SWEEPS
+ * is hit). This adapts to mechanism complexity — simple scenes converge in a
+ * couple of sweeps, closed loops get as many as they need — and makes the driver
+ * yield to the structural constraints, so it can never break a pin/ground/slider.
  */
 export function solve(scene: Scene, driver: Driver | null, iterations = 100, relax = 1): void {
   for (let iter = 0; iter < iterations; iter++) {
@@ -141,8 +234,10 @@ export function solve(scene: Scene, driver: Driver | null, iterations = 100, rel
     }
   }
 
-  // Structural constraints take strict priority over the driver.
-  if (driver) {
-    for (let i = 0; i < CLEANUP_SWEEPS; i++) sweepStructural(scene, relax);
+  // Converge structural constraints to tolerance; they take strict priority over
+  // the driver. Stops early once the mechanism is tight enough.
+  for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
+    if (structuralResidual(scene) < STRUCTURAL_TOL) break;
+    sweepStructural(scene, relax);
   }
 }

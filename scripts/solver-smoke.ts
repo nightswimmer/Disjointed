@@ -37,8 +37,22 @@ const couplerRight = scene.addJoint(coupler.id, { x: 360, y: 200 });
 
 scene.addGround(crankCenter.id, { x: 100, y: 200 });
 scene.addPin(crankPin.id, couplerLeft.id);
-// Constrain the coupler's far end to a horizontal slider rail.
-scene.addSlider(couplerRight.id, { x: 360, y: 200 }, { x: 1, y: 0 });
+
+// A grounded rail body gives a fixed horizontal track at y = 200; the coupler's far
+// end rides it. Two grounds fully lock the rail body, so the rail is world-fixed.
+// The rail spans the coupler end's full travel (~x 239–280) so the end-stops never trip.
+const railBody = scene.addBody([
+  { x: 210, y: 196 },
+  { x: 330, y: 196 },
+  { x: 330, y: 204 },
+  { x: 210, y: 204 },
+]);
+const railA = scene.addJoint(railBody.id, { x: 220, y: 200 });
+const railB = scene.addJoint(railBody.id, { x: 320, y: 200 });
+scene.addGround(railA.id, { x: 220, y: 200 });
+scene.addGround(railB.id, { x: 320, y: 200 });
+const railSlider = scene.addSlider(railA.id, railB.id);
+scene.attachSliderRider(railSlider.id, couplerRight.id);
 
 // Drive the crank pin around the pivot and verify constraints stay satisfied.
 let worstGround = 0;
@@ -53,13 +67,34 @@ for (let i = 0; i < 16; i++) {
   worstPin = Math.max(worstPin, dist(scene.jointWorld(crankPin), scene.jointWorld(couplerLeft)));
   worstSlide = Math.max(
     worstSlide,
-    distToLine(scene.jointWorld(couplerRight), { x: 360, y: 200 }, { x: 1, y: 0 })
+    distToLine(scene.jointWorld(couplerRight), { x: 220, y: 200 }, { x: 1, y: 0 })
   );
 }
 
 check("ground stays fixed", worstGround < 0.5, `max drift ${worstGround.toFixed(4)} px`);
 check("pin stays coincident", worstPin < 0.5, `max gap ${worstPin.toFixed(4)} px`);
 check("slider stays on rail", worstSlide < 0.5, `max offset ${worstSlide.toFixed(4)} px`);
+
+// --- Slider end-stops: the rider is clamped between the two rail joints. ---
+const limit = new Scene();
+const limRail = limit.addBody([{ x: -10, y: -6 }, { x: 110, y: -6 }, { x: 110, y: 6 }, { x: -10, y: 6 }]);
+const lr1 = limit.addJoint(limRail.id, { x: 0, y: 0 });
+const lr2 = limit.addJoint(limRail.id, { x: 100, y: 0 });
+limit.addGround(lr1.id, { x: 0, y: 0 });
+limit.addGround(lr2.id, { x: 100, y: 0 });
+const block = limit.addBody([{ x: 40, y: -6 }, { x: 60, y: -6 }, { x: 60, y: 6 }, { x: 40, y: 6 }]);
+const slide = limit.addJoint(block.id, { x: 50, y: 0 });
+const limSlider = limit.addSlider(lr1.id, lr2.id);
+limit.attachSliderRider(limSlider.id, slide.id);
+
+// Drive the rider far past the right end (x = 100) and the left end (x = 0).
+for (let i = 0; i < 60; i++) solve(limit, { jointId: slide.id, target: { x: 500, y: 0 } }, 40);
+const farEnd = limit.jointWorld(slide);
+for (let i = 0; i < 60; i++) solve(limit, { jointId: slide.id, target: { x: -500, y: 0 } }, 40);
+const nearEnd = limit.jointWorld(slide);
+
+check("rider stops at far end", farEnd.x <= 100.5 && Math.abs(farEnd.y) < 0.5, `x ${farEnd.x.toFixed(3)}, y ${farEnd.y.toFixed(3)}`);
+check("rider stops at near end", nearEnd.x >= -0.5 && Math.abs(nearEnd.y) < 0.5, `x ${nearEnd.x.toFixed(3)}, y ${nearEnd.y.toFixed(3)}`);
 
 // Crank pivot must remain on the ground after a full revolution.
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

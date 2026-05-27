@@ -2,11 +2,13 @@ import "./style.css";
 import { Scene, SceneData } from "./model";
 import { solve, Driver } from "./solver";
 import { render } from "./renderer";
-import { Vec2, add, dist, normalize, sub, vec } from "./geometry";
+import { Vec2, add, dist, sub, vec } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
-type Tool = "polygon" | "joint" | "connect" | "ground" | "slider";
+type Tool = "body" | "joint" | "connect" | "ground" | "slider";
+/** An existing element picked in normal/select mode. */
+type Selection = { kind: "body" | "joint" | "slider"; id: number };
 
 /** Pick / close thresholds in screen (CSS) pixels — converted to world units via the view. */
 const PICK_RADIUS = 12;
@@ -21,12 +23,15 @@ const scene = new Scene();
 
 // --- interaction state ---------------------------------------------------
 let mode: Mode = "draw";
-let tool: Tool = "polygon";
-let draftPolygon: Vec2[] = [];
+/** Armed draw tool, or null for normal/select mode. Tools disarm after one use. */
+let tool: Tool | null = null;
+let draftBody: Vec2[] = [];
 let cursor: Vec2 | null = null; // world coordinates
 let hoverJoint: number | null = null;
-let selectedJoint: number | null = null; // first pick for connect/slider
-let sliderDraftJoint: number | null = null;
+let hoverBody: number | null = null; // body under the cursor in normal mode
+let selectedJoint: number | null = null; // first pick for connect
+let sliderDraftIds: number[] = []; // rail joints picked so far for the slider tool (0–2)
+let selection: Selection | null = null; // element selected in normal mode
 let driver: Driver | null = null;
 /** Body poses saved when entering simulation, restored when leaving. */
 let savedPoses: Map<number, { pos: Vec2; angle: number }> | null = null;
@@ -64,18 +69,20 @@ function defaultCursor(): string {
 }
 
 // --- hint text -----------------------------------------------------------
-const HINTS: Record<Mode | Tool, string> = {
+const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint to drive the mechanism.",
-  polygon: "Click to add vertices · click the first point or double-click to close · Esc to cancel.",
+  select: "Click a body or joint to select it · Delete to remove it · pick a tool to add elements.",
+  body: "Click to add vertices · click the first point or double-click to close · Esc to cancel.",
   joint: "Click inside a body to attach a joint point.",
-  connect: "Click two joints on different bodies to pin them together.",
+  connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
   ground: "Click a joint to lock its position (it can still rotate).",
-  slider: "Click a joint, then click again to set the direction of its rail.",
+  slider: "Click two joints on the same body to create a slider rail.",
 };
 
 function updateHint(): void {
-  hintEl.textContent = mode === "sim" ? HINTS.sim : HINTS[tool];
+  if (mode === "sim") hintEl.textContent = HINTS.sim;
+  else hintEl.textContent = tool === null ? HINTS.select : HINTS[tool];
 }
 
 // --- toolbar wiring ------------------------------------------------------
@@ -106,7 +113,7 @@ function setMode(next: Mode): void {
   resetTransient();
   if (next === "sim") {
     savedPoses = scene.snapshotPoses();
-    solve(scene, null, 40); // settle so pins/grounds/sliders are satisfied
+    timedSolve("settle", null, 40); // settle so pins/grounds/sliders are satisfied
   } else if (savedPoses) {
     scene.restorePoses(savedPoses); // restore the drawn layout for editing
     savedPoses = null;
@@ -129,10 +136,21 @@ function setTool(next: Tool): void {
   updateHint();
 }
 
+/** Return to normal/select mode after a tool finishes placing one element. */
+function disarmTool(): void {
+  tool = null;
+  resetTransient();
+  document
+    .querySelectorAll<HTMLButtonElement>(".tool-btn")
+    .forEach((b) => b.classList.remove("active"));
+  updateHint();
+}
+
 function resetTransient(): void {
-  draftPolygon = [];
+  draftBody = [];
   selectedJoint = null;
-  sliderDraftJoint = null;
+  sliderDraftIds = [];
+  selection = null;
   driver = null;
 }
 
@@ -217,69 +235,133 @@ function restoreAutosave(): void {
 
 // --- drawing-mode click handling ----------------------------------------
 function handleDrawClick(p: Vec2): void {
+  // `placed` marks a fully completed element; the tool then disarms to normal mode.
+  // The body tool spans many clicks, so it disarms itself in finishBody().
+  let placed = false;
   switch (tool) {
-    case "polygon":
-      addPolygonPoint(p);
+    case "body":
+      addBodyPoint(p);
       break;
     case "joint": {
-      const body = scene.bodyAt(p);
-      if (body) scene.addJoint(body.id, p);
+      // Place a joint in every overlapping body and pin them all together, so a
+      // click in a shared zone creates a revolute connection between those bodies.
+      const bodies = scene.bodiesAt(p);
+      if (bodies.length > 0) {
+        const joints = bodies.map((b) => scene.addJoint(b.id, p));
+        for (let i = 1; i < joints.length; i++) scene.addPin(joints[0].id, joints[i].id);
+        placed = true;
+      }
       break;
     }
     case "connect": {
       const j = scene.jointAt(p, pickRadius());
-      if (!j) {
+      if (selectedJoint === null) {
+        // First pick: the joint to connect.
+        if (j) selectedJoint = j.id;
+        break;
+      }
+      // Second pick: another joint → pin them; or a slider line → attach as a rider.
+      if (j) {
+        if (j.id !== selectedJoint) {
+          const a = scene.getJoint(selectedJoint)!;
+          if (a.bodyId !== j.bodyId) {
+            scene.addPin(selectedJoint, j.id);
+            placed = true;
+          }
+        }
         selectedJoint = null;
         break;
       }
-      if (selectedJoint === null) {
-        selectedJoint = j.id;
-      } else if (selectedJoint !== j.id) {
-        const a = scene.getJoint(selectedJoint)!;
-        if (a.bodyId !== j.bodyId) scene.addPin(selectedJoint, j.id);
+      const s = scene.sliderAt(p, pickRadius());
+      if (s) {
+        const rider = scene.getJoint(selectedJoint)!;
+        if (rider.bodyId !== scene.getJoint(s.railA)!.bodyId) {
+          scene.attachSliderRider(s.id, selectedJoint);
+          placed = true;
+        }
         selectedJoint = null;
+        break;
       }
+      selectedJoint = null; // clicked empty space — cancel the pending pick
       break;
     }
     case "ground": {
       const j = scene.jointAt(p, pickRadius());
-      if (j) scene.addGround(j.id, scene.jointWorld(j));
+      if (j) {
+        scene.addGround(j.id, scene.jointWorld(j));
+        placed = true;
+      }
       break;
     }
     case "slider": {
+      // Two joints on the same body define a slider rail. Attach riders later via Connect.
       const j = scene.jointAt(p, pickRadius());
-      if (sliderDraftJoint === null) {
-        if (j) sliderDraftJoint = j.id;
+      if (!j) break;
+      if (sliderDraftIds.length === 0) {
+        sliderDraftIds = [j.id];
       } else {
-        const jt = scene.getJoint(sliderDraftJoint)!;
-        const origin = scene.jointWorld(jt);
-        const dir = normalize(sub(p, origin));
-        if (dir.x !== 0 || dir.y !== 0) scene.addSlider(jt.id, origin, dir);
-        sliderDraftJoint = null;
+        const a = scene.getJoint(sliderDraftIds[0])!;
+        if (j.id === a.id) break; // same joint clicked again — ignore
+        if (j.bodyId === a.bodyId) {
+          scene.addSlider(a.id, j.id);
+          placed = true;
+        } else {
+          sliderDraftIds = [j.id]; // different body — restart the rail here
+        }
       }
       break;
     }
   }
   markDirty();
+  if (placed) disarmTool();
 }
 
-function addPolygonPoint(p: Vec2): void {
-  if (draftPolygon.length >= 3 && dist(p, draftPolygon[0]) < CLOSE_RADIUS / view.scale) {
-    finishPolygon();
+/** Normal/select mode: pick a joint (preferred), then a slider rail, then a body. */
+function handleSelectClick(p: Vec2): void {
+  const j = scene.jointAt(p, pickRadius());
+  if (j) {
+    selection = { kind: "joint", id: j.id };
+    return;
+  }
+  const s = scene.sliderAt(p, pickRadius());
+  if (s) {
+    selection = { kind: "slider", id: s.id };
+    return;
+  }
+  const body = scene.bodyAt(p);
+  selection = body ? { kind: "body", id: body.id } : null;
+}
+
+/** Delete the currently selected element and its dependent features. */
+function deleteSelection(): void {
+  if (!selection) return;
+  if (selection.kind === "body") scene.removeBody(selection.id);
+  else if (selection.kind === "joint") scene.removeJoint(selection.id);
+  else scene.removeConstraint(selection.id); // slider: remove it, keep the joints
+  selection = null;
+  markDirty();
+}
+
+function addBodyPoint(p: Vec2): void {
+  if (draftBody.length >= 3 && dist(p, draftBody[0]) < CLOSE_RADIUS / view.scale) {
+    finishBody();
     return;
   }
   // Ignore near-duplicate points (also de-dupes the 2nd click of a double-click).
-  const last = draftPolygon[draftPolygon.length - 1];
+  const last = draftBody[draftBody.length - 1];
   if (last && dist(p, last) < 4 / view.scale) return;
-  draftPolygon.push(p);
+  draftBody.push(p);
 }
 
-function finishPolygon(): void {
-  if (draftPolygon.length >= 3) {
-    scene.addBody(draftPolygon);
+function finishBody(): void {
+  if (draftBody.length >= 3) {
+    scene.addBody(draftBody);
+    draftBody = [];
     markDirty();
+    disarmTool();
+    return;
   }
-  draftPolygon = [];
+  draftBody = [];
 }
 
 // --- pointer events ------------------------------------------------------
@@ -300,7 +382,8 @@ canvas.addEventListener("mousedown", (e) => {
 
   if (e.button !== 0) return;
   if (mode === "draw") {
-    handleDrawClick(world);
+    if (tool === null) handleSelectClick(world);
+    else handleDrawClick(world);
   } else {
     const j = scene.jointAt(world, pickRadius());
     if (j) {
@@ -321,14 +404,26 @@ canvas.addEventListener("mousemove", (e) => {
       view.ty += s.y - rightDrag.lastScreen.y;
       rightDrag.lastScreen = s;
     } else {
-      const body = scene.getBody(rightDrag.bodyId);
-      if (body) body.pos = add(body.pos, sub(world, rightDrag.lastWorld));
+      const delta = sub(world, rightDrag.lastWorld);
+      if (mode === "draw") {
+        // Draw mode: persistent move — drag the ground anchors along with the body.
+        scene.moveBody(rightDrag.bodyId, delta);
+      } else {
+        // Simulate mode: non-destructive nudge — only the pose moves (restored on exit).
+        const body = scene.getBody(rightDrag.bodyId);
+        if (body) body.pos = add(body.pos, delta);
+      }
       rightDrag.lastWorld = world;
     }
     return;
   }
 
   hoverJoint = scene.jointAt(world, pickRadius())?.id ?? null;
+  // In normal/select mode, also highlight the body under the cursor (when no joint is).
+  hoverBody =
+    mode === "draw" && tool === null && hoverJoint === null
+      ? scene.bodyAt(world)?.id ?? null
+      : null;
   if (mode === "sim" && driver) driver.target = world;
 });
 
@@ -362,29 +457,83 @@ canvas.addEventListener("mouseleave", () => {
 });
 
 canvas.addEventListener("dblclick", () => {
-  if (mode === "draw" && tool === "polygon") finishPolygon();
+  if (mode === "draw" && tool === "body") finishBody();
 });
 
+/** Draw-tool shortcuts: each tool is armed by the first letter of its name. */
+const TOOL_KEYS: Record<string, Tool> = {
+  b: "body",
+  j: "joint",
+  c: "connect",
+  g: "ground",
+  s: "slider",
+};
+
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") resetTransient();
-  else if (e.key === "Enter" && mode === "draw" && tool === "polygon") finishPolygon();
+  if (e.key === "Escape") {
+    // Abort the current placement and return to normal/select mode.
+    if (mode === "draw") disarmTool();
+    else resetTransient();
+    return;
+  }
+  if (e.key === "Enter" && mode === "draw" && tool === "body") {
+    finishBody();
+    return;
+  }
+  if (
+    (e.key === "Delete" || e.key === "Backspace") &&
+    mode === "draw" &&
+    tool === null &&
+    selection
+  ) {
+    deleteSelection();
+    return;
+  }
+  // Tool shortcuts (draw mode only; ignore browser/OS modifier combos).
+  if (mode === "draw" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    const t = TOOL_KEYS[e.key.toLowerCase()];
+    if (t) {
+      setTool(t);
+      e.preventDefault();
+    }
+  }
 });
 
 // --- main loop -----------------------------------------------------------
+/** Run a solve and log how long the calculation took (debug). */
+function timedSolve(label: string, drv: Driver | null, iterations = 100): void {
+  const t0 = performance.now();
+  solve(scene, drv, iterations);
+  console.log(`[Disjointed] ${label} solve: ${(performance.now() - t0).toFixed(3)} ms`);
+}
+
+/** Joints currently highlighted as in-progress tool picks. */
+function activeJoints(): number[] {
+  if (mode !== "draw") return [];
+  if (tool === "connect") return selectedJoint !== null ? [selectedJoint] : [];
+  if (tool === "slider") return sliderDraftIds;
+  return [];
+}
+
+/** Rail-joint positions picked so far for the slider tool, with the live cursor. */
+function sliderDraftView(): { rail: Vec2[]; cursor: Vec2 } | null {
+  if (mode !== "draw" || tool !== "slider" || sliderDraftIds.length === 0 || !cursor) return null;
+  return { rail: sliderDraftIds.map((id) => scene.jointWorld(scene.getJoint(id)!)), cursor };
+}
+
 function frame(): void {
-  if (mode === "sim" && driver) solve(scene, driver);
+  if (mode === "sim" && driver) timedSolve("drive", driver);
   render(ctx, {
     scene,
     view,
     mode,
-    draftPolygon: mode === "draw" && tool === "polygon" ? draftPolygon : null,
+    draftBody: mode === "draw" && tool === "body" ? draftBody : null,
     cursor,
     hoverJoint,
-    selectedJoint,
-    sliderDraft:
-      sliderDraftJoint !== null && cursor
-        ? { joint: scene.jointWorld(scene.getJoint(sliderDraftJoint)!), cursor }
-        : null,
+    hoverBody: mode === "draw" && tool === null ? hoverBody : null,
+    activeJoints: activeJoints(),
+    selection: mode === "draw" ? selection : null,
+    sliderDraft: sliderDraftView(),
     driverJoint: driver?.jointId ?? null,
   });
   requestAnimationFrame(frame);

@@ -10,6 +10,8 @@ import {
   vec,
   sub,
   dist,
+  normalize,
+  distToLine,
   polygonCentroid,
   polygonArea,
   polygonInertiaAboutCentroid,
@@ -51,13 +53,19 @@ export interface GroundConstraint {
   anchor: Vec2;
 }
 
-/** A joint is constrained to lie on a fixed world line (origin + unit direction). */
+/**
+ * A slider / prismatic rail: the segment between `railA` and `railB` — two joints
+ * on one body. Any joint in `riders` (on other bodies) is confined to that segment
+ * and slides along it. The rail moves with its body, so it couples the rail's body
+ * to each rider's body. (For a world-fixed track, put the rail joints on a grounded
+ * body.) A rail with no riders is just a (selectable, deletable) guide.
+ */
 export interface SliderConstraint {
   kind: "slider";
   id: number;
-  joint: number;
-  origin: Vec2;
-  dir: Vec2;
+  railA: number;
+  railB: number;
+  riders: number[];
 }
 
 export type Constraint = PinConstraint | GroundConstraint | SliderConstraint;
@@ -70,7 +78,7 @@ export interface SceneData {
   constraints: Constraint[];
 }
 
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 3;
 
 const PALETTE = [
   "#4f9dff",
@@ -132,10 +140,19 @@ export class Scene {
     return c;
   }
 
-  addSlider(joint: number, origin: Vec2, dir: Vec2): SliderConstraint {
-    const c: SliderConstraint = { kind: "slider", id: this.id(), joint, origin, dir };
+  /** Create a slider rail from two joints (`railA`/`railB`) on the same body. */
+  addSlider(railA: number, railB: number): SliderConstraint {
+    const c: SliderConstraint = { kind: "slider", id: this.id(), railA, railB, riders: [] };
     this.constraints.push(c);
     return c;
+  }
+
+  /** Attach a joint as a rider of an existing slider (confined to its rail segment). */
+  attachSliderRider(sliderId: number, jointId: number): void {
+    const c = this.constraints.find((x) => x.id === sliderId && x.kind === "slider") as
+      | SliderConstraint
+      | undefined;
+    if (c && !c.riders.includes(jointId)) c.riders.push(jointId);
   }
 
   getBody(id: number): Body | undefined {
@@ -165,6 +182,15 @@ export class Scene {
     return undefined;
   }
 
+  /** Every body whose polygon contains the point (topmost first). */
+  bodiesAt(p: Vec2): Body[] {
+    const hits: Body[] = [];
+    for (let i = this.bodies.length - 1; i >= 0; i--) {
+      if (pointInPolygon(p, this.bodyWorldVerts(this.bodies[i]))) hits.push(this.bodies[i]);
+    }
+    return hits;
+  }
+
   /** Nearest joint within `radius` world units of the point, or undefined. */
   jointAt(p: Vec2, radius: number): Joint | undefined {
     let best: Joint | undefined;
@@ -184,8 +210,69 @@ export class Scene {
     return this.constraints.some(
       (c) =>
         (c.kind === "ground" && c.joint === jointId) ||
-        (c.kind === "slider" && c.joint === jointId)
+        (c.kind === "slider" &&
+          (c.railA === jointId || c.railB === jointId || c.riders.includes(jointId)))
     );
+  }
+
+  /** Slider whose rail line passes within `radius` (world units) of the point. */
+  sliderAt(p: Vec2, radius: number): SliderConstraint | undefined {
+    for (let i = this.constraints.length - 1; i >= 0; i--) {
+      const c = this.constraints[i];
+      if (c.kind !== "slider") continue;
+      const ja = this.getJoint(c.railA);
+      const jb = this.getJoint(c.railB);
+      if (!ja || !jb) continue;
+      const a = this.jointWorld(ja);
+      const dir = normalize(sub(this.jointWorld(jb), a));
+      if (dir.x === 0 && dir.y === 0) continue;
+      if (distToLine(p, a, dir) <= radius) return c;
+    }
+    return undefined;
+  }
+
+  /**
+   * Translate the body's pose by `delta`, carrying along the world-space ground
+   * anchors of any grounded joints on it (so the ground moves with the part).
+   */
+  moveBody(bodyId: number, delta: Vec2): void {
+    const body = this.getBody(bodyId);
+    if (!body) return;
+    body.pos = add(body.pos, delta);
+    const owned = new Set(this.joints.filter((j) => j.bodyId === bodyId).map((j) => j.id));
+    for (const c of this.constraints) {
+      if (c.kind === "ground" && owned.has(c.joint)) c.anchor = add(c.anchor, delta);
+    }
+  }
+
+  /** Remove a body along with its joints, pruning the constraints that used them. */
+  removeBody(id: number): void {
+    const removed = new Set(this.joints.filter((j) => j.bodyId === id).map((j) => j.id));
+    this.bodies = this.bodies.filter((b) => b.id !== id);
+    this.joints = this.joints.filter((j) => j.bodyId !== id);
+    this.pruneConstraints(removed);
+  }
+
+  /** Remove a single joint, pruning the constraints that used it. */
+  removeJoint(id: number): void {
+    this.joints = this.joints.filter((j) => j.id !== id);
+    this.pruneConstraints(new Set([id]));
+  }
+
+  /**
+   * Drop or trim constraints after some joints are removed: a pin/ground that uses
+   * a gone joint is dropped; a slider is dropped if a *rail* joint is gone, but only
+   * loses the affected *riders* otherwise (the rail itself survives).
+   */
+  private pruneConstraints(removed: Set<number>): void {
+    this.constraints = this.constraints
+      .map((c) => pruneConstraint(c, removed))
+      .filter((c): c is Constraint => c !== null);
+  }
+
+  /** Remove a single constraint (e.g. a slider) by id, leaving its joints intact. */
+  removeConstraint(id: number): void {
+    this.constraints = this.constraints.filter((c) => c.id !== id);
   }
 
   clear(): void {
@@ -218,7 +305,20 @@ export class Scene {
     // Deep-clone so loaded data is independent of the parsed JSON object.
     this.bodies = data.bodies.map((b) => ({ ...b, pos: vec(b.pos.x, b.pos.y), local: b.local.map((p) => vec(p.x, p.y)) }));
     this.joints = data.joints.map((j) => ({ ...j, local: vec(j.local.x, j.local.y) }));
-    this.constraints = data.constraints.map((c) => ({ ...c }));
+    // Sliders: drop the legacy origin+dir form (no railA); migrate the earlier
+    // single-`slider` rider field to the `riders` array; normalize riders to an array.
+    this.constraints = data.constraints
+      .filter((c) => c.kind !== "slider" || (c as { railA?: number }).railA !== undefined)
+      .map((c) => {
+        if (c.kind !== "slider") return { ...c };
+        const s = c as SliderConstraint & { slider?: number };
+        const riders = Array.isArray(s.riders)
+          ? s.riders.slice()
+          : typeof s.slider === "number"
+          ? [s.slider]
+          : [];
+        return { kind: "slider", id: s.id, railA: s.railA, railB: s.railB, riders };
+      });
     const ids = [
       ...this.bodies.map((b) => b.id),
       ...this.joints.map((j) => j.id),
@@ -243,4 +343,17 @@ export class Scene {
       }
     }
   }
+}
+
+/**
+ * Given a set of removed joint ids, return the constraint to keep — possibly a
+ * trimmed copy — or `null` to drop it. Pins/grounds drop if any referenced joint is
+ * gone; sliders drop only if a rail joint is gone, otherwise they shed dead riders.
+ */
+function pruneConstraint(c: Constraint, removed: Set<number>): Constraint | null {
+  if (c.kind === "pin") return removed.has(c.jointA) || removed.has(c.jointB) ? null : c;
+  if (c.kind === "ground") return removed.has(c.joint) ? null : c;
+  if (removed.has(c.railA) || removed.has(c.railB)) return null;
+  const riders = c.riders.filter((r) => !removed.has(r));
+  return riders.length === c.riders.length ? c : { ...c, riders };
 }

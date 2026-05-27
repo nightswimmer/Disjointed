@@ -1,19 +1,26 @@
 /** Canvas rendering of the scene plus transient editor/sim overlays. */
 import { Scene } from "./model";
-import { Vec2, add, scale, normalize, sub } from "./geometry";
+import { Vec2, sub } from "./geometry";
 import { View } from "./view";
 
 export interface RenderInput {
   scene: Scene;
   view: View;
   mode: "draw" | "sim";
-  draftPolygon: Vec2[] | null;
+  draftBody: Vec2[] | null;
   cursor: Vec2 | null;
   hoverJoint: number | null;
-  /** First joint picked for the connect/slider tools. */
-  selectedJoint: number | null;
-  /** While defining a slider line: the joint position and current cursor. */
-  sliderDraft: { joint: Vec2; cursor: Vec2 } | null;
+  /** Body hovered in normal/select mode (for pre-selection feedback). */
+  hoverBody: number | null;
+  /** Joints highlighted as in-progress tool picks (connect's first pick, slider rail picks). */
+  activeJoints: number[];
+  /** The element selected in normal/select mode (highlighted, deletable). */
+  selection: { kind: "body" | "joint" | "slider"; id: number } | null;
+  /**
+   * While defining a slider: the world positions of the rail joints picked so far
+   * (1 → previewing toward the cursor; 2 → rail set, awaiting the riding joint).
+   */
+  sliderDraft: { rail: Vec2[]; cursor: Vec2 } | null;
   /** Joint currently being dragged in simulation. */
   driverJoint: number | null;
 }
@@ -25,11 +32,17 @@ const GRID_STEP = 40; // world units
 interface JointRoles {
   pinned: Set<number>;
   grounded: Set<number>;
-  slider: Set<number>;
+  slider: Set<number>; // joints that ride a rail
+  rail: Set<number>; // joints that define a rail
 }
 
 function collectRoles(scene: Scene): JointRoles {
-  const roles: JointRoles = { pinned: new Set(), grounded: new Set(), slider: new Set() };
+  const roles: JointRoles = {
+    pinned: new Set(),
+    grounded: new Set(),
+    slider: new Set(),
+    rail: new Set(),
+  };
   for (const c of scene.constraints) {
     if (c.kind === "pin") {
       roles.pinned.add(c.jointA);
@@ -37,7 +50,9 @@ function collectRoles(scene: Scene): JointRoles {
     } else if (c.kind === "ground") {
       roles.grounded.add(c.joint);
     } else if (c.kind === "slider") {
-      roles.slider.add(c.joint);
+      for (const r of c.riders) roles.slider.add(r);
+      roles.rail.add(c.railA);
+      roles.rail.add(c.railB);
     }
   }
   return roles;
@@ -66,40 +81,53 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   drawGrid(ctx, left, top, right, bottom, px(1));
 
   // Bodies.
+  const selectedBody =
+    input.selection?.kind === "body" ? input.selection.id : null;
   for (const body of scene.bodies) {
     const verts = scene.bodyWorldVerts(body);
+    const isSelected = body.id === selectedBody;
+    const isHover = body.id === input.hoverBody;
     ctx.beginPath();
     verts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
     ctx.closePath();
-    ctx.fillStyle = body.color + "33";
+    ctx.fillStyle = body.color + (isSelected ? "55" : isHover ? "44" : "33");
     ctx.fill();
-    ctx.strokeStyle = body.color;
-    ctx.lineWidth = px(2);
+    ctx.strokeStyle = isSelected ? "#ffffff" : body.color;
+    ctx.lineWidth = px(isSelected || isHover ? 3 : 2);
     ctx.stroke();
   }
 
-  const span = Math.hypot(right - left, bottom - top);
-
-  // Slider rails (drawn under joints).
-  ctx.lineWidth = px(1.5);
+  // Slider rails (drawn under joints): a bounded segment between the two rail joints,
+  // with end-caps marking the stops that the riding joint is clamped between.
+  const selectedSlider =
+    input.selection?.kind === "slider" ? input.selection.id : null;
   for (const c of scene.constraints) {
     if (c.kind !== "slider") continue;
-    drawRail(ctx, c.origin, c.dir, span);
+    const ja = scene.getJoint(c.railA);
+    const jb = scene.getJoint(c.railB);
+    if (!ja || !jb) continue;
+    const sel = c.id === selectedSlider;
+    drawRailSegment(
+      ctx,
+      scene.jointWorld(ja),
+      scene.jointWorld(jb),
+      sel ? "#ffffff" : "#5bd6a6",
+      px(sel ? 2.5 : 1.5),
+      px(6)
+    );
   }
 
-  // In-progress slider line.
+  // In-progress slider: dashed preview of the rail segment being defined.
   if (input.sliderDraft) {
-    const dir = normalize(sub(input.sliderDraft.cursor, input.sliderDraft.joint));
-    if (dir.x !== 0 || dir.y !== 0) {
-      ctx.setLineDash([px(6), px(4)]);
-      drawRail(ctx, input.sliderDraft.joint, dir, span);
-      ctx.setLineDash([]);
-    }
+    const { rail, cursor } = input.sliderDraft;
+    ctx.setLineDash([px(6), px(4)]);
+    drawRailSegment(ctx, rail[0], rail.length >= 2 ? rail[1] : cursor, "#9aa0ac", px(1.5), px(6));
+    ctx.setLineDash([]);
   }
 
-  // Draft polygon being drawn.
-  if (input.draftPolygon && input.draftPolygon.length > 0) {
-    const pts = input.draftPolygon;
+  // Draft body being drawn.
+  if (input.draftBody && input.draftBody.length > 0) {
+    const pts = input.draftBody;
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = px(1.5);
     ctx.setLineDash([px(5), px(4)]);
@@ -117,11 +145,13 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   }
 
   // Joints.
+  const selectedJointId =
+    input.selection?.kind === "joint" ? input.selection.id : null;
   const roles = collectRoles(scene);
   for (const j of scene.joints) {
     const p = scene.jointWorld(j);
     const isHover = input.hoverJoint === j.id;
-    const isSelected = input.selectedJoint === j.id;
+    const isSelected = input.activeJoints.includes(j.id) || j.id === selectedJointId;
     const isDriver = input.driverJoint === j.id;
 
     let fill = "#e6e8ee";
@@ -132,7 +162,13 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     const r = px(isHover || isSelected || isDriver ? JOINT_R + 2 : JOINT_R);
     dot(ctx, p, r, fill);
     ctx.lineWidth = px(2);
-    ctx.strokeStyle = isDriver ? "#ff4d4d" : isSelected ? "#ffffff" : "#1e1f24";
+    ctx.strokeStyle = isDriver
+      ? "#ff4d4d"
+      : isSelected
+      ? "#ffffff"
+      : roles.rail.has(j.id)
+      ? "#5bd6a6" // rail-defining joints get a green ring
+      : "#1e1f24";
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.stroke();
@@ -170,14 +206,28 @@ function dot(ctx: CanvasRenderingContext2D, p: Vec2, r: number, color: string): 
   ctx.fill();
 }
 
-/** Draw an infinite-ish line clipped to the visible world span. */
-function drawRail(ctx: CanvasRenderingContext2D, origin: Vec2, dir: Vec2, span: number): void {
-  const a = add(origin, scale(dir, span));
-  const b = add(origin, scale(dir, -span));
-  ctx.strokeStyle = "#5bd6a6";
+/** Draw the bounded rail segment a→b with perpendicular end-caps marking the stops. */
+function drawRailSegment(
+  ctx: CanvasRenderingContext2D,
+  a: Vec2,
+  b: Vec2,
+  color: string,
+  lineWidth: number,
+  cap: number
+): void {
+  const d = sub(b, a);
+  const l = Math.hypot(d.x, d.y);
+  if (l < 1e-6) return;
+  const n = { x: (-d.y / l) * cap, y: (d.x / l) * cap }; // perpendicular cap offset
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
   ctx.beginPath();
   ctx.moveTo(a.x, a.y);
   ctx.lineTo(b.x, b.y);
+  ctx.moveTo(a.x - n.x, a.y - n.y);
+  ctx.lineTo(a.x + n.x, a.y + n.y);
+  ctx.moveTo(b.x - n.x, b.y - n.y);
+  ctx.lineTo(b.x + n.x, b.y + n.y);
   ctx.stroke();
 }
 

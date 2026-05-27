@@ -13,22 +13,32 @@ coupled by joints (pins, grounds, sliders) that you can then drag and watch move
 - **Constraints**
   - **Pin** — connect two joints on different bodies; they share a position but can rotate freely.
   - **Ground** — lock a joint's position; its body can still rotate about it.
-  - **Slider** — confine a joint to a straight rail.
+  - **Slider** — a rail defined by two joints on one body. Joints attached to it (riders) slide
+    along the segment **between** those two joints, with hard stops at each end. The rail moves
+    with its body, so it couples two bodies (put the rail on a grounded body for a fixed track).
 
 ## Usage
 
 There are two modes, switched from the toolbar.
 
 ### Draw
-| Tool | Action |
-| --- | --- |
-| **Polygon** | Click to add vertices. Click the first vertex or double-click (or press Enter) to close. Esc cancels. |
-| **Joint** | Click inside a body to attach a joint point. |
-| **Connect** | Click two joints on different bodies to pin them together. |
-| **Ground** | Click a joint to lock its position (it can still rotate). |
-| **Slider** | Click a joint, then click again to set the direction of its rail. |
+Tools are **one-shot**: pick a tool (or press its shortcut), place one element, and you return
+to **Select** mode. Press **Esc** to abort the current placement.
 
-Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = on a slider.
+| Tool | Shortcut | Action |
+| --- | --- | --- |
+| **Body** | `B` | Click to add vertices. Click the first vertex or double-click (or press Enter) to close. Esc cancels. |
+| **Joint** | `J` | Click inside a body to attach a joint. Click where bodies overlap to drop a joint in each and pin them together. |
+| **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
+| **Ground** | `G` | Click a joint to lock its position (it can still rotate). |
+| **Slider** | `S` | Click two joints on the **same body** to create a slider rail. Attach riders later with Connect. |
+
+**Select mode** (no tool active, the default): click a body, joint, or slider rail to select it;
+press **Delete** to remove it. Deleting a body removes its joints and their constraints; deleting
+a slider rail leaves the joints in place; deleting a joint detaches it from any rail it rode.
+
+Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
+rail-defining joints get a **green ring**.
 
 ### Simulate
 Drag any joint. It becomes the *driving joint*: its body follows the cursor and every
@@ -39,7 +49,7 @@ it can actually reach. Your drawn layout is preserved when you switch back to Dr
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor.
 - **Right-drag empty space** — pan the view.
-- **Right-drag a body** — move that body around.
+- **Right-drag a body** — move that body around (its ground anchors move with it).
 
 ### Save & load
 - **Save** downloads your mechanism as a `.json` file; **Load** opens one back up.
@@ -62,9 +72,11 @@ npm test         # headless constraint-solver smoke test
 
 A small **iterative position-based solver** (Gauss-Seidel projection) satisfies the
 constraints. Each body has a pose (centroid position + angle); each constraint nudges the
-poses with effective-mass positional impulses until the mechanism is consistent. The mouse
-driver is step-limited and yields to structural constraints, which keeps dragging stable even
-when you pull toward a point the mechanism can't reach.
+poses with effective-mass positional impulses. After driving, the solver keeps sweeping the
+structural constraints until the worst error is below a tolerance (capped), so complex or
+closed-loop mechanisms converge tightly instead of drifting. The mouse driver is step-limited
+and yields to structural constraints, which keeps dragging stable even when you pull toward a
+point the mechanism can't reach. Sliders are body-to-body prismatic constraints with end-stops.
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),
 `renderer.ts`, `main.ts`. Tests live in [`scripts/`](scripts/).

@@ -17,7 +17,9 @@ const j3 = a.addJoint(b2.id, { x: 200, y: 200 });
 const j4 = a.addJoint(b2.id, { x: 360, y: 200 });
 a.addGround(j1.id, { x: 100, y: 200 });
 a.addPin(j2.id, j3.id);
-a.addSlider(j4.id, { x: 360, y: 200 }, { x: 1, y: 0 });
+// Slider: rail = two joints on b1 (j1, j2); j4 (on b2) is attached as a rider.
+const slider = a.addSlider(j1.id, j2.id);
+a.attachSliderRider(slider.id, j4.id);
 
 // Serialize → JSON text → parse → load into a fresh scene (simulates save/load).
 const text = JSON.stringify(a.serialize());
@@ -37,6 +39,13 @@ check("joint world positions preserved", worstJoint < 1e-9, `max diff ${worstJoi
 
 const kinds = b.constraints.map((c) => c.kind).sort().join(",");
 check("constraint kinds preserved", kinds === "ground,pin,slider", kinds);
+
+const ls = b.constraints.find((c) => c.kind === "slider");
+check(
+  "slider riders preserved",
+  ls?.kind === "slider" && ls.riders.length === 1 && ls.riders[0] === j4.id,
+  ls?.kind === "slider" ? `riders=[${ls.riders}]` : "no slider"
+);
 
 // New ids must not collide with loaded ones.
 const maxId = Math.max(...b.bodies.map((x) => x.id), ...b.joints.map((x) => x.id), ...b.constraints.map((x) => x.id));
