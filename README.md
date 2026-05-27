@@ -46,6 +46,8 @@ from any rail.
 Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
 rail-defining joints get a **green ring**, and **free joints a dashed ring**.
 
+**Undo / redo:** `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Shift+Z` (or `Ctrl/Cmd+Y`) redoes — covering edits to the drawn layout.
+
 ### Simulate
 Drag any joint. It becomes the *driving joint*: its body follows the cursor and every
 connected body moves with it. Structural constraints always win over the cursor — a grounded

@@ -187,7 +187,7 @@ function canonicalData(): SceneData {
 }
 
 /** Debounced autosave of the drawn layout to localStorage. */
-function markDirty(): void {
+function scheduleAutosave(): void {
   clearTimeout(autosaveTimer);
   autosaveTimer = window.setTimeout(() => {
     try {
@@ -196,6 +196,47 @@ function markDirty(): void {
       /* storage unavailable / full — ignore */
     }
   }, 300);
+}
+
+// --- undo / redo (snapshot history of the drawn layout) ------------------
+const HISTORY_LIMIT = 100;
+const history: string[] = []; // JSON snapshots; history[historyIndex] is the current state
+let historyIndex = -1;
+
+/** Record the current state as a history step (deduped) and drop the redo branch. */
+function pushHistory(): void {
+  const snap = JSON.stringify(canonicalData());
+  if (historyIndex >= 0 && history[historyIndex] === snap) return; // nothing actually changed
+  history.splice(historyIndex + 1); // discard any redo entries past the current point
+  history.push(snap);
+  if (history.length > HISTORY_LIMIT) history.shift();
+  historyIndex = history.length - 1;
+}
+
+/** A scene mutation occurred: record an undo step and schedule an autosave. */
+function markDirty(): void {
+  pushHistory();
+  scheduleAutosave();
+}
+
+/** Restore a history snapshot without recording a new step. */
+function loadSnapshot(snap: string): void {
+  scene.load(JSON.parse(snap) as SceneData);
+  resetTransient(); // selection / drafts may reference ids that no longer exist
+  scheduleAutosave();
+}
+
+// Undo / redo apply to the drawn layout only (draw mode), not a running simulation.
+function undo(): void {
+  if (mode !== "draw" || historyIndex <= 0) return;
+  historyIndex--;
+  loadSnapshot(history[historyIndex]);
+}
+
+function redo(): void {
+  if (mode !== "draw" || historyIndex >= history.length - 1) return;
+  historyIndex++;
+  loadSnapshot(history[historyIndex]);
 }
 
 function saveToFile(): void {
@@ -561,6 +602,19 @@ const TOOL_KEYS: Record<string, Tool> = {
 };
 
 window.addEventListener("keydown", (e) => {
+  // Undo / redo: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y.
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === "z") {
+    e.preventDefault();
+    if (e.shiftKey) redo();
+    else undo();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === "y") {
+    e.preventDefault();
+    redo();
+    return;
+  }
   if (e.key === "Escape") {
     // Abort the current placement and return to normal/select mode.
     if (mode === "draw") disarmTool();
@@ -664,5 +718,6 @@ function frame(): void {
 
 resize();
 restoreAutosave();
+pushHistory(); // seed the undo history with the initial (restored) layout
 updateHint();
 requestAnimationFrame(frame);

@@ -67,8 +67,9 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
   expansion preview, slider rail preview). Cosmetic sizes are divided by the zoom.
 - **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state (tools are one-shot + have
   keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
-  pointer + key handling, persistence (save/load/autosave), and the requestAnimationFrame
-  render/solve loop. Also a `timedSolve` debug helper that logs each solve's duration.
+  pointer + key handling, persistence (save/load/autosave) plus a **snapshot undo/redo history**
+  (`pushHistory`/`undo`/`redo`; `markDirty` records a step + autosaves), and the
+  requestAnimationFrame render/solve loop. Also a `timedSolve` debug helper.
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or first-letter shortcut —
@@ -104,6 +105,11 @@ Navigation (both modes):
 - **Mouse wheel** zooms toward the cursor.
 - **Right-drag always pans** the view (anywhere). Moving elements is left-drag in select mode
   (above); there is no right-drag-to-move.
+
+Undo / redo (draw mode):
+- `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+Shift+Z` / `Ctrl/Cmd+Y` redo. Snapshot-based: every mutation
+  records a (deduped) JSON snapshot of the drawn layout; undo/redo restore snapshots without
+  recording new steps. History is seeded on startup and capped at `HISTORY_LIMIT` (100).
 
 Persistence:
 - **Save** downloads `mechanism-<timestamp>.json`; **Load** opens a `.json` via the file
