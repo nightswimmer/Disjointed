@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "tsx scripts/solver-smoke.ts && tsx scripts/ground-drag.ts && tsx scripts/persistence.ts && tsx scripts/build-body.ts && tsx scripts/shape-edit.ts"
+    "test": "tsx scripts/solver-smoke.ts && tsx scripts/ground-drag.ts && tsx scripts/persistence.ts && tsx scripts/build-body.ts && tsx scripts/shape-edit.ts && tsx scripts/free-rail.ts"
   },
   "devDependencies": {
     "tsx": "^4.22.3",

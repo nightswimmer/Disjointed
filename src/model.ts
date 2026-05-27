@@ -235,8 +235,23 @@ export class Scene {
     return c;
   }
 
-  /** Create a slider rail from two joints (`railA`/`railB`) on the same body. */
+  /**
+   * Create a slider rail from two joints (`railA`/`railB`). Normally these are two joints
+   * on the same body (a rail that moves with it). They may instead be two free joints, which
+   * define a track fixed in world space — in that case each free rail joint must be anchored,
+   * so any that isn't already grounded gets grounded here at its current position.
+   */
   addSlider(railA: number, railB: number): SliderConstraint {
+    for (const id of [railA, railB]) {
+      const j = this.getJoint(id);
+      if (
+        j &&
+        j.bodyId === null &&
+        !this.constraints.some((c) => c.kind === "ground" && c.joint === id)
+      ) {
+        this.addGround(id, this.jointWorld(j));
+      }
+    }
     const c: SliderConstraint = { kind: "slider", id: this.id(), railA, railB, riders: [] };
     this.constraints.push(c);
     return c;

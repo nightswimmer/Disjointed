@@ -16,9 +16,10 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
 - **Constraints**
   - **Pin** — connect two joints on different bodies; they share a position but can rotate freely.
   - **Ground** — lock a joint's position; its body can still rotate about it.
-  - **Slider** — a rail defined by two joints on one body. Joints attached to it (riders) slide
-    along the segment **between** those two joints, with hard stops at each end. The rail moves
-    with its body, so it couples two bodies (put the rail on a grounded body for a fixed track).
+  - **Slider** — a rail defined by two joints. Joints attached to it (riders) slide along the
+    segment **between** those two joints, with hard stops at each end. The rail can be two joints
+    on one body (it moves with the body, coupling two bodies) or **two free joints**, which makes
+    a track fixed in world space — the two free joints get grounded automatically.
 
 ## Usage
 
@@ -34,7 +35,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
-| **Slider** | `S` | Click two joints on the **same body** to create a slider rail. Attach riders later with Connect. |
+| **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
 
 **Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
 **Drag** the selection to move it. A selected body shows **corner handles** — drag one to reshape
@@ -86,7 +87,8 @@ driver all share one routine. After driving, the solver keeps sweeping the struc
 constraints until the worst error is below a tolerance (capped), so complex or closed-loop
 mechanisms converge tightly instead of drifting. The driver is step-limited and yields to
 structural constraints, keeping dragging stable even when you pull toward a point the mechanism
-can't reach. Sliders are body-to-body prismatic constraints with end-stops. Body outlines are
+can't reach. Sliders are prismatic constraints with end-stops; the rail is either a body (which
+moves) or a world-fixed line built from two grounded free joints. Body outlines are
 generated from a control polygon + corner radius (rounded corners via fillet or outward offset).
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),

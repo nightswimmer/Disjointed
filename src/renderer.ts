@@ -186,8 +186,9 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     const isSelected = input.activeJoints.includes(j.id) || j.id === selectedJointId;
     const isDriver = input.driverJoint === j.id;
     // A body-less joint reads as "loose" (muted dashed ring) only while unconstrained;
-    // once it rides a slider it's anchored to the rail, so it renders like any rider.
-    const isFree = j.bodyId === null && !roles.slider.has(j.id);
+    // once it rides a slider or defines a (grounded) rail it's anchored, so it renders
+    // like any constrained joint rather than a loose point.
+    const isFree = j.bodyId === null && !roles.slider.has(j.id) && !roles.rail.has(j.id);
 
     let fill = "#e6e8ee";
     if (roles.pinned.has(j.id)) fill = "#4f9dff";

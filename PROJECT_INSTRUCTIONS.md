@@ -15,8 +15,9 @@ Two modes:
 End-to-end draw → simulate works, with: select/move/delete editing; one-shot tools + keyboard
 shortcuts; free (body-less) joints that can be grounded as anchors; bodies built two ways
 (freehand polygon, or from existing joints); rounded corners (editable control polygon +
-radius, re-editable by dragging corner handles); body-to-body sliders (rail + riders, with
-end-stops); and a converge-to-tolerance solver. The solver and shape/edit logic are verified
+radius, re-editable by dragging corner handles); sliders with end-stops whose rail is either two
+joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded);
+and a converge-to-tolerance solver. The solver and shape/edit logic are verified
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
 
 ### Tech stack
@@ -41,8 +42,10 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
     own world position (the solver treats it as a movable point particle).
   - Constraints: `pin` (two joints coincide, free rotation), `ground` (a joint locked to a
     fixed world point — grounding a free joint makes a body-less anchor), `slider` (a rail =
-    two joints `railA`/`railB` on one body, plus a `riders` list of joints confined to the
-    segment between them, with end-stops). The rail moves with its body, coupling two bodies.
+    two joints `railA`/`railB`, plus a `riders` list of joints confined to the segment between
+    them, with end-stops). The rail is either **two joints on one body** (it moves with that
+    body, coupling two bodies) or **two free joints** (a track fixed in world space — `addSlider`
+    auto-grounds them). Riders may be body joints or free joints.
   - Body construction: `addBody(worldVerts, radius?, round?)` (freehand uses `fillet`);
     `buildBodyFromJoints(jointIds, margin)` stores **one control point per joint** with
     `round: "offset"` (free joints are absorbed; joints on other bodies get a coincident new
@@ -63,7 +66,7 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
   bodies (selected/hovered highlighted), slider rails as bounded segments with end-caps,
   ground symbols, joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
   rail joints get a green ring; **a loose free joint gets a muted dashed ring — but a free joint
-  that rides a slider drops the dashed ring and renders as a normal rider**), corner-handle squares
+  that rides a slider or defines a rail drops the dashed ring and renders as anchored**), corner-handle squares
   for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
   expansion preview, slider rail preview). Cosmetic sizes are divided by the zoom.
 - **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state (tools are one-shot + have
@@ -87,8 +90,9 @@ aborts the current placement.
   *slider rail* to attach the joint to it as a rider.
 - **Ground** (`G`) — click a joint to lock its world position (grounding a free joint makes a
   body-less anchor; a body can still rotate about a grounded joint).
-- **Slider** (`S`) — click two joints on the *same body* to create a slider rail (riders are
-  attached later via Connect).
+- **Slider** (`S`) — click two joints on the *same body* (a rail that moves with it), or two
+  *free joints* (a world-fixed track — they get grounded automatically), to create a slider rail
+  (riders are attached later via Connect). A free+body or cross-body pair restarts the draft.
 
 Select mode (default, no tool armed):
 - Click a body, joint, or slider rail to **select** it (highlighted); **left-drag** moves the
@@ -132,11 +136,16 @@ Persistence:
   at most a small amount per sweep. This keeps the linearized correction valid, so an
   unreachable target makes the joint walk stably along its feasible path to the nearest
   reachable point instead of overshooting.
-- **Slider** = body-to-body prismatic with end-stops. `solveAxis` applies a scalar impulse
-  along a direction fixed in the rail body's frame; the slider runs it for the perpendicular
-  (stay on the line) plus a one-sided tangential limit at each rail endpoint. The rail-body
-  angular Jacobian reduces to `cross(u, pQ − posR)`; with the rail body grounded it degenerates
-  to a fixed-line constraint. (Rail joints must be on a body; a rider may be free.)
+- **Slider** = prismatic with end-stops. `solveAxis` applies a scalar impulse along a direction
+  fixed in the rail's frame; the slider runs it for the perpendicular (stay on the line) plus a
+  one-sided tangential limit at each rail endpoint. The rail side is a **`RailHost`** (like a
+  `Host`, but the reaction acts at the rider's point via `applyAt`): either a rigid body
+  (translate + rotate) or an **immovable world line** (zero mass/inertia, no-op `applyAt`). A
+  `railKind` predicate classifies a rail as `"body"` (two joints on one body), `"fixed"` (two
+  grounded free joints), or `null` (unsolvable) — the sweep and the residual check share it so
+  they agree. The body-rail angular Jacobian reduces to `cross(u, pQ − posR)`; the fixed rail is
+  just the zero-mass degenerate case (single-sided, like a grounded body). A rider may be a body
+  joint or a free joint.
 - **Host abstraction** (`hostFor`): every constraint participant is reduced to a `{ point, pos,
   invMass, invInertia, apply }` host — a body (translate + rotate), a free joint (translate
   only, zero inertia), or a fixed world point (immovable). This unifies pin/ground/slider/driver
@@ -148,6 +157,9 @@ Persistence:
 - **solver-smoke.ts** — grounded slider-crank (coupler riding a grounded rail) driven through
   a full revolution; asserts ground / pin / slider stay satisfied (sub-micron). Plus an
   end-stop scene: a rider driven far past each rail end is clamped to the endpoints.
+- **free-rail.ts** — a slider built from two **free** joints: asserts `addSlider` auto-grounds
+  both, a free rider stays on the world-fixed line (zero offset), the rail joints never move,
+  and the rider clamps at each grounded endpoint.
 - **ground-drag.ts** — drags a joint on a grounded body to far/off-axis/unreachable targets;
   asserts the ground never moves and the joint snaps to the nearest reachable angle.
 - **persistence.ts** — round-trips a scene through `serialize → JSON → load`; asserts counts,
@@ -183,12 +195,6 @@ Persistence:
 - Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
   control polygon is a snapshot taken at build time.
 - More joint types as needed.
-- **World-anchored slider rail from two grounded free joints** (discussed, not built). Today a
-  rail must be two joints on one body; a fixed-in-space track requires making a body and grounding
-  it. Two grounded free joints would express the same thing directly (the static/degenerate rail).
-  Needs: generalize the solver's rail side from a `Body` to a host (body *or* immovable), and let
-  the Slider tool accept two free joints — with the rule that a free-joint rail requires **both**
-  endpoints grounded (a partially-grounded free rail has no rigid frame and would be unstable).
 - Optional: File System Access API for true "re-open the last file by path" (Chromium only).
   Current persistence is download/upload + localStorage autosave (restores the last session).
 

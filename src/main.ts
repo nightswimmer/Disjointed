@@ -328,7 +328,10 @@ function handleDrawClick(p: Vec2): void {
       const s = scene.sliderAt(p, pickRadius());
       if (s) {
         const rider = scene.getJoint(selectedJoint)!;
-        if (rider.bodyId !== scene.getJoint(s.railA)!.bodyId) {
+        const railBodyId = scene.getJoint(s.railA)!.bodyId;
+        // Attach unless the rider is rigid to the rail's own body (it would do nothing).
+        // A free rider on a free/fixed rail (both bodyId null) is allowed.
+        if (rider.bodyId === null || rider.bodyId !== railBodyId) {
           scene.attachSliderRider(s.id, selectedJoint);
           placed = true;
         }
@@ -347,7 +350,8 @@ function handleDrawClick(p: Vec2): void {
       break;
     }
     case "slider": {
-      // Two joints on the same body define a slider rail. Attach riders later via Connect.
+      // A rail is two joints on the same body (moves with it), or two free joints (a track
+      // fixed in world space — addSlider grounds them). Attach riders later via Connect.
       const j = scene.jointAt(p, pickRadius());
       if (!j) break;
       if (sliderDraftIds.length === 0) {
@@ -355,12 +359,13 @@ function handleDrawClick(p: Vec2): void {
       } else {
         const a = scene.getJoint(sliderDraftIds[0])!;
         if (j.id === a.id) break; // same joint clicked again — ignore
-        // A rail is two joints on the same (real) body; free joints can't be a rail.
-        if (a.bodyId !== null && j.bodyId === a.bodyId) {
+        const sameBody = a.bodyId !== null && j.bodyId === a.bodyId;
+        const bothFree = a.bodyId === null && j.bodyId === null;
+        if (sameBody || bothFree) {
           scene.addSlider(a.id, j.id);
           placed = true;
         } else {
-          sliderDraftIds = [j.id]; // different/free body — restart the rail here
+          sliderDraftIds = [j.id]; // mismatched (different bodies, or free + body) — restart here
         }
       }
       break;

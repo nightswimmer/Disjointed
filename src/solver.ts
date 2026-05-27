@@ -32,6 +32,19 @@ interface Host {
   apply(imp: Vec2): void;
 }
 
+/**
+ * The rail side of a slider. Like a Host, but the impulse acts at an arbitrary world
+ * point (the rider's), not the rail's own anchor — so it carries `applyAt(point, imp)`.
+ * A rail is either a rigid body (two rail joints on it) or an immovable world line (two
+ * grounded free joints), in which case `invMass`/`invInertia` are 0 and `applyAt` is a no-op.
+ */
+interface RailHost {
+  pos: Vec2;
+  invMass: number;
+  invInertia: number;
+  applyAt(point: Vec2, imp: Vec2): void;
+}
+
 /** Apply impulse `imp` at world `point` to a rigid body (updates pos + angle). */
 function bodyImpulse(body: Body, point: Vec2, imp: Vec2): void {
   const r = sub(point, body.pos);
@@ -113,30 +126,31 @@ function solveCoincident(a: Host, b: Host, relax: number, maxStep = Infinity): v
 
 /**
  * Apply a scalar positional impulse driving `C = c → 0` along a unit direction `u`
- * fixed in the rail body's frame. Couples the `rider` host (feels +u at its point)
- * and `railBody` (feels −u, applied at the rider's point). The rail-body angular
- * Jacobian reduces to cross(u, point − posR); a grounded rail makes it single-sided.
+ * fixed in the rail's frame. Couples the `rider` host (feels +u at its point) and the
+ * `rail` (feels −u, applied at the rider's point). The rail angular Jacobian reduces to
+ * cross(u, point − rail.pos); a grounded/immovable rail makes it single-sided.
  */
-function solveAxis(rider: Host, railBody: Body, u: Vec2, c: number, relax: number): void {
+function solveAxis(rider: Host, rail: RailHost, u: Vec2, c: number, relax: number): void {
   const pQ = rider.point;
   const jQ = cross(sub(pQ, rider.pos), u);
-  const jR = cross(u, sub(pQ, railBody.pos));
+  const jR = cross(u, sub(pQ, rail.pos));
   const w =
     rider.invMass + rider.invInertia * jQ * jQ +
-    railBody.invMass + railBody.invInertia * jR * jR;
+    rail.invMass + rail.invInertia * jR * jR;
   if (w < 1e-12) return;
   const lambda = (-c / w) * relax;
   rider.apply(scale(u, lambda));
-  bodyImpulse(railBody, pQ, scale(u, -lambda));
+  rail.applyAt(pQ, scale(u, -lambda));
 }
 
 /**
  * Slider/prismatic constraint with end-stops: keep the `rider` on the line through
- * rail points `pA`,`pB` (two joints on `railBody`) AND between them. The
- * perpendicular part holds it on the rail; the tangential part is one-sided — it
- * only activates once the rider passes an endpoint, clamping it back into the span.
+ * rail points `pA`,`pB` AND between them. The perpendicular part holds it on the rail;
+ * the tangential part is one-sided — it only activates once the rider passes an
+ * endpoint, clamping it back into the span. The `rail` host carries the reaction (a
+ * rigid body, or an immovable world line for a rail of two grounded free joints).
  */
-function solveSliderRail(rider: Host, pA: Vec2, pB: Vec2, railBody: Body, relax: number): void {
+function solveSliderRail(rider: Host, pA: Vec2, pB: Vec2, rail: RailHost, relax: number): void {
   const d = sub(pB, pA);
   const dl = len(d);
   if (dl < 1e-9) return; // degenerate rail (rail joints coincide)
@@ -144,12 +158,37 @@ function solveSliderRail(rider: Host, pA: Vec2, pB: Vec2, railBody: Body, relax:
   const n = perp(dir); // unit normal to the rail
 
   // Hold the rider on the rail line (n ⊥ dir, so this doesn't change position along dir).
-  solveAxis(rider, railBody, n, dot(sub(rider.point, pA), n), relax);
+  solveAxis(rider, rail, n, dot(sub(rider.point, pA), n), relax);
 
   // Clamp the rider between the endpoints: only correct when it has overshot one.
   const s = dot(sub(rider.point, pA), dir);
-  if (s < 0) solveAxis(rider, railBody, dir, s, relax);
-  else if (s > dl) solveAxis(rider, railBody, dir, s - dl, relax);
+  if (s < 0) solveAxis(rider, rail, dir, s, relax);
+  else if (s > dl) solveAxis(rider, rail, dir, s - dl, relax);
+}
+
+/**
+ * Classify a slider's rail: two joints on one body ("body" — a moving rail), two
+ * grounded free joints ("fixed" — a track fixed in world space), or an unsolvable
+ * configuration (null, e.g. a free rail joint that isn't grounded).
+ */
+function railKind(ja: Joint, jb: Joint, grounded: Set<number>): "body" | "fixed" | null {
+  if (ja.bodyId !== null && ja.bodyId === jb.bodyId) return "body";
+  if (ja.bodyId === null && jb.bodyId === null && grounded.has(ja.id) && grounded.has(jb.id))
+    return "fixed";
+  return null;
+}
+
+/** Build the rail's reaction host for one solve: a moving body, or an immovable world line. */
+function railHostFor(railBody: Body | null, fixedPos: Vec2): RailHost {
+  if (railBody) {
+    return {
+      pos: railBody.pos,
+      invMass: railBody.invMass,
+      invInertia: railBody.invInertia,
+      applyAt: (pt, imp) => bodyImpulse(railBody, pt, imp),
+    };
+  }
+  return { pos: fixedPos, invMass: 0, invInertia: 0, applyAt() {} };
 }
 
 /** One Gauss-Seidel sweep over the structural constraints (pin / ground / slider). */
@@ -168,18 +207,20 @@ function sweepStructural(scene: Scene, relax: number, grounded: Set<number>): vo
       const ja = scene.getJoint(con.railA);
       const jb = scene.getJoint(con.railB);
       if (!ja || !jb) continue;
-      if (ja.bodyId === null || ja.bodyId !== jb.bodyId) continue; // rail = two joints on one body
-      const railBody = scene.getBody(ja.bodyId)!;
+      // Rail = two joints on one body (moving), or two grounded free joints (fixed track).
+      const kind = railKind(ja, jb, grounded);
+      if (!kind) continue;
+      const railBody = kind === "body" ? scene.getBody(ja.bodyId!)! : null;
       for (const riderId of con.riders) {
         const jq = scene.getJoint(riderId);
         if (!jq) continue;
-        if (jq.bodyId === railBody.id) continue; // rider rigid to the rail: nothing to do
+        if (railBody && jq.bodyId === railBody.id) continue; // rider rigid to the rail: nothing to do
         // Recompute the rail each rider, since a rider's reaction can move the rail body.
         solveSliderRail(
           hostFor(scene, jq, grounded),
           scene.jointWorld(ja),
           scene.jointWorld(jb),
-          railBody,
+          railHostFor(railBody, scene.jointWorld(ja)),
           relax
         );
       }
@@ -207,7 +248,7 @@ const STRUCTURAL_TOL = 1e-4;
 const MAX_CLEANUP_SWEEPS = 1000;
 
 /** Largest positional error across all structural constraints (world units). */
-function structuralResidual(scene: Scene): number {
+function structuralResidual(scene: Scene, grounded: Set<number>): number {
   let max = 0;
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
@@ -223,7 +264,7 @@ function structuralResidual(scene: Scene): number {
       const ja = scene.getJoint(con.railA);
       const jb = scene.getJoint(con.railB);
       if (!ja || !jb) continue;
-      if (ja.bodyId === null || ja.bodyId !== jb.bodyId) continue; // matches sweep's guard
+      if (!railKind(ja, jb, grounded)) continue; // matches sweep's guard
       const a = scene.jointWorld(ja);
       const d = sub(scene.jointWorld(jb), a);
       const dl = len(d);
@@ -265,7 +306,7 @@ export function solve(scene: Scene, driver: Driver | null, iterations = 100, rel
   // Converge structural constraints to tolerance; they take strict priority over
   // the driver. Stops early once the mechanism is tight enough.
   for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
-    if (structuralResidual(scene) < STRUCTURAL_TOL) break;
+    if (structuralResidual(scene, grounded) < STRUCTURAL_TOL) break;
     sweepStructural(scene, relax, grounded);
   }
 }
