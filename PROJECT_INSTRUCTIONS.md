@@ -18,11 +18,14 @@ shortcuts; free (body-less) joints that can be grounded as anchors; bodies built
 radius, re-editable by dragging corner handles, with vertices added/removed by double-click,
 and a fillet that handles convex + concave corners without overlapping on thin shapes);
 sliders with end-stops whose rail is either two
-joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded);
+joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded),
+with joints auto-attached as riders when placed on a rail (Joint tool or body-from-joints);
 a configurable, toggle-able grid with snap-to-grid for placement and dragging;
 editing utilities (copy/paste a body+its joints/constraints, mirror H/V in place, and a rotate
 tool that turns a body about its centroid or a node and snaps to 45°);
-and a converge-to-tolerance solver. The solver and shape/edit logic are verified
+and a converge-to-tolerance solver with **impossible-assembly handling** (grounds are sacred;
+unreachable pins/sliders are isolated, the rest still solves, and the breaks are drawn as red
+dotted lines plus an on-canvas error banner). The solver and shape/edit logic are verified
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
 
 ### Tech stack
@@ -60,8 +63,12 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
     auto-grounds them). Riders may be body joints or free joints.
   - Body construction: `addBody(worldVerts, radius?, round?)` (freehand uses `fillet`);
     `buildBodyFromJoints(jointIds, margin)` stores **one control point per joint** with
-    `round: "offset"` (free joints are absorbed; joints on other bodies get a coincident new
-    joint pinned to them). Editing: `moveBodyVertex`, `insertBodyVertex` (add a control vertex),
+    `round: "offset"`. Per joint: a **loose free joint (or a free slider rider) is absorbed**
+    into the new body; a **joint on another body, or a grounded free joint (an anchor)**, gets a
+    coincident new joint **pinned** to it (so the anchor stays independent); a **slider rail node
+    or a rider on another body** gets a coincident new joint **attached to that slider as a
+    rider** (the body connects to the slider, not pinned to a node). Editing: `moveBodyVertex`,
+    `insertBodyVertex` (add a control vertex),
     `removeBodyVertex` (drop one, kept ≥ 3), `setBodyRadius`, `moveJoint`, `moveBody` — all go
     through `rebuildBody`, so attached joints stay anchored.
   - Edit utilities: `rotateBody(id, pivot, delta)` rigidly turns a body about a fixed world
@@ -80,9 +87,13 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
     snapshot, `FORMAT_VERSION = 5`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies).
-- **solver.ts** — `solve(scene, driver, iterations, relax)`. Operates on a **host abstraction**
-  (`hostFor`): each constraint participant is a body, a free joint (translate-only point), or a
-  fixed world point — which unifies pin/ground/slider/driver. See "Solver notes" below.
+- **solver.ts** — `solve(scene, driver, iterations, relax): ConstraintBreak[]`. Operates on a
+  **host abstraction** (`hostFor`): each constraint participant is a body, a free joint
+  (translate-only point), or a fixed world point — which unifies pin/ground/slider/driver. A
+  separate **`pinHostFor`** makes *any* grounded joint (free or on a body) a fixed point when
+  something *pins* to it, so a pin can't drag the body a grounded joint sits on (the joint's own
+  ground constraint still uses the body host, to lock multi-ground bodies' rotation). Returns the
+  list of unsatisfiable **`ConstraintBreak`s** (empty when solvable). See "Solver notes" below.
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.2..5).
 - **renderer.ts** — draws under the camera transform in world space: world-locked grid
@@ -92,13 +103,19 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
   rail joints get a green ring; **a loose free joint gets a muted dashed ring — but a free joint
   that rides a slider or defines a rail drops the dashed ring and renders as anchored**), corner-handle squares
   for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
-  expansion preview, slider rail preview) and a rotate-pivot crosshair. Cosmetic sizes are
-  divided by the zoom.
+  expansion preview, slider rail preview) and a rotate-pivot crosshair. **Impossible-assembly
+  breaks** are drawn as **red dotted lines** between the points that can't meet (`input.breaks`,
+  sim mode only). Cosmetic sizes are divided by the zoom.
 - **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state (tools are one-shot + have
   keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
   pointer + key handling, persistence (save/load/autosave) plus a **snapshot undo/redo history**
   (`pushHistory`/`undo`/`redo`; `markDirty` records a step + autosaves), and the
-  requestAnimationFrame render/solve loop. Also a `timedSolve` debug helper.
+  requestAnimationFrame render/solve loop. `timedSolve` captures the solver's `ConstraintBreak`s
+  into `solveBreaks`; `updateSimError` shows/hides the red **"Assembly impossible"** banner
+  (`#sim-error`), and the breaks are passed to the renderer in sim mode (cleared on leaving sim).
+  The **Joint** tool auto-attaches a placed node to a slider when it lands on a rail/rail-node;
+  the **body-from-joints** draft turns a bare slider-rail click into a grid-snapped rider joint
+  (tracked in `jointDraftCreated`, removed if the draft is aborted). Also a `timedSolve` debug log.
   - **Edit utilities**: `copySelection`/`pasteAt` (clipboard is a `BodyClip` held in `main`;
     paste lands at the cursor, grid-snapped), `mirrorSelection("h"|"v")`, and a **rotate** tool.
     Rotate is a persistent mode (not one-shot): `startRotate` picks the pivot (a control node of
@@ -122,11 +139,14 @@ Draw-mode tools are **one-shot**: arming a tool (toolbar button or first-letter 
 aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
-  **existing joint**: build a body *from joints* — click joints to outline (free joints are
-  absorbed; joints on other bodies get pinned), click an already-added joint to finish, then
-  move the cursor out to size the outward margin (live preview) and click to finalize.
+  **existing joint**: build a body *from joints* — click joints to outline (loose free joints
+  absorbed; grounded free joints and joints on other bodies get a pinned twin; slider rail
+  nodes / cross-body riders get a twin attached to the slider as a rider; a bare **slider-rail**
+  click drops a rider point there), click an already-added joint to finish, then move the cursor
+  out to size the outward margin (live preview) and click to finalize.
 - **Joint** (`J`) — click inside a body to attach a joint; click where bodies overlap to drop
   a joint in each and pin them together; click **empty space** to place a free (body-less) joint.
+  A node placed on a **slider rail (or rail node)** is auto-attached to that slider as a rider.
 - **Connect** (`C`) — click a joint, then another joint on a *different* body to pin them, or a
   *slider rail* to attach the joint to it as a rider.
 - **Ground** (`G`) — click a joint to lock its world position (grounding a free joint makes a
@@ -158,6 +178,10 @@ Simulate mode:
 - Drag any joint. It becomes the driver; its body follows the cursor and connected bodies
   move with it. Entering sim snapshots all poses and runs a settle solve; leaving sim
   restores the drawn layout so editing is non-destructive.
+- **Impossible assemblies** are flagged, not faked: grounds never move, the solvable parts still
+  solve, and every unsatisfiable pin/slider draws a **red dotted line** between the two points
+  that can't meet (pulled as close as the assembly allows), with a red **"Assembly impossible"**
+  banner. A connected impossible piece does not disturb the parts that can be solved.
 
 Navigation (both modes):
 - **Mouse wheel** zooms toward the cursor.
@@ -210,6 +234,24 @@ Persistence:
   and lets the solver move free joints. A **grounded free joint is treated as a fixed host for
   every constraint**, so a heavy body pinned to it is pulled onto the anchor (rather than the
   light point being shoved around).
+- **Grounds are sacred / inviolable.** `projectGrounds` runs at the end of every structural sweep
+  and snaps each grounded joint exactly onto its anchor (a grounded *body* joint by translating
+  its body — combined with the sweep's rotation that's a pivot about the anchor; a body with
+  several grounds is moved by the *average* correction, so conflicting grounds settle
+  deterministically rather than teleporting). Separately, **`pinHostFor`** makes *any* grounded
+  joint a fixed point for pins/sliders/the driver, so a pin to a grounded joint-on-a-body pulls
+  only the *other* side and never drags that body. (The joint's own ground constraint still uses
+  `hostFor`'s body host, which is what locks rotation when a body has two grounds.)
+- **Impossible assemblies → break-and-exclude.** `solve` returns `ConstraintBreak[]`. Phase A is
+  the normal solve; if it converges, no breaks. If not, Phase B greedily disables the
+  worst-violated *non-ground* unit (a pin, or a single slider rider — ids are globally unique)
+  and re-settles (under-relaxed for stability) until the remaining active constraints can be
+  satisfied — grounds are never disabled, so the disabled units are exactly the unreachable
+  pins/sliders. Phase C (`closeBroken`) gently pulls each disabled unit shut using only the
+  assembly's leftover freedom, fully re-tightening the active set after each nudge so solved
+  parts are never disturbed. `breaksForBroken` reports the remaining gaps (plus any ground that
+  genuinely can't be met). This whole path runs **only** for unconverged scenes, so solvable
+  simulation is unaffected (and dragging an impossible scene costs a few ms).
 
 ### Tests (`scripts/`, run with `npm test`, executed via tsx)
 - **solver-smoke.ts** — grounded slider-crank (coupler riding a grounded rail) driven through
@@ -225,7 +267,14 @@ Persistence:
   independence, and rejection of malformed data.
 - **build-body.ts** — `buildBodyFromJoints`: free joints absorbed, a coincident pinned joint
   added for a joint on another body, expanded body has area / contains the joints, min-joint
-  rejection.
+  rejection; a **grounded free joint** kept as an independent anchor (pinned twin, not absorbed);
+  a **slider rail node** gets a rider twin (no pin); a **free slider rider** absorbed and stays a
+  rider.
+- **impossible-assembly.ts** — over-constrained scenes: a grounded joint stays *exactly* fixed
+  while an unreachable pin breaks; a solvable four-bar with an impossible pendant keeps the
+  four-bar intact (only the pendant flagged); and the key case — two grounded pieces pinned at
+  their free ends, plus a third piece pinned across both grounds at an impossible span — solves
+  the good pin and flags only the third piece, with both grounds unmoved.
 - **shape-edit.ts** — `filletPolygon` (convex + concave validity, radius 0 passthrough; a
   **reflex corner rounds into the notch, not the material**; a **narrow-neck shape stays
   simple — no self-intersection — across radii up to 200**) and body editing (`setBodyRadius` /
@@ -262,6 +311,17 @@ Persistence:
 - **Fillets overlapped / folded on thin shapes.** Each corner was clamped independently to half
   its shortest edge, so neighbouring fillets collided on short edges (and could fold a narrow
   neck). Fixed with a shared-edge budget (proportional split) plus an opposite-edge clamp.
+- **Building a body from a *grounded* free joint absorbed the anchor.** A grounded free joint used
+  in a body-from-joints build was folded into the body (losing the standalone anchor). Fixed: it
+  now gets a coincident pinned twin like a joint on another body, keeping the anchor independent.
+- **Impossible assemblies moved grounded joints and over-reported.** The old fixed-sweep solver
+  let an unsatisfiable constraint shove grounded joints around, and in a connected assembly the
+  error smeared across *every* constraint so solvable joints were flagged too. Root cause for the
+  smearing: a pin to a **grounded joint that sits on a body** used a movable body host, so it
+  dragged that body. Fixed with (a) `pinHostFor` — any grounded joint is a fixed point for
+  pins/sliders/driver; (b) hard ground projection every sweep; and (c) break-and-exclude: only the
+  genuinely unreachable pins/sliders are disabled and drawn as red dotted lines (grounds never
+  move), with an on-canvas error banner.
 
 ## Backlog / next steps (not yet built)
 - Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
