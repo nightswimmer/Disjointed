@@ -36,6 +36,16 @@ connected body moves with it. Structural constraints always win over the cursor 
 body can only rotate about its ground point, and the dragged joint snaps to the nearest point
 it can actually reach. Your drawn layout is preserved when you switch back to Draw.
 
+### Navigate
+- **Mouse wheel** — zoom toward the cursor.
+- **Right-drag empty space** — pan the view.
+- **Right-drag a body** — move that body around.
+
+### Save & load
+- **Save** downloads your mechanism as a `.json` file; **Load** opens one back up.
+- Your work is also auto-saved in the browser and restored automatically the next time you
+  open the app.
+
 ## Development
 
 Requires Node.js (built with Node 24).
@@ -56,8 +66,8 @@ poses with effective-mass positional impulses until the mechanism is consistent.
 driver is step-limited and yields to structural constraints, which keeps dragging stable even
 when you pull toward a point the mechanism can't reach.
 
-Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `renderer.ts`,
-`main.ts`. Solver tests live in [`scripts/`](scripts/).
+Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),
+`renderer.ts`, `main.ts`. Tests live in [`scripts/`](scripts/).
 
 ## License
 

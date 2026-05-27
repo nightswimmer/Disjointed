@@ -20,8 +20,11 @@
           <button data-tool="slider" class="tool-btn" title="Constrain a joint to slide along a line">Slider</button>
         </div>
         <div class="group">
+          <button id="save-btn" title="Save mechanism to a file">Save</button>
+          <button id="load-btn" title="Load mechanism from a file">Load</button>
           <button id="clear-btn" title="Delete everything">Clear</button>
         </div>
+        <input id="file-input" type="file" accept=".json,application/json" hidden />
         <div class="spacer"></div>
         <div id="hint" class="hint"></div>
       </header>

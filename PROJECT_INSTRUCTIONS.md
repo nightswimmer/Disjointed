@@ -30,13 +30,19 @@ The interactive canvas (drawing/dragging) should be confirmed by eye via `npm ru
   - Constraints: `pin` (two joints coincide, free rotation), `ground` (a joint locked to a
     fixed world point), `slider` (a joint confined to a fixed world line).
   - Helpers: hit-testing (`bodyAt`, `jointAt`), pose snapshot/restore, role queries.
+  - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
+    snapshot; `load` deep-copies and recomputes `nextId` past all loaded ids).
 - **solver.ts** — `solve(scene, driver, iterations, relax)`. Per sweep it projects each
   structural constraint (effective-mass positional impulses), then applies the optional
   mouse driver. See "Solver notes" below.
-- **renderer.ts** — draws grid, bodies, slider rails, ground symbols, joints (color-coded:
-  blue = pinned, yellow = grounded, green = slider), plus draft overlays.
-- **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state, pointer + key handling,
-  and the requestAnimationFrame render/solve loop.
+- **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
+  `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.2..5).
+- **renderer.ts** — draws under the camera transform in world space: world-locked grid,
+  bodies, slider rails, ground symbols, joints (color-coded: blue = pinned, yellow =
+  grounded, green = slider), plus draft overlays. Cosmetic sizes (joint radius, line widths,
+  ground symbol) are divided by the zoom so they stay constant on screen.
+- **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state, the camera, pointer + key
+  handling, persistence (save/load/autosave), and the requestAnimationFrame render/solve loop.
 
 ### Interaction model
 Draw-mode tools:
@@ -52,6 +58,19 @@ Simulate mode:
   move with it. Entering sim snapshots all poses and runs a settle solve; leaving sim
   restores the drawn layout so editing is non-destructive.
 
+Navigation (both modes):
+- **Mouse wheel** zooms toward the cursor.
+- **Right-drag on empty space** pans the view.
+- **Right-drag on a body** moves that body (its joints move with it). In simulate mode this
+  is non-destructive — the drawn layout is restored on exit.
+
+Persistence:
+- **Save** downloads `mechanism-<timestamp>.json`; **Load** opens a `.json` via the file
+  picker (invalid files alert instead of breaking).
+- The drawn layout is autosaved to `localStorage` (debounced) on every mutation and restored
+  on startup. Simulated poses are never saved — save/autosave use the canonical (pre-sim)
+  poses, and loading exits sim and resets the view first.
+
 ### Solver notes (important design decisions)
 - Each constraint is satisfied with effective-mass positional impulses:
   `pos += invMass·λ`, `angle += invInertia·cross(r, λ)`.
@@ -63,11 +82,14 @@ Simulate mode:
   unreachable target makes the joint walk stably along its feasible path to the nearest
   reachable point instead of overshooting.
 
-### Tests (`scripts/`, run with tsx)
-- **solver-smoke.ts** (`npm test`) — grounded slider-crank driven through a full revolution;
-  asserts ground / pin / slider stay satisfied (sub-micron).
+### Tests (`scripts/`, run with `npm test`, executed via tsx)
+- **solver-smoke.ts** — grounded slider-crank driven through a full revolution; asserts
+  ground / pin / slider stay satisfied (sub-micron).
 - **ground-drag.ts** — drags a joint on a grounded body to far/off-axis/unreachable targets;
   asserts the ground never moves and the joint snaps to the nearest reachable angle.
+- **persistence.ts** — round-trips a scene through `serialize → JSON → load`; asserts counts,
+  exact joint positions, constraint kinds, `nextId` continuation, deep-copy independence, and
+  rejection of malformed data.
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
@@ -76,10 +98,11 @@ Simulate mode:
   strict structural priority (cleanup sweeps) + a step-limited driver.
 
 ## Backlog / next steps (not yet built)
-- Edit/delete tools (remove bodies, joints, constraints; move vertices).
+- Edit/delete tools (remove bodies, joints, constraints; move individual vertices).
 - Body-to-body sliders (currently sliders are grounded joint-to-fixed-line only).
 - More joint types as needed.
-- Save / load mechanisms (e.g. JSON), pan / zoom of the canvas.
+- Optional: File System Access API for true "re-open the last file by path" (Chromium only).
+  Current persistence is download/upload + localStorage autosave (restores the last session).
 - Visual confirmation of multi-ground bodies (should be fully locked) — untested interactively.
 
 ## Working conventions (from CLAUDE.md)

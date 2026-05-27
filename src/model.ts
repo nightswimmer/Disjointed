@@ -62,6 +62,16 @@ export interface SliderConstraint {
 
 export type Constraint = PinConstraint | GroundConstraint | SliderConstraint;
 
+/** Serializable snapshot of an entire scene (for save / load / autosave). */
+export interface SceneData {
+  version: number;
+  bodies: Body[];
+  joints: Joint[];
+  constraints: Constraint[];
+}
+
+const FORMAT_VERSION = 1;
+
 const PALETTE = [
   "#4f9dff",
   "#ff7b54",
@@ -183,6 +193,38 @@ export class Scene {
     this.joints = [];
     this.constraints = [];
     this.nextId = 1;
+  }
+
+  /** Plain-data snapshot of the scene; safe to JSON.stringify. */
+  serialize(): SceneData {
+    return {
+      version: FORMAT_VERSION,
+      bodies: this.bodies,
+      joints: this.joints,
+      constraints: this.constraints,
+    };
+  }
+
+  /** Replace the scene's contents from a snapshot. Throws on malformed data. */
+  load(data: SceneData): void {
+    if (
+      !data ||
+      !Array.isArray(data.bodies) ||
+      !Array.isArray(data.joints) ||
+      !Array.isArray(data.constraints)
+    ) {
+      throw new Error("Not a valid Disjointed file.");
+    }
+    // Deep-clone so loaded data is independent of the parsed JSON object.
+    this.bodies = data.bodies.map((b) => ({ ...b, pos: vec(b.pos.x, b.pos.y), local: b.local.map((p) => vec(p.x, p.y)) }));
+    this.joints = data.joints.map((j) => ({ ...j, local: vec(j.local.x, j.local.y) }));
+    this.constraints = data.constraints.map((c) => ({ ...c }));
+    const ids = [
+      ...this.bodies.map((b) => b.id),
+      ...this.joints.map((j) => j.id),
+      ...this.constraints.map((c) => c.id),
+    ];
+    this.nextId = (ids.length ? Math.max(...ids) : 0) + 1;
   }
 
   /** Snapshot of every body's pose, for save/restore around a simulation run. */

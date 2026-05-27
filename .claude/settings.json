@@ -23,7 +23,9 @@
       "Bash(curl -s * http://localhost:*)",
       "Bash(tail -* /tmp/vite.log)",
       "Bash(jobs -p)",
-      "Bash(xargs -r kill)"
+      "Bash(xargs -r kill)",
+      "Bash(npx tsc --noEmit *)",
+      "Bash(cd * && npx *)"
     ],
     "deny": [
       "Bash(rm -rf *)"
