@@ -8,18 +8,71 @@
  *     angle += invInertia  * cross(r, λ)
  * Looping over all constraints several times converges the whole mechanism.
  */
-import { Body, Scene } from "./model";
-import { Vec2, add, cross, perp, scale, sub, len, dot } from "./geometry";
+import { Body, Joint, Scene } from "./model";
+import { Vec2, add, rotate, cross, perp, scale, sub, len, dot } from "./geometry";
 
 export interface Driver {
   jointId: number;
   target: Vec2;
 }
 
-/** Apply a positional impulse `imp` to `body` at world offset `r` from its centroid. */
-function applyImpulse(body: Body, r: Vec2, imp: Vec2): void {
+/** Inverse mass of a free (body-less) joint — a light translational point particle. */
+const FREE_INV_MASS = 1;
+
+/**
+ * A constraint participant the solver can move: a rigid body, a free joint, or an
+ * immovable world point. `point` is where the impulse acts; `pos` is the rotation
+ * reference (body centroid, or the point itself); `apply` adds an impulse there.
+ */
+interface Host {
+  point: Vec2;
+  pos: Vec2;
+  invMass: number;
+  invInertia: number;
+  apply(imp: Vec2): void;
+}
+
+/** Apply impulse `imp` at world `point` to a rigid body (updates pos + angle). */
+function bodyImpulse(body: Body, point: Vec2, imp: Vec2): void {
+  const r = sub(point, body.pos);
   body.pos = add(body.pos, scale(imp, body.invMass));
   body.angle += body.invInertia * cross(r, imp);
+}
+
+/** Resolve a joint to its solver host: a body-attached point, or a free point. */
+function hostFor(scene: Scene, joint: Joint, grounded: Set<number>): Host {
+  if (joint.bodyId === null) {
+    // A grounded free joint is an immovable anchor: fixed for *every* constraint, so a
+    // heavy body pinned to it gets pulled onto the anchor (not the light point shoved away).
+    if (grounded.has(joint.id)) return fixedHost(joint.local);
+    // Otherwise a free joint is a translational point particle (no rotation); its world
+    // position lives in joint.local, which `apply` mutates directly.
+    return {
+      point: joint.local,
+      pos: joint.local,
+      invMass: FREE_INV_MASS,
+      invInertia: 0,
+      apply(imp) {
+        joint.local = add(joint.local, scale(imp, FREE_INV_MASS));
+      },
+    };
+  }
+  const body = scene.getBody(joint.bodyId)!;
+  const point = add(body.pos, rotate(joint.local, body.angle));
+  return {
+    point,
+    pos: body.pos,
+    invMass: body.invMass,
+    invInertia: body.invInertia,
+    apply(imp) {
+      bodyImpulse(body, point, imp);
+    },
+  };
+}
+
+/** An immovable world point (a ground anchor or the mouse target). */
+function fixedHost(p: Vec2): Host {
+  return { point: p, pos: p, invMass: 0, invInertia: 0, apply() {} };
 }
 
 /** Solve K·x = -c for a symmetric 2×2 K = [[a,b],[b,d]]; returns [0,0] if singular. */
@@ -35,134 +88,110 @@ function solve2x2(a: number, b: number, d: number, c: Vec2): Vec2 {
 }
 
 /**
- * Drive a two-point coincidence: make world point `pA` on `bodyA` meet world
- * point `pB` on `bodyB`. `bodyB` may be null to pin against a fixed world point.
- * `relax` (0..1) under-relaxes the correction so coupled closed loops stay stable.
- * `maxStep` caps the error corrected in one call; used by the mouse driver so a
- * far-away (possibly unreachable) target is approached in small, stable steps.
+ * Drive a two-point coincidence: make host `a`'s point meet host `b`'s point.
+ * `relax` (0..1) under-relaxes so coupled closed loops stay stable. `maxStep` caps
+ * the error corrected in one call (used by the mouse driver so a far / possibly
+ * unreachable target is approached in small, stable steps). Pass a fixedHost to pin
+ * one side to a fixed world point.
  */
-function solveCoincident(
-  pA: Vec2,
-  bodyA: Body,
-  pB: Vec2,
-  bodyB: Body | null,
-  relax: number,
-  maxStep = Infinity
-): void {
-  const rA = sub(pA, bodyA.pos);
-  let c = sub(pA, pB); // error to remove
+function solveCoincident(a: Host, b: Host, relax: number, maxStep = Infinity): void {
+  let c = sub(a.point, b.point); // error to remove
   const e = len(c);
   if (e > maxStep) c = scale(c, maxStep / e);
 
-  // Effective-mass matrix K = sum over bodies of invMass*I + invI*[r]x[r]x^T.
-  let a = bodyA.invMass;
-  let b = 0;
-  let d = bodyA.invMass;
-  a += bodyA.invInertia * rA.y * rA.y;
-  b += -bodyA.invInertia * rA.x * rA.y;
-  d += bodyA.invInertia * rA.x * rA.x;
+  // Effective-mass matrix K = sum over hosts of invMass*I + invI*[r]x[r]x^T.
+  const rA = sub(a.point, a.pos);
+  const rB = sub(b.point, b.pos);
+  const ka = a.invMass + b.invMass + a.invInertia * rA.y * rA.y + b.invInertia * rB.y * rB.y;
+  const kb = -a.invInertia * rA.x * rA.y - b.invInertia * rB.x * rB.y;
+  const kd = a.invMass + b.invMass + a.invInertia * rA.x * rA.x + b.invInertia * rB.x * rB.x;
 
-  let rB: Vec2 | null = null;
-  if (bodyB) {
-    rB = sub(pB, bodyB.pos);
-    a += bodyB.invMass + bodyB.invInertia * rB.y * rB.y;
-    b += -bodyB.invInertia * rB.x * rB.y;
-    d += bodyB.invMass + bodyB.invInertia * rB.x * rB.x;
-  }
-
-  const lambda = scale(solve2x2(a, b, d, c), relax);
-  applyImpulse(bodyA, rA, lambda);
-  if (bodyB && rB) applyImpulse(bodyB, rB, scale(lambda, -1));
+  const lambda = scale(solve2x2(ka, kb, kd, c), relax);
+  a.apply(lambda);
+  b.apply(scale(lambda, -1));
 }
 
 /**
- * Apply a scalar positional impulse driving the constraint `C = c → 0` along a
- * unit direction `u` that is fixed in `bodyR`'s frame (so it rotates with it).
- * Couples `bodyQ` (feels +u at pQ) and `bodyR` (feels −u). The rail-body angular
- * Jacobian reduces to cross(u, pQ − posR); with `bodyR` grounded it becomes a
- * single-body line constraint.
+ * Apply a scalar positional impulse driving `C = c → 0` along a unit direction `u`
+ * fixed in the rail body's frame. Couples the `rider` host (feels +u at its point)
+ * and `railBody` (feels −u, applied at the rider's point). The rail-body angular
+ * Jacobian reduces to cross(u, point − posR); a grounded rail makes it single-sided.
  */
-function solveAxis(pQ: Vec2, bodyQ: Body, u: Vec2, bodyR: Body, c: number, relax: number): void {
-  const jQ = cross(sub(pQ, bodyQ.pos), u);
-  const jR = cross(u, sub(pQ, bodyR.pos));
+function solveAxis(rider: Host, railBody: Body, u: Vec2, c: number, relax: number): void {
+  const pQ = rider.point;
+  const jQ = cross(sub(pQ, rider.pos), u);
+  const jR = cross(u, sub(pQ, railBody.pos));
   const w =
-    bodyQ.invMass + bodyQ.invInertia * jQ * jQ +
-    bodyR.invMass + bodyR.invInertia * jR * jR;
+    rider.invMass + rider.invInertia * jQ * jQ +
+    railBody.invMass + railBody.invInertia * jR * jR;
   if (w < 1e-12) return;
   const lambda = (-c / w) * relax;
-  bodyQ.pos = add(bodyQ.pos, scale(u, bodyQ.invMass * lambda));
-  bodyQ.angle += bodyQ.invInertia * jQ * lambda;
-  bodyR.pos = add(bodyR.pos, scale(u, -bodyR.invMass * lambda));
-  bodyR.angle += bodyR.invInertia * jR * lambda;
+  rider.apply(scale(u, lambda));
+  bodyImpulse(railBody, pQ, scale(u, -lambda));
 }
 
 /**
- * Slider/prismatic constraint with end-stops: keep `pQ` (a joint on `bodyQ`) on
- * the line through rail points `pA`,`pB` (two joints on `bodyR`) AND between them.
- * The perpendicular part holds it on the rail; the tangential part is one-sided —
- * it only activates once `pQ` passes an endpoint, clamping it back into the span.
+ * Slider/prismatic constraint with end-stops: keep the `rider` on the line through
+ * rail points `pA`,`pB` (two joints on `railBody`) AND between them. The
+ * perpendicular part holds it on the rail; the tangential part is one-sided — it
+ * only activates once the rider passes an endpoint, clamping it back into the span.
  */
-function solveSliderRail(
-  pQ: Vec2,
-  bodyQ: Body,
-  pA: Vec2,
-  pB: Vec2,
-  bodyR: Body,
-  relax: number
-): void {
+function solveSliderRail(rider: Host, pA: Vec2, pB: Vec2, railBody: Body, relax: number): void {
   const d = sub(pB, pA);
   const dl = len(d);
   if (dl < 1e-9) return; // degenerate rail (rail joints coincide)
   const dir = scale(d, 1 / dl);
   const n = perp(dir); // unit normal to the rail
 
-  // Hold the rider on the rail line (n ⊥ dir, so this doesn't change the position along dir).
-  solveAxis(pQ, bodyQ, n, bodyR, dot(sub(pQ, pA), n), relax);
+  // Hold the rider on the rail line (n ⊥ dir, so this doesn't change position along dir).
+  solveAxis(rider, railBody, n, dot(sub(rider.point, pA), n), relax);
 
   // Clamp the rider between the endpoints: only correct when it has overshot one.
-  const s = dot(sub(pQ, pA), dir); // signed position along the rail from pA
-  if (s < 0) solveAxis(pQ, bodyQ, dir, bodyR, s, relax);
-  else if (s > dl) solveAxis(pQ, bodyQ, dir, bodyR, s - dl, relax);
+  const s = dot(sub(rider.point, pA), dir);
+  if (s < 0) solveAxis(rider, railBody, dir, s, relax);
+  else if (s > dl) solveAxis(rider, railBody, dir, s - dl, relax);
 }
 
 /** One Gauss-Seidel sweep over the structural constraints (pin / ground / slider). */
-function sweepStructural(scene: Scene, relax: number): void {
+function sweepStructural(scene: Scene, relax: number, grounded: Set<number>): void {
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
-      const bodyA = scene.getBody(ja.bodyId)!;
-      const bodyB = scene.getBody(jb.bodyId)!;
-      solveCoincident(scene.jointWorld(ja), bodyA, scene.jointWorld(jb), bodyB, relax);
+      solveCoincident(hostFor(scene, ja, grounded), hostFor(scene, jb, grounded), relax);
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
       if (!j) continue;
-      const body = scene.getBody(j.bodyId)!;
-      solveCoincident(scene.jointWorld(j), body, con.anchor, null, relax);
+      solveCoincident(hostFor(scene, j, grounded), fixedHost(con.anchor), relax);
     } else if (con.kind === "slider") {
       const ja = scene.getJoint(con.railA);
       const jb = scene.getJoint(con.railB);
       if (!ja || !jb) continue;
-      if (ja.bodyId !== jb.bodyId) continue; // rail joints must share a body
-      const bodyR = scene.getBody(ja.bodyId)!;
+      if (ja.bodyId === null || ja.bodyId !== jb.bodyId) continue; // rail = two joints on one body
+      const railBody = scene.getBody(ja.bodyId)!;
       for (const riderId of con.riders) {
         const jq = scene.getJoint(riderId);
         if (!jq) continue;
-        const bodyQ = scene.getBody(jq.bodyId)!;
-        if (bodyQ.id === bodyR.id) continue; // rider on the rail body: nothing to do
+        if (jq.bodyId === railBody.id) continue; // rider rigid to the rail: nothing to do
         // Recompute the rail each rider, since a rider's reaction can move the rail body.
         solveSliderRail(
-          scene.jointWorld(jq),
-          bodyQ,
+          hostFor(scene, jq, grounded),
           scene.jointWorld(ja),
           scene.jointWorld(jb),
-          bodyR,
+          railBody,
           relax
         );
       }
     }
   }
+}
+
+/** Joint ids fixed by a ground constraint (used to make grounded free joints immovable). */
+function groundedJoints(scene: Scene): Set<number> {
+  const set = new Set<number>();
+  for (const c of scene.constraints) if (c.kind === "ground") set.add(c.joint);
+  return set;
 }
 
 /**
@@ -194,6 +223,7 @@ function structuralResidual(scene: Scene): number {
       const ja = scene.getJoint(con.railA);
       const jb = scene.getJoint(con.railB);
       if (!ja || !jb) continue;
+      if (ja.bodyId === null || ja.bodyId !== jb.bodyId) continue; // matches sweep's guard
       const a = scene.jointWorld(ja);
       const d = sub(scene.jointWorld(jb), a);
       const dl = len(d);
@@ -223,14 +253,12 @@ function structuralResidual(scene: Scene): number {
  * yield to the structural constraints, so it can never break a pin/ground/slider.
  */
 export function solve(scene: Scene, driver: Driver | null, iterations = 100, relax = 1): void {
+  const grounded = groundedJoints(scene);
   for (let iter = 0; iter < iterations; iter++) {
-    sweepStructural(scene, relax);
+    sweepStructural(scene, relax, grounded);
     if (driver) {
       const j = scene.getJoint(driver.jointId);
-      if (j) {
-        const body = scene.getBody(j.bodyId)!;
-        solveCoincident(scene.jointWorld(j), body, driver.target, null, 1, DRIVER_MAX_STEP);
-      }
+      if (j) solveCoincident(hostFor(scene, j, grounded), fixedHost(driver.target), 1, DRIVER_MAX_STEP);
     }
   }
 
@@ -238,6 +266,6 @@ export function solve(scene: Scene, driver: Driver | null, iterations = 100, rel
   // the driver. Stops early once the mechanism is tight enough.
   for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
     if (structuralResidual(scene) < STRUCTURAL_TOL) break;
-    sweepStructural(scene, relax);
+    sweepStructural(scene, relax, grounded);
   }
 }

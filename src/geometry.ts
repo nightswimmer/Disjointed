@@ -98,3 +98,93 @@ export function pointInPolygon(p: Vec2, pts: Vec2[]): boolean {
 export function distToLine(p: Vec2, o: Vec2, d: Vec2): number {
   return Math.abs(cross(sub(p, o), d));
 }
+
+/** Convex hull of a point set (Andrew's monotone chain). Returns hull vertices in order. */
+export function convexHull(points: Vec2[]): Vec2[] {
+  const pts = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
+  if (pts.length < 3) return pts;
+  const half = (src: Vec2[]): Vec2[] => {
+    const h: Vec2[] = [];
+    for (const p of src) {
+      while (h.length >= 2 && cross(sub(h[h.length - 1], h[h.length - 2]), sub(p, h[h.length - 2])) <= 0) {
+        h.pop();
+      }
+      h.push(p);
+    }
+    h.pop(); // drop the last point (it's the first of the other half)
+    return h;
+  };
+  const lower = half(pts);
+  const upper = half([...pts].reverse());
+  return lower.concat(upper);
+}
+
+/**
+ * Round the corners of a simple polygon in place: each corner becomes a circular arc
+ * tangent to its two edges, with radius clamped so adjacent fillets don't overlap.
+ * Convex and reflex (concave) corners are both handled. `radius <= 0` returns a copy.
+ */
+export function filletPolygon(verts: Vec2[], radius: number, segPerCorner = 8): Vec2[] {
+  const n = verts.length;
+  if (n < 3 || radius <= 0) return verts.map((v) => ({ x: v.x, y: v.y }));
+  const winding = Math.sign(polygonArea(verts)) || 1;
+  const out: Vec2[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = verts[(i - 1 + n) % n];
+    const v = verts[i];
+    const next = verts[(i + 1) % n];
+    const u1 = normalize(sub(prev, v)); // edge toward prev
+    const u2 = normalize(sub(next, v)); // edge toward next
+    const angle = Math.acos(Math.max(-1, Math.min(1, dot(u1, u2)))); // 0..π between edges
+    if (angle < 1e-3 || angle > Math.PI - 1e-3) {
+      out.push({ x: v.x, y: v.y }); // degenerate / nearly straight: no fillet
+      continue;
+    }
+    const half = angle / 2;
+    const maxT = 0.5 * Math.min(dist(prev, v), dist(next, v)); // keep fillets from overlapping
+    const t = Math.min(radius / Math.tan(half), maxT);
+    if (t < 1e-6) {
+      out.push({ x: v.x, y: v.y });
+      continue;
+    }
+    const r = t * Math.tan(half); // actual radius after clamping
+    const t1 = add(v, scale(u1, t));
+    const t2 = add(v, scale(u2, t));
+    // Bisector points to the corner's interior for convex vertices; flip for reflex.
+    const convex = Math.sign(cross(sub(v, prev), sub(next, v))) === winding;
+    const bis = scale(normalize(add(u1, u2)), convex ? 1 : -1);
+    const center = add(v, scale(bis, r / Math.sin(half)));
+    const a1 = Math.atan2(t1.y - center.y, t1.x - center.x);
+    const a2 = Math.atan2(t2.y - center.y, t2.x - center.x);
+    let da = a2 - a1; // sweep the short way
+    while (da > Math.PI) da -= 2 * Math.PI;
+    while (da < -Math.PI) da += 2 * Math.PI;
+    const steps = Math.max(1, Math.round((segPerCorner * Math.abs(da)) / Math.PI));
+    for (let s = 0; s <= steps; s++) {
+      const a = a1 + (da * s) / steps;
+      out.push({ x: center.x + r * Math.cos(a), y: center.y + r * Math.sin(a) });
+    }
+  }
+  return out;
+}
+
+/**
+ * The convex hull of `points`, expanded outward by `margin` with rounded corners —
+ * i.e. the Minkowski sum of their hull with a disk, built as the hull of circles
+ * (sampled into `segments` points) placed at each point. The corners are true circular
+ * arcs; `segments` only sets how finely they're sampled. Handles 1 point (a disk),
+ * 2 (a stadium), or many. When `segments` is omitted it scales with `margin` so the
+ * arc facets stay small (smooth) at any size.
+ */
+export function roundedConvexBody(points: Vec2[], margin: number, segments?: number): Vec2[] {
+  // ~1 facet per 4 world units of circumference, clamped to a sensible range.
+  const n = segments ?? Math.max(24, Math.min(96, Math.round((Math.PI * margin) / 2)));
+  const cloud: Vec2[] = [];
+  for (const p of points) {
+    for (let j = 0; j < n; j++) {
+      const a = (j / n) * Math.PI * 2;
+      cloud.push({ x: p.x + margin * Math.cos(a), y: p.y + margin * Math.sin(a) });
+    }
+  }
+  return convexHull(cloud);
+}

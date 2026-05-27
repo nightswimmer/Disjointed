@@ -96,6 +96,37 @@ const nearEnd = limit.jointWorld(slide);
 check("rider stops at far end", farEnd.x <= 100.5 && Math.abs(farEnd.y) < 0.5, `x ${farEnd.x.toFixed(3)}, y ${farEnd.y.toFixed(3)}`);
 check("rider stops at near end", nearEnd.x >= -0.5 && Math.abs(nearEnd.y) < 0.5, `x ${nearEnd.x.toFixed(3)}, y ${nearEnd.y.toFixed(3)}`);
 
+// --- Free joints: a grounded free joint is a body-less pivot; ungrounded it moves. ---
+const fj = new Scene();
+const anchor = fj.addFreeJoint({ x: 0, y: 0 }); // body-less point
+fj.addGround(anchor.id, { x: 0, y: 0 }); // ...pinned in place → an anchor
+const bar = fj.addBody([{ x: 0, y: -8 }, { x: 120, y: -8 }, { x: 120, y: 8 }, { x: 0, y: 8 }]);
+const barLeft = fj.addJoint(bar.id, { x: 0, y: 0 });
+const barRight = fj.addJoint(bar.id, { x: 120, y: 0 });
+fj.addPin(anchor.id, barLeft.id); // the bar hangs off the free-joint anchor
+
+let worstAnchor = 0;
+let worstPivot = 0;
+for (let i = 0; i < 24; i++) {
+  const a = (i / 24) * Math.PI * 2;
+  solve(fj, { jointId: barRight.id, target: { x: 120 * Math.cos(a), y: 120 * Math.sin(a) } }, 40);
+  worstAnchor = Math.max(worstAnchor, dist(fj.jointWorld(anchor), { x: 0, y: 0 }));
+  worstPivot = Math.max(worstPivot, dist(fj.jointWorld(anchor), fj.jointWorld(barLeft)));
+}
+check("grounded free joint stays put", worstAnchor < 0.5, `max drift ${worstAnchor.toFixed(4)} px`);
+check("body pivots on free-joint anchor", worstPivot < 0.5, `max gap ${worstPivot.toFixed(4)} px`);
+
+// An ungrounded free joint is movable: pinned to a joint grounded elsewhere, it follows.
+const fj2 = new Scene();
+const gb = fj2.addBody([{ x: 0, y: -8 }, { x: 40, y: -8 }, { x: 40, y: 8 }, { x: 0, y: 8 }]);
+const gj = fj2.addJoint(gb.id, { x: 20, y: 0 });
+fj2.addGround(gj.id, { x: 200, y: 50 });
+const free = fj2.addFreeJoint({ x: 0, y: 0 });
+fj2.addPin(free.id, gj.id);
+solve(fj2, null, 80);
+const moved = fj2.jointWorld(free);
+check("ungrounded free joint follows its pin", dist(moved, { x: 200, y: 50 }) < 0.5, `at (${moved.x.toFixed(2)}, ${moved.y.toFixed(2)})`);
+
 // Crank pivot must remain on the ground after a full revolution.
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

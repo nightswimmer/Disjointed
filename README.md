@@ -1,15 +1,18 @@
 # Disjointed
 
-A simple web app for creating and simulating **2D planar mechanisms** — polygon bodies
-coupled by joints (pins, grounds, sliders) that you can then drag and watch move.
+A simple web app for creating and simulating **2D planar mechanisms** — bodies (with editable,
+round-able shapes) coupled by joints (pins, grounds, sliders) that you can then drag and watch move.
 
-> Status: first working version. Draw a mechanism, switch to simulate, and drag a joint to
-> drive it. The constraint solver is covered by headless tests.
+> Status: working. Draw a mechanism (freehand or from joints), edit it, switch to simulate, and
+> drag a joint to drive it. The solver and shape/edit logic are covered by headless tests.
 
 ## Concepts
 
-- **Body** — a rigid polygon. Joints placed on the same body stay rigid relative to each other.
-- **Joint** — a point attached to a body.
+- **Body** — a rigid shape with rounded-able corners. It's defined by an editable **control
+  polygon** plus a **corner radius**; the outline you see is derived from those, so you can
+  reshape it (drag corners) or round it any time.
+- **Joint** — a point. Either **attached** to a body (rigid with it) or **free** (a body-less
+  point). A free joint can be grounded to make an anchor without needing a body.
 - **Constraints**
   - **Pin** — connect two joints on different bodies; they share a position but can rotate freely.
   - **Ground** — lock a joint's position; its body can still rotate about it.
@@ -27,18 +30,21 @@ to **Select** mode. Press **Esc** to abort the current placement.
 
 | Tool | Shortcut | Action |
 | --- | --- | --- |
-| **Body** | `B` | Click to add vertices. Click the first vertex or double-click (or press Enter) to close. Esc cancels. |
-| **Joint** | `J` | Click inside a body to attach a joint. Click where bodies overlap to drop a joint in each and pin them together. |
+| **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. |
+| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
-| **Ground** | `G` | Click a joint to lock its position (it can still rotate). |
+| **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
 | **Slider** | `S` | Click two joints on the **same body** to create a slider rail. Attach riders later with Connect. |
 
-**Select mode** (no tool active, the default): click a body, joint, or slider rail to select it;
-press **Delete** to remove it. Deleting a body removes its joints and their constraints; deleting
-a slider rail leaves the joints in place; deleting a joint detaches it from any rail it rode.
+**Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
+**Drag** the selection to move it. A selected body shows **corner handles** — drag one to reshape
+it, and press **`[` / `]`** to decrease / increase its corner radius (this is how you round a
+freehand polygon: draw it, select it, press `]`). Press **Delete** to remove the selection:
+a body takes its joints and constraints with it; a slider rail leaves its joints; a joint detaches
+from any rail.
 
 Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
-rail-defining joints get a **green ring**.
+rail-defining joints get a **green ring**, and **free joints a dashed ring**.
 
 ### Simulate
 Drag any joint. It becomes the *driving joint*: its body follows the cursor and every
@@ -48,8 +54,7 @@ it can actually reach. Your drawn layout is preserved when you switch back to Dr
 
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor.
-- **Right-drag empty space** — pan the view.
-- **Right-drag a body** — move that body around (its ground anchors move with it).
+- **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode).
 
 ### Save & load
 - **Save** downloads your mechanism as a `.json` file; **Load** opens one back up.
@@ -65,18 +70,20 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless constraint-solver smoke test
+npm test         # headless tests: solver, persistence, body building, shape editing
 ```
 
 ## How it works
 
 A small **iterative position-based solver** (Gauss-Seidel projection) satisfies the
-constraints. Each body has a pose (centroid position + angle); each constraint nudges the
-poses with effective-mass positional impulses. After driving, the solver keeps sweeping the
-structural constraints until the worst error is below a tolerance (capped), so complex or
-closed-loop mechanisms converge tightly instead of drifting. The mouse driver is step-limited
-and yields to structural constraints, which keeps dragging stable even when you pull toward a
-point the mechanism can't reach. Sliders are body-to-body prismatic constraints with end-stops.
+constraints. Each constraint participant is reduced to a uniform "host" — a rigid body, a free
+joint (a movable point), or a fixed world anchor — so pins, grounds, sliders and the mouse
+driver all share one routine. After driving, the solver keeps sweeping the structural
+constraints until the worst error is below a tolerance (capped), so complex or closed-loop
+mechanisms converge tightly instead of drifting. The driver is step-limited and yields to
+structural constraints, keeping dragging stable even when you pull toward a point the mechanism
+can't reach. Sliders are body-to-body prismatic constraints with end-stops. Body outlines are
+generated from a control polygon + corner radius (rounded corners via fillet or outward offset).
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),
 `renderer.ts`, `main.ts`. Tests live in [`scripts/`](scripts/).

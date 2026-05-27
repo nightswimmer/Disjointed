@@ -12,15 +12,25 @@ import {
   dist,
   normalize,
   distToLine,
+  filletPolygon,
+  roundedConvexBody,
   polygonCentroid,
   polygonArea,
   polygonInertiaAboutCentroid,
   pointInPolygon,
 } from "./geometry";
 
+/** How a body's `radius` shapes it: round the corners in place, or offset the hull outward. */
+export type RoundMode = "fillet" | "offset";
+
 export interface Body {
   id: number;
-  /** Polygon vertices relative to the centroid, in the body's local frame. */
+  /** Editable control polygon (the corners), relative to the centroid, in the local frame. */
+  controlLocal: Vec2[];
+  /** Corner radius (fillet) or outward margin (offset) applied to the control polygon. 0 = sharp. */
+  radius: number;
+  round: RoundMode;
+  /** Derived render/physics polygon, relative to the centroid — rebuilt from control + radius. */
   local: Vec2[];
   /** World position of the centroid (the body's local origin). */
   pos: Vec2;
@@ -32,8 +42,12 @@ export interface Body {
 
 export interface Joint {
   id: number;
-  bodyId: number;
-  /** Offset from the owning body's centroid, in the body's local frame. */
+  /** Owning body, or `null` for a free joint (a body-less movable point). */
+  bodyId: number | null;
+  /**
+   * For an attached joint: offset from the body's centroid, in the body's local
+   * frame. For a free joint (`bodyId === null`): the joint's own world position.
+   */
   local: Vec2;
 }
 
@@ -78,7 +92,7 @@ export interface SceneData {
   constraints: Constraint[];
 }
 
-const FORMAT_VERSION = 3;
+const FORMAT_VERSION = 5;
 
 const PALETTE = [
   "#4f9dff",
@@ -100,23 +114,66 @@ export class Scene {
     return this.nextId++;
   }
 
-  /** Create a body from a polygon given in world coordinates. */
-  addBody(worldVerts: Vec2[]): Body {
-    const centroid = polygonCentroid(worldVerts);
-    const local = worldVerts.map((p) => sub(p, centroid));
-    const area = Math.max(Math.abs(polygonArea(worldVerts)), 1);
-    const inertia = Math.max(polygonInertiaAboutCentroid(worldVerts, centroid), 1);
+  /**
+   * Create a body from a control polygon (world coords). `radius` rounds it: `fillet`
+   * rounds the corners in place (keeps concavity); `offset` grows the convex hull outward.
+   */
+  addBody(worldVerts: Vec2[], radius = 0, round: RoundMode = "fillet"): Body {
     const body: Body = {
       id: this.id(),
-      local,
-      pos: centroid,
+      controlLocal: worldVerts.map((p) => vec(p.x, p.y)), // world for now; rebuild re-centers it
+      radius,
+      round,
+      local: [],
+      pos: vec(0, 0),
       angle: 0,
-      invMass: 1 / area,
-      invInertia: 1 / inertia,
+      invMass: 1,
+      invInertia: 1,
       color: PALETTE[this.bodies.length % PALETTE.length],
     };
     this.bodies.push(body);
+    this.rebuildBody(body);
     return body;
+  }
+
+  /**
+   * Recompute a body's render/physics polygon, centroid and mass from its control
+   * polygon + radius, keeping attached joints anchored in world space (the centroid,
+   * and thus the local frame, shifts when the shape changes).
+   */
+  private rebuildBody(body: Body): void {
+    const ctrlWorld = body.controlLocal.map((p) => add(body.pos, rotate(p, body.angle)));
+    const finalWorld =
+      body.round === "offset"
+        ? roundedConvexBody(ctrlWorld, body.radius)
+        : filletPolygon(ctrlWorld, body.radius);
+    const centroid = polygonCentroid(finalWorld);
+    const attached = this.joints.filter((j) => j.bodyId === body.id);
+    const jointWorlds = attached.map((j) => this.jointWorld(j));
+    body.pos = centroid;
+    body.local = finalWorld.map((p) => rotate(sub(p, centroid), -body.angle));
+    body.controlLocal = ctrlWorld.map((p) => rotate(sub(p, centroid), -body.angle));
+    body.invMass = 1 / Math.max(Math.abs(polygonArea(finalWorld)), 1);
+    body.invInertia = 1 / Math.max(polygonInertiaAboutCentroid(finalWorld, centroid), 1);
+    attached.forEach((j, i) => {
+      j.local = rotate(sub(jointWorlds[i], centroid), -body.angle);
+    });
+  }
+
+  /** Move a control vertex of a body by a world-space delta, then rebuild its shape. */
+  moveBodyVertex(bodyId: number, index: number, delta: Vec2): void {
+    const body = this.getBody(bodyId);
+    if (!body || index < 0 || index >= body.controlLocal.length) return;
+    body.controlLocal[index] = add(body.controlLocal[index], rotate(delta, -body.angle));
+    this.rebuildBody(body);
+  }
+
+  /** Set a body's corner radius / margin (clamped ≥ 0), then rebuild its shape. */
+  setBodyRadius(bodyId: number, radius: number): void {
+    const body = this.getBody(bodyId);
+    if (!body) return;
+    body.radius = Math.max(0, radius);
+    this.rebuildBody(body);
   }
 
   addJoint(bodyId: number, worldPos: Vec2): Joint {
@@ -126,6 +183,44 @@ export class Scene {
     const joint: Joint = { id: this.id(), bodyId, local };
     this.joints.push(joint);
     return joint;
+  }
+
+  /** Create a free joint: a body-less point at `worldPos` that the solver can move. */
+  addFreeJoint(worldPos: Vec2): Joint {
+    const joint: Joint = { id: this.id(), bodyId: null, local: vec(worldPos.x, worldPos.y) };
+    this.joints.push(joint);
+    return joint;
+  }
+
+  /**
+   * Build a body from existing joints, with its polygon the rounded convex hull of
+   * those joints expanded outward by `margin`. Free joints are absorbed into the new
+   * body; joints on other bodies stay put and get a new joint here pinned to them.
+   * Returns the new body, or null if the joints can't form an area.
+   */
+  buildBodyFromJoints(jointIds: number[], margin: number): Body | null {
+    const joints = jointIds
+      .map((id) => this.getJoint(id))
+      .filter((j): j is Joint => j !== undefined);
+    if (joints.length < 2) return null;
+    const worlds = joints.map((j) => this.jointWorld(j));
+    // Store one control point per joint; the rounded outline (hull + outward offset) is
+    // recomputed from these on every rebuild, rather than baking the hull in.
+    const body = this.addBody(worlds, margin, "offset");
+    if (body.local.length < 3) return null;
+    joints.forEach((j, i) => {
+      const w = worlds[i];
+      if (j.bodyId === null) {
+        // Absorb the free joint: it now belongs to the new body (angle 0 at creation).
+        j.bodyId = body.id;
+        j.local = sub(w, body.pos);
+      } else {
+        // Joint on another body: add a coincident joint here and pin them together.
+        const nj = this.addJoint(body.id, w);
+        this.addPin(nj.id, j.id);
+      }
+    });
+    return body;
   }
 
   addPin(jointA: number, jointB: number): PinConstraint {
@@ -163,8 +258,9 @@ export class Scene {
     return this.joints.find((j) => j.id === id);
   }
 
-  /** World position of a joint, derived from its body's current pose. */
+  /** World position of a joint: its body's pose + local offset, or its own point if free. */
   jointWorld(joint: Joint): Vec2 {
+    if (joint.bodyId === null) return vec(joint.local.x, joint.local.y);
     const body = this.getBody(joint.bodyId)!;
     return add(body.pos, rotate(joint.local, body.angle));
   }
@@ -172,6 +268,11 @@ export class Scene {
   /** World-space polygon of a body. */
   bodyWorldVerts(body: Body): Vec2[] {
     return body.local.map((p) => add(body.pos, rotate(p, body.angle)));
+  }
+
+  /** World-space control-polygon vertices (the editable corners) of a body. */
+  bodyControlWorld(body: Body): Vec2[] {
+    return body.controlLocal.map((p) => add(body.pos, rotate(p, body.angle)));
   }
 
   /** Topmost body whose polygon contains the point, or undefined. */
@@ -245,6 +346,26 @@ export class Scene {
     }
   }
 
+  /**
+   * Reposition a joint by a world-space `delta`. A free joint's world point moves; a
+   * body joint's local offset shifts (the body stays put). Any ground anchor on the
+   * joint follows, so it stays grounded where it now sits.
+   */
+  moveJoint(id: number, delta: Vec2): void {
+    const j = this.getJoint(id);
+    if (!j) return;
+    if (j.bodyId === null) {
+      j.local = add(j.local, delta);
+    } else {
+      const body = this.getBody(j.bodyId)!;
+      j.local = add(j.local, rotate(delta, -body.angle));
+    }
+    const w = this.jointWorld(j);
+    for (const c of this.constraints) {
+      if (c.kind === "ground" && c.joint === id) c.anchor = vec(w.x, w.y);
+    }
+  }
+
   /** Remove a body along with its joints, pruning the constraints that used them. */
   removeBody(id: number): void {
     const removed = new Set(this.joints.filter((j) => j.bodyId === id).map((j) => j.id));
@@ -303,7 +424,13 @@ export class Scene {
       throw new Error("Not a valid Disjointed file.");
     }
     // Deep-clone so loaded data is independent of the parsed JSON object.
-    this.bodies = data.bodies.map((b) => ({ ...b, pos: vec(b.pos.x, b.pos.y), local: b.local.map((p) => vec(p.x, p.y)) }));
+    this.bodies = data.bodies.map((b) => {
+      const local = b.local.map((p) => vec(p.x, p.y));
+      // Older files (< v5) have no control polygon: treat the saved polygon as a sharp control.
+      const src = b as Body & { controlLocal?: Vec2[]; radius?: number; round?: RoundMode };
+      const controlLocal = src.controlLocal ? src.controlLocal.map((p) => vec(p.x, p.y)) : local.map((p) => vec(p.x, p.y));
+      return { ...b, pos: vec(b.pos.x, b.pos.y), local, controlLocal, radius: src.radius ?? 0, round: src.round ?? "fillet" };
+    });
     this.joints = data.joints.map((j) => ({ ...j, local: vec(j.local.x, j.local.y) }));
     // Sliders: drop the legacy origin+dir form (no railA); migrate the earlier
     // single-`slider` rider field to the `riders` array; normalize riders to an array.

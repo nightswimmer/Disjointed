@@ -16,11 +16,18 @@ export interface RenderInput {
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
   selection: { kind: "body" | "joint" | "slider"; id: number } | null;
+  /** Control-vertex handles to draw for the selected body (draggable to reshape it). */
+  editVertices: Vec2[] | null;
   /**
    * While defining a slider: the world positions of the rail joints picked so far
    * (1 → previewing toward the cursor; 2 → rail set, awaiting the riding joint).
    */
   sliderDraft: { rail: Vec2[]; cursor: Vec2 } | null;
+  /**
+   * While building a body from joints: `outline` are the picked joints; `preview` is
+   * the expanded body boundary once the user is sizing its margin (else null).
+   */
+  bodyJointDraft: { outline: Vec2[]; preview: Vec2[] | null } | null;
   /** Joint currently being dragged in simulation. */
   driverJoint: number | null;
 }
@@ -125,7 +132,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.setLineDash([]);
   }
 
-  // Draft body being drawn.
+  // Draft body being drawn (freehand polygon).
   if (input.draftBody && input.draftBody.length > 0) {
     const pts = input.draftBody;
     ctx.strokeStyle = "#ffffff";
@@ -137,6 +144,31 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.stroke();
     ctx.setLineDash([]);
     for (const p of pts) dot(ctx, p, px(3), "#ffffff");
+  }
+
+  // Body-from-joints: dashed outline through the picked joints, and the expanded preview.
+  if (input.bodyJointDraft) {
+    const { outline, preview } = input.bodyJointDraft;
+    ctx.setLineDash([px(5), px(4)]);
+    if (!preview) {
+      // Still picking joints: a dashed path through them, trailing to the cursor.
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = px(1.5);
+      ctx.beginPath();
+      outline.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      if (input.cursor) ctx.lineTo(input.cursor.x, input.cursor.y);
+      ctx.stroke();
+    } else {
+      // Sizing the margin: preview the final (expanded) boundary.
+      ctx.strokeStyle = "#5bd6a6";
+      ctx.lineWidth = px(2);
+      ctx.beginPath();
+      preview.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    for (const p of outline) dot(ctx, p, px(3), "#ffffff");
   }
 
   // Ground anchors.
@@ -153,6 +185,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     const isHover = input.hoverJoint === j.id;
     const isSelected = input.activeJoints.includes(j.id) || j.id === selectedJointId;
     const isDriver = input.driverJoint === j.id;
+    const isFree = j.bodyId === null;
 
     let fill = "#e6e8ee";
     if (roles.pinned.has(j.id)) fill = "#4f9dff";
@@ -168,12 +201,31 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       ? "#ffffff"
       : roles.rail.has(j.id)
       ? "#5bd6a6" // rail-defining joints get a green ring
+      : isFree
+      ? "#9aa0ac" // free joints get a muted dashed ring
       : "#1e1f24";
+    // A dashed outline marks a free (body-less) joint.
+    if (isFree && !isSelected && !isDriver) ctx.setLineDash([px(3), px(3)]);
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.stroke();
+    ctx.setLineDash([]);
     // Hollow center marks a revolute pin.
     if (roles.pinned.has(j.id)) dot(ctx, p, px(2), "#1e1f24");
+  }
+
+  // Control-vertex handles for the selected body (square = draggable corner).
+  if (input.editVertices) {
+    const h = px(5);
+    ctx.lineWidth = px(2);
+    ctx.strokeStyle = "#1e1f24";
+    ctx.fillStyle = "#ffffff";
+    for (const v of input.editVertices) {
+      ctx.beginPath();
+      ctx.rect(v.x - h, v.y - h, 2 * h, 2 * h);
+      ctx.fill();
+      ctx.stroke();
+    }
   }
 }
 

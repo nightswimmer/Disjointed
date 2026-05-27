@@ -3,18 +3,21 @@
 ## Goal
 A simple webapp to create and simulate 2D planar mechanisms (moving joints / linkages).
 Two modes:
-- **Drawing mode** — draw polygon objects, place joint points on them, and couple them
-  with constraints (rotation/pin, ground, slider). Joints on the same object are rigid
-  relative to each other.
+- **Drawing mode** — draw bodies, place joints (attached or free), and couple them with
+  constraints (rotation/pin, ground, slider). Joints on the same body are rigid relative to
+  each other. Bodies have an editable control polygon + corner radius; the rounded outline is
+  derived from it.
 - **Simulation mode** — pick a joint and drag it (the "driving joint"); the body it
   belongs to moves and a constraint solver propagates the motion through everything
   connected to it.
 
 ## Current status
-End-to-end draw → simulate works, with editing (select/delete elements), one-shot tools +
-keyboard shortcuts, body-to-body sliders (rail + riders, with end-stops), and a
-converge-to-tolerance solver. The constraint solver is verified by headless tests; the
-interactive canvas (drawing/dragging) should be confirmed by eye via `npm run dev`.
+End-to-end draw → simulate works, with: select/move/delete editing; one-shot tools + keyboard
+shortcuts; free (body-less) joints that can be grounded as anchors; bodies built two ways
+(freehand polygon, or from existing joints); rounded corners (editable control polygon +
+radius, re-editable by dragging corner handles); body-to-body sliders (rail + riders, with
+end-stops); and a converge-to-tolerance solver. The solver and shape/edit logic are verified
+by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -23,56 +26,74 @@ interactive canvas (drawing/dragging) should be confirmed by eye via `npm run de
 
 ### Architecture (`src/`)
 - **geometry.ts** — Vec2 math; polygon centroid / area / inertia; point-in-polygon;
-  point-to-line distance.
+  point-to-line distance; `convexHull`; `roundedConvexBody` (hull + outward rounded offset =
+  Minkowski sum with a disk, sampled adaptively to `margin`); `filletPolygon` (round a
+  polygon's corners in place with clamped tangent arcs — convex and concave/reflex corners).
 - **model.ts** — `Scene` owning:
-  - `Body` = rigid polygon. Pose is `pos` (world centroid) + `angle`. Vertices are stored
-    in a local frame relative to the centroid. `invMass` / `invInertia` come from polygon
-    area / second moment (density 1).
-  - `Joint` = a point attached to a body, stored as a local-frame offset from the centroid.
+  - `Body` = rigid shape defined by an **editable control polygon** (`controlLocal`) + a
+    corner `radius` + a `round` mode (`"fillet"` rounds corners in place; `"offset"` grows the
+    hull outward). The render/physics polygon `local` is **derived** from these. Pose is `pos`
+    (world centroid) + `angle`. `invMass`/`invInertia` from the derived polygon's area / second
+    moment. `rebuildBody` regenerates `local`/centroid/mass and re-anchors attached joints when
+    the centroid shifts.
+  - `Joint` = a point with `bodyId` + `local`. If `bodyId` is a body, `local` is the offset
+    from that body's centroid; if `bodyId === null` it is a **free joint** and `local` is its
+    own world position (the solver treats it as a movable point particle).
   - Constraints: `pin` (two joints coincide, free rotation), `ground` (a joint locked to a
-    fixed world point), `slider` (a rail = two joints `railA`/`railB` on one body, plus a
-    `riders` list of joints on other bodies confined to the segment between them, with
-    end-stops). The rail moves with its body, so a slider couples two bodies.
-  - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `moveBody` (carries a
-    body's ground anchors), `removeBody`/`removeJoint`/`removeConstraint` + `pruneConstraint`
-    (deleting a rail joint kills the slider; deleting a rider just detaches it),
-    `attachSliderRider`, pose snapshot/restore, role queries.
+    fixed world point — grounding a free joint makes a body-less anchor), `slider` (a rail =
+    two joints `railA`/`railB` on one body, plus a `riders` list of joints confined to the
+    segment between them, with end-stops). The rail moves with its body, coupling two bodies.
+  - Body construction: `addBody(worldVerts, radius?, round?)` (freehand uses `fillet`);
+    `buildBodyFromJoints(jointIds, margin)` stores **one control point per joint** with
+    `round: "offset"` (free joints are absorbed; joints on other bodies get a coincident new
+    joint pinned to them). Editing: `moveBodyVertex`, `setBodyRadius`, `moveJoint`, `moveBody`.
+  - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
+    (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
+    `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 3`; `load` deep-copies, recomputes `nextId`, drops legacy
-    origin+dir sliders, and migrates the older single-`slider` field to `riders`).
-- **solver.ts** — `solve(scene, driver, iterations, relax)`. Per sweep it projects each
-  structural constraint (effective-mass positional impulses), then applies the optional
-  mouse driver. See "Solver notes" below.
+    snapshot, `FORMAT_VERSION = 5`; `load` deep-copies, recomputes `nextId`, drops legacy
+    origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
+    `controlLocal`/`radius`/`round` for pre-v5 bodies).
+- **solver.ts** — `solve(scene, driver, iterations, relax)`. Operates on a **host abstraction**
+  (`hostFor`): each constraint participant is a body, a free joint (translate-only point), or a
+  fixed world point — which unifies pin/ground/slider/driver. See "Solver notes" below.
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.2..5).
 - **renderer.ts** — draws under the camera transform in world space: world-locked grid,
   bodies (selected/hovered highlighted), slider rails as bounded segments with end-caps,
   ground symbols, joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
-  rail joints get a green ring), plus draft overlays. Cosmetic sizes (joint radius, line
-  widths, ground symbol) are divided by the zoom so they stay constant on screen.
+  rail joints get a green ring; **free joints get a muted dashed ring**), corner-handle squares
+  for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
+  expansion preview, slider rail preview). Cosmetic sizes are divided by the zoom.
 - **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state (tools are one-shot + have
-  keyboard shortcuts), select-mode selection/deletion, the camera, pointer + key handling,
-  persistence (save/load/autosave), and the requestAnimationFrame render/solve loop. Also a
-  `timedSolve` debug helper that logs each solve's duration to the console.
+  keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
+  pointer + key handling, persistence (save/load/autosave), and the requestAnimationFrame
+  render/solve loop. Also a `timedSolve` debug helper that logs each solve's duration.
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or first-letter shortcut —
 `B`/`J`/`C`/`G`/`S`) lets you place one element, then it returns to **Select** mode. `Esc`
 aborts the current placement.
-- **Body** (`B`) — click to add vertices; click the first vertex or double-click (or Enter)
-  to close; Esc cancels.
-- **Joint** (`J`) — click inside a body to attach a joint. Clicking where bodies overlap drops
-  a joint in each overlapping body and pins them all together.
+- **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
+  vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
+  **existing joint**: build a body *from joints* — click joints to outline (free joints are
+  absorbed; joints on other bodies get pinned), click an already-added joint to finish, then
+  move the cursor out to size the outward margin (live preview) and click to finalize.
+- **Joint** (`J`) — click inside a body to attach a joint; click where bodies overlap to drop
+  a joint in each and pin them together; click **empty space** to place a free (body-less) joint.
 - **Connect** (`C`) — click a joint, then another joint on a *different* body to pin them, or a
   *slider rail* to attach the joint to it as a rider.
-- **Ground** (`G`) — click a joint to lock its world position (body can still rotate about it).
+- **Ground** (`G`) — click a joint to lock its world position (grounding a free joint makes a
+  body-less anchor; a body can still rotate about a grounded joint).
 - **Slider** (`S`) — click two joints on the *same body* to create a slider rail (riders are
   attached later via Connect).
 
 Select mode (default, no tool armed):
-- Click a body, joint, or slider rail to select (highlighted); `Delete` removes it. Removing a
-  body deletes its joints/constraints; removing a slider keeps its joints; removing a joint
-  detaches it from any rail.
+- Click a body, joint, or slider rail to **select** it (highlighted); **left-drag** moves the
+  selected body or joint. A selected body shows **corner handles** — drag one to reshape it
+  (`moveBodyVertex`); **`[` / `]`** decrease / increase its corner radius (round/un-round).
+- `Delete` removes the selection: a body takes its joints/constraints with it; a slider keeps
+  its joints; a joint detaches from any rail and any constraints referencing it go.
 
 Simulate mode:
 - Drag any joint. It becomes the driver; its body follows the cursor and connected bodies
@@ -81,10 +102,8 @@ Simulate mode:
 
 Navigation (both modes):
 - **Mouse wheel** zooms toward the cursor.
-- **Right-drag on empty space** pans the view.
-- **Right-drag on a body** moves that body (its joints, and in draw mode its ground anchors,
-  move with it). In simulate mode this is non-destructive — the drawn layout is restored on
-  exit, and anchors are not moved.
+- **Right-drag always pans** the view (anywhere). Moving elements is left-drag in select mode
+  (above); there is no right-drag-to-move.
 
 Persistence:
 - **Save** downloads `mechanism-<timestamp>.json`; **Load** opens a `.json` via the file
@@ -110,7 +129,13 @@ Persistence:
   along a direction fixed in the rail body's frame; the slider runs it for the perpendicular
   (stay on the line) plus a one-sided tangential limit at each rail endpoint. The rail-body
   angular Jacobian reduces to `cross(u, pQ − posR)`; with the rail body grounded it degenerates
-  to a fixed-line constraint.
+  to a fixed-line constraint. (Rail joints must be on a body; a rider may be free.)
+- **Host abstraction** (`hostFor`): every constraint participant is reduced to a `{ point, pos,
+  invMass, invInertia, apply }` host — a body (translate + rotate), a free joint (translate
+  only, zero inertia), or a fixed world point (immovable). This unifies pin/ground/slider/driver
+  and lets the solver move free joints. A **grounded free joint is treated as a fixed host for
+  every constraint**, so a heavy body pinned to it is pulled onto the anchor (rather than the
+  light point being shoved around).
 
 ### Tests (`scripts/`, run with `npm test`, executed via tsx)
 - **solver-smoke.ts** — grounded slider-crank (coupler riding a grounded rail) driven through
@@ -121,6 +146,11 @@ Persistence:
 - **persistence.ts** — round-trips a scene through `serialize → JSON → load`; asserts counts,
   exact joint positions, constraint kinds, slider riders, `nextId` continuation, deep-copy
   independence, and rejection of malformed data.
+- **build-body.ts** — `buildBodyFromJoints`: free joints absorbed, a coincident pinned joint
+  added for a joint on another body, expanded body has area / contains the joints, min-joint
+  rejection.
+- **shape-edit.ts** — `filletPolygon` (convex + concave validity, radius 0 passthrough) and
+  body editing (`setBodyRadius` / `moveBodyVertex` keep attached joints anchored).
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
@@ -131,13 +161,16 @@ Persistence:
   converging structural constraints to a tolerance instead.
 - **Ground symbol stayed behind when moving a body** in draw mode. Fixed: `moveBody` carries
   the body's ground anchors.
+- **Grounded free joint drifted** when a heavy body was pinned to it (the light point got
+  shoved around). Fixed: a grounded free joint is a fixed host for all constraints.
 
 ## Backlog / next steps (not yet built)
-- Move/edit individual vertices of an existing body.
+- Add/remove individual vertices of a body (moving them + radius editing already work).
+- Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
+  control polygon is a snapshot taken at build time.
 - More joint types as needed.
 - Optional: File System Access API for true "re-open the last file by path" (Chromium only).
   Current persistence is download/upload + localStorage autosave (restores the last session).
-- Visual confirmation of multi-ground bodies (should be fully locked) — untested interactively.
 
 ## Working conventions (from CLAUDE.md)
 - Answer bug/feature questions first; confirm before changing code.
