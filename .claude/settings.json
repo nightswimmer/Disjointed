@@ -17,7 +17,13 @@
       "Bash(cat *)",
       "Bash(ls *)",
       "Bash(wc *)",
-      "Bash(tail *)"      
+      "Bash(tail *)",      
+      "Bash(sed -i * scripts/*)",
+      "Bash(npx tsx scripts/*)",
+      "Bash(curl -s * http://localhost:*)",
+      "Bash(tail -* /tmp/vite.log)",
+      "Bash(jobs -p)",
+      "Bash(xargs -r kill)"
     ],
     "deny": [
       "Bash(rm -rf *)"

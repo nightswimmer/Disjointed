@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Disjointed — 2D Mechanism Simulator</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="toolbar">
+        <div class="group" id="mode-group">
+          <button data-mode="draw" class="mode-btn active">Draw</button>
+          <button data-mode="sim" class="mode-btn">Simulate</button>
+        </div>
+        <div class="group" id="tool-group">
+          <button data-tool="polygon" class="tool-btn active" title="Draw a polygon body">Polygon</button>
+          <button data-tool="joint" class="tool-btn" title="Add a joint point to a body">Joint</button>
+          <button data-tool="connect" class="tool-btn" title="Pin two joints together">Connect</button>
+          <button data-tool="ground" class="tool-btn" title="Ground a joint (fixed position, free rotation)">Ground</button>
+          <button data-tool="slider" class="tool-btn" title="Constrain a joint to slide along a line">Slider</button>
+        </div>
+        <div class="group">
+          <button id="clear-btn" title="Delete everything">Clear</button>
+        </div>
+        <div class="spacer"></div>
+        <div id="hint" class="hint"></div>
+      </header>
+      <canvas id="scene"></canvas>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
