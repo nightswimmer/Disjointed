@@ -313,14 +313,14 @@ function handleDrawClick(p: Vec2): void {
         if (j) selectedJoint = j.id;
         break;
       }
-      // Second pick: another joint → pin them; or a slider line → attach as a rider.
-      if (j) {
-        if (j.id !== selectedJoint) {
-          const a = scene.getJoint(selectedJoint)!;
-          if (a.bodyId !== j.bodyId) {
-            scene.addPin(selectedJoint, j.id);
-            placed = true;
-          }
+      // Second pick: a *different* joint → pin them; or a slider line → attach as a
+      // rider. A hit on the selected joint itself is ignored so the click can fall
+      // through to the slider underneath (the rider often sits right on the rail).
+      if (j && j.id !== selectedJoint) {
+        const a = scene.getJoint(selectedJoint)!;
+        if (a.bodyId !== j.bodyId) {
+          scene.addPin(selectedJoint, j.id);
+          placed = true;
         }
         selectedJoint = null;
         break;

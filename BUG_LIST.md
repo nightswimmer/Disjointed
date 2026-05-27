@@ -1,0 +1,1 @@
+- Grounded joints move when trying to solve an impossible connection.

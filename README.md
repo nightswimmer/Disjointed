@@ -44,7 +44,9 @@ a body takes its joints and constraints with it; a slider rail leaves its joints
 from any rail.
 
 Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
-rail-defining joints get a **green ring**, and **free joints a dashed ring**.
+rail-defining joints get a **green ring**, and a **loose free joint a dashed ring**. Once a free
+joint is attached to a slider it's no longer loose, so it drops the dashed ring and shows as a
+normal (green) rider.
 
 **Undo / redo:** `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Shift+Z` (or `Ctrl/Cmd+Y`) redoes — covering edits to the drawn layout.
 

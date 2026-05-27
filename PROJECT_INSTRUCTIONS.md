@@ -62,7 +62,8 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
 - **renderer.ts** — draws under the camera transform in world space: world-locked grid,
   bodies (selected/hovered highlighted), slider rails as bounded segments with end-caps,
   ground symbols, joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
-  rail joints get a green ring; **free joints get a muted dashed ring**), corner-handle squares
+  rail joints get a green ring; **a loose free joint gets a muted dashed ring — but a free joint
+  that rides a slider drops the dashed ring and renders as a normal rider**), corner-handle squares
   for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
   expansion preview, slider rail preview). Cosmetic sizes are divided by the zoom.
 - **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state (tools are one-shot + have
@@ -169,12 +170,25 @@ Persistence:
   the body's ground anchors.
 - **Grounded free joint drifted** when a heavy body was pinned to it (the light point got
   shoved around). Fixed: a grounded free joint is a fixed host for all constraints.
+- **A free joint attached to a slider looked unconnected.** The attach worked all along (model
+  + solver support a free rider), but the renderer kept drawing the rider with its "loose free
+  joint" dashed ring, so it never read as connected. Fixed: a free joint that rides a slider is
+  no longer treated as loose (`isFree = bodyId === null && !roles.slider.has(id)`), so it renders
+  as a normal green rider. Also tightened the Connect tool: a second-pick click that lands on the
+  already-selected joint now falls through to the slider underneath instead of cancelling (lets a
+  free joint sitting right on the rail be attached by clicking it).
 
 ## Backlog / next steps (not yet built)
 - Add/remove individual vertices of a body (moving them + radius editing already work).
 - Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
   control polygon is a snapshot taken at build time.
 - More joint types as needed.
+- **World-anchored slider rail from two grounded free joints** (discussed, not built). Today a
+  rail must be two joints on one body; a fixed-in-space track requires making a body and grounding
+  it. Two grounded free joints would express the same thing directly (the static/degenerate rail).
+  Needs: generalize the solver's rail side from a `Body` to a host (body *or* immovable), and let
+  the Slider tool accept two free joints — with the rule that a free-joint rail requires **both**
+  endpoints grounded (a partially-grounded free rail has no rigid frame and would be unstable).
 - Optional: File System Access API for true "re-open the last file by path" (Chromium only).
   Current persistence is download/upload + localStorage autosave (restores the last session).
 
