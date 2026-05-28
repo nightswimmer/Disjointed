@@ -11,9 +11,28 @@
 import { Body, Joint, Scene } from "./model";
 import { Vec2, add, rotate, cross, perp, scale, sub, len, dot } from "./geometry";
 
+/**
+ * The mouse driver: pull a point toward `target`. The point is either an existing joint
+ * (`jointId`) or an arbitrary location fixed in a body's frame (`bodyId` + `local`, the
+ * centroid-offset in body coordinates) — the latter lets the user grab any part of a body,
+ * not just a joint.
+ */
 export interface Driver {
-  jointId: number;
   target: Vec2;
+  jointId?: number;
+  bodyId?: number;
+  local?: Vec2;
+}
+
+/**
+ * A constraint that couldn't be satisfied (the assembly is impossible): the two world
+ * points that should coincide but can't, and the leftover gap between them. The UI draws
+ * a red dotted line between `a` and `b` and flags the assembly as unsolvable.
+ */
+export interface ConstraintBreak {
+  a: Vec2;
+  b: Vec2;
+  error: number;
 }
 
 /** Inverse mass of a free (body-less) joint — a light translational point particle. */
@@ -52,7 +71,13 @@ function bodyImpulse(body: Body, point: Vec2, imp: Vec2): void {
   body.angle += body.invInertia * cross(r, imp);
 }
 
-/** Resolve a joint to its solver host: a body-attached point, or a free point. */
+/**
+ * Resolve a joint to its solver host **for its own ground constraint**: a body-attached
+ * point, or a free point. A grounded *free* joint is an immovable anchor; a grounded *body*
+ * joint stays a body host here, so its ground constraint can lock the body's pose (two such
+ * grounds on one body fix its rotation, which translation-only projection can't). Pins and
+ * sliders go through `pinHostFor` instead, which treats any grounded joint as fixed.
+ */
 function hostFor(scene: Scene, joint: Joint, grounded: Set<number>): Host {
   if (joint.bodyId === null) {
     // A grounded free joint is an immovable anchor: fixed for *every* constraint, so a
@@ -86,6 +111,46 @@ function hostFor(scene: Scene, joint: Joint, grounded: Set<number>): Host {
 /** An immovable world point (a ground anchor or the mouse target). */
 function fixedHost(p: Vec2): Host {
   return { point: p, pos: p, invMass: 0, invInertia: 0, apply() {} };
+}
+
+/**
+ * Host for a joint as seen by a *pin, slider, or the mouse driver* — anything other than the
+ * joint's own ground. A grounded joint of any kind (free, or sitting on a body) is an
+ * immovable world point here: pinning to it pulls the *other* side onto the anchor and never
+ * drags the body the joint belongs to. That body still pivots about the joint via its own
+ * ground constraint, driven by its other joints. Ungrounded joints fall back to `hostFor`.
+ */
+function pinHostFor(scene: Scene, joint: Joint, grounded: Set<number>): Host {
+  if (grounded.has(joint.id)) return fixedHost(scene.jointWorld(joint));
+  return hostFor(scene, joint, grounded);
+}
+
+/**
+ * The host the mouse driver pulls toward its target: an existing joint (via `pinHostFor`,
+ * so a grounded joint stays put), or an arbitrary point fixed in a body's frame — a body
+ * translate+rotate host at the grabbed local offset, so dragging anywhere on a body pivots
+ * it like a joint would (grounds still win, being projected every sweep).
+ */
+function driverHost(scene: Scene, driver: Driver, grounded: Set<number>): Host | null {
+  if (driver.jointId !== undefined) {
+    const j = scene.getJoint(driver.jointId);
+    return j ? pinHostFor(scene, j, grounded) : null;
+  }
+  if (driver.bodyId !== undefined && driver.local) {
+    const body = scene.getBody(driver.bodyId);
+    if (!body) return null;
+    const point = add(body.pos, rotate(driver.local, body.angle));
+    return {
+      point,
+      pos: body.pos,
+      invMass: body.invMass,
+      invInertia: body.invInertia,
+      apply(imp) {
+        bodyImpulse(body, point, imp);
+      },
+    };
+  }
+  return null;
 }
 
 /** Solve K·x = -c for a symmetric 2×2 K = [[a,b],[b,d]]; returns [0,0] if singular. */
@@ -191,14 +256,27 @@ function railHostFor(railBody: Body | null, fixedPos: Vec2): RailHost {
   return { pos: fixedPos, invMass: 0, invInertia: 0, applyAt() {} };
 }
 
-/** One Gauss-Seidel sweep over the structural constraints (pin / ground / slider). */
-function sweepStructural(scene: Scene, relax: number, grounded: Set<number>): void {
+/** Shared empty exclusion set (no constraints disabled). */
+const NONE: ReadonlySet<number> = new Set<number>();
+
+/**
+ * One Gauss-Seidel sweep over the structural constraints (pin / ground / slider). `skip`
+ * names "broken" units to leave disabled — a pin by its constraint id, a slider rider by
+ * its joint id (ids are globally unique). Grounds are never skipped.
+ */
+function sweepStructural(
+  scene: Scene,
+  relax: number,
+  grounded: Set<number>,
+  skip: ReadonlySet<number> = NONE
+): void {
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
+      if (skip.has(con.id)) continue;
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
-      solveCoincident(hostFor(scene, ja, grounded), hostFor(scene, jb, grounded), relax);
+      solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
       if (!j) continue;
@@ -212,12 +290,13 @@ function sweepStructural(scene: Scene, relax: number, grounded: Set<number>): vo
       if (!kind) continue;
       const railBody = kind === "body" ? scene.getBody(ja.bodyId!)! : null;
       for (const riderId of con.riders) {
+        if (skip.has(riderId)) continue;
         const jq = scene.getJoint(riderId);
         if (!jq) continue;
         if (railBody && jq.bodyId === railBody.id) continue; // rider rigid to the rail: nothing to do
         // Recompute the rail each rider, since a rider's reaction can move the rail body.
         solveSliderRail(
-          hostFor(scene, jq, grounded),
+          pinHostFor(scene, jq, grounded),
           scene.jointWorld(ja),
           scene.jointWorld(jb),
           railHostFor(railBody, scene.jointWorld(ja)),
@@ -225,6 +304,42 @@ function sweepStructural(scene: Scene, relax: number, grounded: Set<number>): vo
         );
       }
     }
+  }
+  // Grounds get the last word every sweep, so no other constraint can drag a grounded
+  // joint off its anchor — an impossible assembly leaves its error on the pins/sliders.
+  projectGrounds(scene);
+}
+
+/**
+ * Hard-project every ground: snap each grounded joint exactly onto its anchor so it can
+ * never be moved. A grounded *free* joint is already an immovable fixed host (we just keep
+ * it exact); a grounded *body* joint is restored by translating its body so the joint
+ * lands on the anchor — pure translation preserves the angle, so combined with the sweep's
+ * rotation impulse the body effectively pivots about the anchor (correct revolute-to-ground
+ * motion) while the anchor stays put. A body carrying *several* grounds is over-determined;
+ * we translate it by the average of the per-ground corrections, so conflicting grounds
+ * settle deterministically at the midpoint instead of teleporting between them each sweep.
+ */
+function projectGrounds(scene: Scene): void {
+  const perBody = new Map<number, { sum: Vec2; n: number }>();
+  for (const con of scene.constraints) {
+    if (con.kind !== "ground") continue;
+    const j = scene.getJoint(con.joint);
+    if (!j) continue;
+    if (j.bodyId === null) {
+      j.local = { x: con.anchor.x, y: con.anchor.y };
+      continue;
+    }
+    const body = scene.getBody(j.bodyId);
+    if (!body) continue;
+    const world = add(body.pos, rotate(j.local, body.angle));
+    const corr = sub(con.anchor, world);
+    const e = perBody.get(body.id) ?? { sum: { x: 0, y: 0 }, n: 0 };
+    perBody.set(body.id, { sum: add(e.sum, corr), n: e.n + 1 });
+  }
+  for (const [id, e] of perBody) {
+    const body = scene.getBody(id)!;
+    body.pos = add(body.pos, scale(e.sum, 1 / e.n));
   }
 }
 
@@ -246,42 +361,189 @@ const DRIVER_MAX_STEP = 8;
 const STRUCTURAL_TOL = 1e-4;
 /** Safety cap on convergence sweeps so an over-constrained scene can't loop forever. */
 const MAX_CLEANUP_SWEEPS = 1000;
+/**
+ * Final per-constraint error (world units) above which a constraint counts as an
+ * unsatisfiable "break". Well above the convergence slop of a solvable scene
+ * (STRUCTURAL_TOL), so only a genuinely impossible assembly is flagged.
+ */
+const BREAK_TOL = 1e-1;
+/**
+ * Under-relaxation used to settle an over-constrained scene. Full-relaxation Gauss-Seidel
+ * oscillates when the assembly can't be satisfied, so it never settles and leaves inflated,
+ * arbitrary errors on *every* constraint — flagging joints that can actually be reached.
+ * A gentle relaxation damps the oscillation so the scene converges to its true least-error
+ * pose, where reachable constraints rest at ~0 and only the genuinely stuck ones remain.
+ */
+const STABILIZE_RELAX = 0.1;
+/** Gentle relaxation for pulling disabled ("broken") units closed — small so they yield to
+ *  the active constraints, using only the assembly's leftover freedom. */
+const CLOSE_RELAX = 0.5;
+/** Cap on gap-closing steps (each fully re-tightens the active set); stops early when stable. */
+const CLOSE_SWEEPS = 200;
+/** Stop closing once a step shrinks the worst gap by less than this (world units). */
+const CLOSE_TOL = 0.05;
 
-/** Largest positional error across all structural constraints (world units). */
-function structuralResidual(scene: Scene, grounded: Set<number>): number {
-  let max = 0;
+/**
+ * A solvable "unit" of structural error: a pin, a ground, or one slider rider. `id` is the
+ * pin/ground constraint id or the rider's joint id (globally unique). `a`/`b` are the two
+ * world points that should coincide (for a rider, `b` is the nearest point on the rail
+ * segment); `error` is their gap. `ground` marks the units that are sacred (never disabled).
+ */
+interface StructuralUnit {
+  id: number;
+  a: Vec2;
+  b: Vec2;
+  error: number;
+  ground: boolean;
+}
+
+/** Visit every structural unit (pin, ground, slider rider) with its current error. */
+function eachUnit(scene: Scene, grounded: Set<number>, visit: (u: StructuralUnit) => void): void {
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
-      max = Math.max(max, len(sub(scene.jointWorld(ja), scene.jointWorld(jb))));
+      const a = scene.jointWorld(ja);
+      const b = scene.jointWorld(jb);
+      visit({ id: con.id, a, b, error: len(sub(a, b)), ground: false });
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
       if (!j) continue;
-      max = Math.max(max, len(sub(scene.jointWorld(j), con.anchor)));
+      const a = scene.jointWorld(j);
+      visit({ id: con.id, a, b: con.anchor, error: len(sub(a, con.anchor)), ground: true });
     } else if (con.kind === "slider") {
       const ja = scene.getJoint(con.railA);
       const jb = scene.getJoint(con.railB);
-      if (!ja || !jb) continue;
-      if (!railKind(ja, jb, grounded)) continue; // matches sweep's guard
-      const a = scene.jointWorld(ja);
-      const d = sub(scene.jointWorld(jb), a);
+      if (!ja || !jb || !railKind(ja, jb, grounded)) continue;
+      const a0 = scene.jointWorld(ja);
+      const d = sub(scene.jointWorld(jb), a0);
       const dl = len(d);
       if (dl < 1e-9) continue;
       const dir = scale(d, 1 / dl);
       for (const riderId of con.riders) {
         const jq = scene.getJoint(riderId);
         if (!jq) continue;
-        const q = sub(scene.jointWorld(jq), a);
-        const perpDist = Math.abs(dot(q, perp(dir))); // off the rail line
-        const s = dot(q, dir); // position along the rail
-        const overshoot = s < 0 ? -s : s > dl ? s - dl : 0; // past an endpoint
-        max = Math.max(max, perpDist, overshoot);
+        const q = scene.jointWorld(jq);
+        const s = Math.max(0, Math.min(dl, dot(sub(q, a0), dir))); // nearest point on the rail segment
+        const closest = add(a0, scale(dir, s));
+        visit({ id: riderId, a: q, b: closest, error: len(sub(q, closest)), ground: false });
       }
     }
   }
+}
+
+/** Largest positional error across the active (non-`skip`) structural units (world units). */
+function structuralResidual(scene: Scene, grounded: Set<number>, skip: ReadonlySet<number> = NONE): number {
+  let max = 0;
+  eachUnit(scene, grounded, (u) => {
+    if (!skip.has(u.id)) max = Math.max(max, u.error);
+  });
   return max;
+}
+
+/** The worst-violated active, non-ground unit (the next candidate to disable), or null. */
+function worstActiveUnit(
+  scene: Scene,
+  grounded: Set<number>,
+  skip: ReadonlySet<number>
+): { id: number; error: number } | null {
+  let best: { id: number; error: number } | null = null;
+  eachUnit(scene, grounded, (u) => {
+    if (u.ground || skip.has(u.id)) return;
+    if (!best || u.error > best.error) best = { id: u.id, error: u.error };
+  });
+  return best;
+}
+
+/**
+ * Settle the active (non-`skip`) constraints into a stable pose with under-relaxed sweeps,
+ * stopping once the worst active error stops shrinking. Under-relaxation damps the
+ * oscillation that full relaxation shows on an unconverged scene, so the active set reaches
+ * its true least-error pose and the "worst active unit" reading is meaningful.
+ */
+function settle(scene: Scene, grounded: Set<number>, skip: ReadonlySet<number>, relax: number): void {
+  let prev = Infinity;
+  for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
+    const res = structuralResidual(scene, grounded, skip);
+    if (res < STRUCTURAL_TOL || prev - res < STRUCTURAL_TOL) break;
+    prev = res;
+    sweepStructural(scene, relax, grounded, skip);
+  }
+}
+
+/** Apply just the disabled ("broken") units, gently — used to pull broken gaps closed. */
+function applyBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>, relax: number): void {
+  for (const con of scene.constraints) {
+    if (con.kind === "pin") {
+      if (!broken.has(con.id)) continue;
+      const ja = scene.getJoint(con.jointA);
+      const jb = scene.getJoint(con.jointB);
+      if (ja && jb) solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
+    } else if (con.kind === "slider") {
+      const ja = scene.getJoint(con.railA);
+      const jb = scene.getJoint(con.railB);
+      if (!ja || !jb) continue;
+      const kind = railKind(ja, jb, grounded);
+      if (!kind) continue;
+      const railBody = kind === "body" ? scene.getBody(ja.bodyId!)! : null;
+      for (const riderId of con.riders) {
+        if (!broken.has(riderId)) continue;
+        const jq = scene.getJoint(riderId);
+        if (!jq || (railBody && jq.bodyId === railBody.id)) continue;
+        solveSliderRail(
+          pinHostFor(scene, jq, grounded),
+          scene.jointWorld(ja),
+          scene.jointWorld(jb),
+          railHostFor(railBody, scene.jointWorld(ja)),
+          relax
+        );
+      }
+    }
+  }
+}
+
+/** Largest gap across the disabled ("broken") units (world units). */
+function brokenResidual(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>): number {
+  let max = 0;
+  eachUnit(scene, grounded, (u) => {
+    if (!u.ground && broken.has(u.id)) max = Math.max(max, u.error);
+  });
+  return max;
+}
+
+/**
+ * Pull the disabled ("broken") units as close together as the still-rigid assembly allows:
+ * each step nudges them gently, then *fully* re-settles the active set + grounds so the
+ * solved parts snap back to satisfied. The broken pull therefore only consumes the
+ * assembly's leftover freedom (e.g. a body's free rotation about its ground), minimizing the
+ * red-line gap without disturbing anything that's actually satisfied. Stops once the gap
+ * stabilizes (the freedom is used up).
+ */
+function closeBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>): void {
+  if (broken.size === 0) return;
+  let prev = Infinity;
+  for (let i = 0; i < CLOSE_SWEEPS; i++) {
+    applyBroken(scene, grounded, broken, CLOSE_RELAX);
+    settle(scene, grounded, broken, 1); // re-tighten the active set + grounds to convergence
+    const gap = brokenResidual(scene, grounded, broken);
+    if (prev - gap < CLOSE_TOL) break; // freedom exhausted — gap won't shrink meaningfully further
+    prev = gap;
+  }
+}
+
+/**
+ * Report the genuinely unsatisfiable constraints as red-line breaks: the disabled units
+ * whose gap is still visible, plus any ground that can't be met (e.g. two grounds fighting
+ * over one body — grounds are never disabled, so they surface here instead).
+ */
+function breaksForBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>): ConstraintBreak[] {
+  const breaks: ConstraintBreak[] = [];
+  eachUnit(scene, grounded, (u) => {
+    const isBreak = u.ground ? u.error > BREAK_TOL : broken.has(u.id) && u.error > BREAK_TOL;
+    if (isBreak) breaks.push({ a: u.a, b: u.b, error: u.error });
+  });
+  return breaks;
 }
 
 /**
@@ -292,21 +554,47 @@ function structuralResidual(scene: Scene, grounded: Set<number>): number {
  * is hit). This adapts to mechanism complexity — simple scenes converge in a
  * couple of sweeps, closed loops get as many as they need — and makes the driver
  * yield to the structural constraints, so it can never break a pin/ground/slider.
+ *
+ * Returns the constraints that stay unsatisfied (an impossible assembly) — empty when
+ * everything resolves. Grounds are sacred (never disabled); when the assembly is
+ * over-constrained the solver disables only the genuinely unreachable pins/sliders and
+ * reports them, leaving the rest correctly solved.
  */
-export function solve(scene: Scene, driver: Driver | null, iterations = 100, relax = 1): void {
+export function solve(
+  scene: Scene,
+  driver: Driver | null,
+  iterations = 100,
+  relax = 1
+): ConstraintBreak[] {
   const grounded = groundedJoints(scene);
+
+  // Phase A — normal solve with the mouse driver, then converge to tolerance.
   for (let iter = 0; iter < iterations; iter++) {
     sweepStructural(scene, relax, grounded);
     if (driver) {
-      const j = scene.getJoint(driver.jointId);
-      if (j) solveCoincident(hostFor(scene, j, grounded), fixedHost(driver.target), 1, DRIVER_MAX_STEP);
+      const host = driverHost(scene, driver, grounded);
+      if (host) solveCoincident(host, fixedHost(driver.target), 1, DRIVER_MAX_STEP);
     }
   }
-
-  // Converge structural constraints to tolerance; they take strict priority over
-  // the driver. Stops early once the mechanism is tight enough.
   for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
     if (structuralResidual(scene, grounded) < STRUCTURAL_TOL) break;
     sweepStructural(scene, relax, grounded);
   }
+  if (structuralResidual(scene, grounded) < STRUCTURAL_TOL) return []; // everything resolved
+
+  // Phase B — over-constrained. Greedily disable the worst-violated non-ground unit and
+  // re-settle, until the remaining (active) constraints can all be satisfied. Grounds are
+  // never disabled, so the disabled units are exactly the pins/sliders that can't be met.
+  const broken = new Set<number>();
+  for (let guard = 0; guard <= scene.constraints.length; guard++) {
+    settle(scene, grounded, broken, STABILIZE_RELAX);
+    const worst = worstActiveUnit(scene, grounded, broken);
+    if (!worst || worst.error < BREAK_TOL) break;
+    broken.add(worst.id);
+  }
+
+  // Phase C — pull the disabled units as close as the now-rigid assembly allows, then report
+  // whatever gap remains as a red-line break.
+  closeBroken(scene, grounded, broken);
+  return breaksForBroken(scene, grounded, broken);
 }

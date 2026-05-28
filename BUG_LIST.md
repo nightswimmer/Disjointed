@@ -1,2 +1,0 @@
-- Grounded joints move when trying to solve an impossible connection.
-- Creating new solid by clicking on free joints also need to create a new joint for the body if the existing joint is grounded.

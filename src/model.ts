@@ -255,12 +255,33 @@ export class Scene {
     if (body.local.length < 3) return null;
     joints.forEach((j, i) => {
       const w = worlds[i];
-      if (j.bodyId === null) {
-        // Absorb the free joint: it now belongs to the new body (angle 0 at creation).
+      // Does this joint belong to a slider — as a rail node or as a rider?
+      const slider = this.constraints.find(
+        (c) =>
+          c.kind === "slider" &&
+          (c.railA === j.id || c.railB === j.id || c.riders.includes(j.id))
+      ) as SliderConstraint | undefined;
+      const isRailNode = !!slider && (slider.railA === j.id || slider.railB === j.id);
+      const grounded =
+        j.bodyId === null &&
+        this.constraints.some((c) => c.kind === "ground" && c.joint === j.id);
+      if (slider && isRailNode) {
+        // A slider rail node can't be folded into the new body: add a coincident joint and
+        // confine it to the slider as a rider, so the body connects to the slider track
+        // itself rather than being pinned to one of the rail's endpoints.
+        const nj = this.addJoint(body.id, w);
+        this.attachSliderRider(slider.id, nj.id);
+      } else if (j.bodyId === null && !grounded) {
+        // A loose free joint, or a free slider rider: absorb it. It now belongs to the new
+        // body (angle 0 at creation); if it was a rider it stays one (rider ids are kept).
         j.bodyId = body.id;
         j.local = sub(w, body.pos);
       } else {
-        // Joint on another body: add a coincident joint here and pin them together.
+        // A joint on another body (including a rider on another body), or a grounded free
+        // joint (an anchor we must keep independent): add a coincident joint here and pin
+        // them together, so the new body is pinned to it (free to rotate) rather than
+        // absorbing/grounding it. Pinning to another body's rider joins the two bodies at
+        // that point and lets them ride the slider together through the shared pin.
         const nj = this.addJoint(body.id, w);
         this.addPin(nj.id, j.id);
       }

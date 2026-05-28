@@ -7,9 +7,9 @@ Two modes:
   constraints (rotation/pin, ground, slider). Joints on the same body are rigid relative to
   each other. Bodies have an editable control polygon + corner radius; the rounded outline is
   derived from it.
-- **Simulation mode** — pick a joint and drag it (the "driving joint"); the body it
-  belongs to moves and a constraint solver propagates the motion through everything
-  connected to it.
+- **Simulation mode** — drag any joint, or any point on a body, to drive the mechanism; the
+  grabbed point follows the cursor and a constraint solver propagates the motion through
+  everything connected to it.
 
 ## Current status
 End-to-end draw → simulate works, with: select/move/delete editing; one-shot tools + keyboard
@@ -65,9 +65,11 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
     `buildBodyFromJoints(jointIds, margin)` stores **one control point per joint** with
     `round: "offset"`. Per joint: a **loose free joint (or a free slider rider) is absorbed**
     into the new body; a **joint on another body, or a grounded free joint (an anchor)**, gets a
-    coincident new joint **pinned** to it (so the anchor stays independent); a **slider rail node
-    or a rider on another body** gets a coincident new joint **attached to that slider as a
-    rider** (the body connects to the slider, not pinned to a node). Editing: `moveBodyVertex`,
+    coincident new joint **pinned** to it (so the anchor stays independent) — this includes a
+    **rider that belongs to another body**, where the pin joins the two bodies at that point so they
+    ride the slider together through the shared pin; a **slider rail node** instead gets a coincident
+    new joint **attached to that slider as its own rider** (the body connects to the slider track,
+    not pinned to a rail endpoint). Editing: `moveBodyVertex`,
     `insertBodyVertex` (add a control vertex),
     `removeBodyVertex` (drop one, kept ≥ 3), `setBodyRadius`, `moveJoint`, `moveBody` — all go
     through `rebuildBody`, so attached joints stay anchored.
@@ -140,8 +142,9 @@ aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
   **existing joint**: build a body *from joints* — click joints to outline (loose free joints
-  absorbed; grounded free joints and joints on other bodies get a pinned twin; slider rail
-  nodes / cross-body riders get a twin attached to the slider as a rider; a bare **slider-rail**
+  absorbed; grounded free joints, joints on other bodies, and a **rider on another body** get a
+  pinned twin — pinning to a cross-body rider joins the two bodies so they ride the slider together;
+  a **slider rail node** gets a twin attached to the slider as its own rider; a bare **slider-rail**
   click drops a rider point there), click an already-added joint to finish, then move the cursor
   out to size the outward margin (live preview) and click to finalize.
 - **Joint** (`J`) — click inside a body to attach a joint; click where bodies overlap to drop
@@ -175,9 +178,11 @@ Rotate tool (`R`, draw mode — a mode, not one-shot):
   ~2°. Joints and ground anchors rotate rigidly with the body. Esc / another tool exits.
 
 Simulate mode:
-- Drag any joint. It becomes the driver; its body follows the cursor and connected bodies
-  move with it. Entering sim snapshots all poses and runs a settle solve; leaving sim
-  restores the drawn layout so editing is non-destructive.
+- Drag any joint, or any part of a body. It becomes the driver; the grabbed point follows the
+  cursor and connected bodies move with it. Joints take priority over the body underneath; with no
+  joint under the cursor, `bodyAt` grabs the body and the grab point (a body-frame offset) is
+  driven. Entering sim snapshots all poses and runs a settle solve; leaving sim restores the drawn
+  layout so editing is non-destructive.
 - **Impossible assemblies** are flagged, not faked: grounds never move, the solvable parts still
   solve, and every unsatisfiable pin/slider draws a **red dotted line** between the two points
   that can't meet (pulled as close as the assembly allows), with a red **"Assembly impossible"**
@@ -214,7 +219,13 @@ Persistence:
   solve (settle and drive), so complex/closed-loop mechanisms hold without visible drift.
 - **Structural constraints take strict priority over the mouse driver** — the convergence
   loop is structural-only, so the driver can never drag a ground point or break a pin/slider.
-- The driver is **step-limited** (`DRIVER_MAX_STEP`): it pulls the joint toward the cursor by
+- The **mouse driver** (`Driver`) pulls a point toward the cursor target. The point is either an
+  existing joint (`jointId`, via `pinHostFor` so a grounded joint stays put) or an arbitrary point
+  fixed in a body's frame (`bodyId` + `local`, a body translate+rotate host built by `driverHost`) —
+  the latter is what lets the user grab any part of a body. Grounds still win (projected every
+  sweep), so dragging a grounded body's interior pivots it about its ground rather than tearing it
+  loose, exactly as driving a non-grounded joint on that body does.
+- The driver is **step-limited** (`DRIVER_MAX_STEP`): it pulls the point toward the cursor by
   at most a small amount per sweep. This keeps the linearized correction valid, so an
   unreachable target makes the joint walk stably along its feasible path to the nearest
   reachable point instead of overshooting.
@@ -269,7 +280,8 @@ Persistence:
   added for a joint on another body, expanded body has area / contains the joints, min-joint
   rejection; a **grounded free joint** kept as an independent anchor (pinned twin, not absorbed);
   a **slider rail node** gets a rider twin (no pin); a **free slider rider** absorbed and stays a
-  rider.
+  rider; a **rider that belongs to another body** gets a pinned twin (one pin, no second rider) so
+  the two bodies are joined and ride the slider together.
 - **impossible-assembly.ts** — over-constrained scenes: a grounded joint stays *exactly* fixed
   while an unreachable pin breaks; a solvable four-bar with an impossible pendant keeps the
   four-bar intact (only the pendant flagged); and the key case — two grounded pieces pinned at
@@ -322,6 +334,13 @@ Persistence:
   pins/sliders/driver; (b) hard ground projection every sweep; and (c) break-and-exclude: only the
   genuinely unreachable pins/sliders are disabled and drawn as red dotted lines (grounds never
   move), with an on-canvas error banner.
+- **Building two bodies on a shared slider rider left them independent.** Building a body from a
+  joint that was already a **rider on another body** created a *new, separate* rider coincident with
+  it, so the two bodies slid apart freely instead of staying joined. Root cause: `buildBodyFromJoints`
+  lumped "rail node" and "rider on another body" into one rider-attach branch. Fixed: that branch now
+  fires only for an actual **rail node**; a rider-on-another-body falls through to the pin branch, so
+  the new body is **pinned** to the existing rider — joining the two bodies, which then ride the
+  slider together through the shared pin.
 
 ## Backlog / next steps (not yet built)
 - Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the

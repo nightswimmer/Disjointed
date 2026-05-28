@@ -1,8 +1,8 @@
 import "./style.css";
 import { Scene, SceneData, BodyClip } from "./model";
-import { solve, Driver } from "./solver";
+import { solve, Driver, ConstraintBreak } from "./solver";
 import { render } from "./renderer";
-import { Vec2, add, dist, sub, vec, dot, lenSq, scale, roundedConvexBody } from "./geometry";
+import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, roundedConvexBody } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
@@ -23,6 +23,7 @@ const ROTATE_SNAP_TOL = (2 * Math.PI) / 180;
 const canvas = document.getElementById("scene") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 const hintEl = document.getElementById("hint")!;
+const simErrorEl = document.getElementById("sim-error")!;
 const toolGroup = document.getElementById("tool-group")!;
 const editGroup = document.getElementById("edit-group")!;
 const gridBtn = document.getElementById("grid-btn") as HTMLButtonElement;
@@ -38,6 +39,7 @@ let mode: Mode = "draw";
 let tool: Tool | null = null;
 let draftBody: Vec2[] = []; // freehand polygon vertices (body tool, empty-space start)
 let jointDraftIds: number[] = []; // joints picked to build a body (body tool, joint start)
+let jointDraftCreated: number[] = []; // joints made on slider rails during that draft (removed if aborted)
 let jointDraftExpanding = false; // body-from-joints: sizing the outward margin
 let cursor: Vec2 | null = null; // world coordinates
 let hoverJoint: number | null = null;
@@ -46,6 +48,8 @@ let selectedJoint: number | null = null; // first pick for connect
 let sliderDraftIds: number[] = []; // rail joints picked so far for the slider tool (0–2)
 let selection: Selection | null = null; // element selected in normal mode
 let driver: Driver | null = null;
+/** Constraints the last solve couldn't satisfy (impossible assembly); drives the red overlay + banner. */
+let solveBreaks: ConstraintBreak[] = [];
 /** Body poses saved when entering simulation, restored when leaving. */
 let savedPoses: Map<number, { pos: Vec2; angle: number }> | null = null;
 /** Last body copied (Ctrl+C / Copy button); pasted at the cursor with Ctrl+V / Paste. */
@@ -147,7 +151,7 @@ function defaultCursor(): string {
 // --- hint text -----------------------------------------------------------
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
-  sim: "Drag any joint to drive the mechanism.",
+  sim: "Drag any joint, or any part of a body, to drive the mechanism.",
   select: "Click to select · drag to move · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · [ and ] round corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
@@ -230,6 +234,7 @@ function setMode(next: Mode): void {
   } else if (savedPoses) {
     scene.restorePoses(savedPoses); // restore the drawn layout for editing
     savedPoses = null;
+    solveBreaks = []; // leaving sim: clear any impossible-assembly markers
   }
   mode = next;
   document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((b) =>
@@ -239,6 +244,7 @@ function setMode(next: Mode): void {
   editGroup.classList.toggle("hidden", mode === "sim");
   canvas.style.cursor = mode === "sim" ? "grab" : "crosshair";
   updateHint();
+  updateSimError(); // show/hide the banner for the mode we just entered
 }
 
 function setTool(next: Tool): void {
@@ -266,6 +272,10 @@ function disarmTool(): void {
 
 function resetTransient(): void {
   draftBody = [];
+  // Discard any slider-rail joints made for an unfinished body-from-joints draft (a finished
+  // build clears this list first, so its absorbed joints survive).
+  for (const id of jointDraftCreated) scene.removeJoint(id);
+  jointDraftCreated = [];
   jointDraftIds = [];
   jointDraftExpanding = false;
   selectedJoint = null;
@@ -409,11 +419,22 @@ function handleDrawClick(p: Vec2): void {
       // revolute). On empty space: a free, body-less joint (a movable point).
       const bodies = scene.bodiesAt(p);
       const at = snap(p); // place on the grid; hit-test against the raw click point
+      let created: ReturnType<typeof scene.addFreeJoint>;
       if (bodies.length > 0) {
         const joints = bodies.map((b) => scene.addJoint(b.id, at));
         for (let i = 1; i < joints.length; i++) scene.addPin(joints[0].id, joints[i].id);
+        created = joints[0];
       } else {
-        scene.addFreeJoint(at);
+        created = scene.addFreeJoint(at);
+      }
+      // If the node landed on a slider rail (or rail node), confine it to that slider as a
+      // rider — unless it's rigid to the rail's own body (which would do nothing).
+      const onSlider = scene.sliderAt(p, pickRadius());
+      if (onSlider) {
+        const railBodyId = scene.getJoint(onSlider.railA)!.bodyId;
+        if (created.bodyId === null || created.bodyId !== railBodyId) {
+          scene.attachSliderRider(onSlider.id, created.id);
+        }
       }
       placed = true;
       break;
@@ -651,22 +672,42 @@ function handleBodyClick(p: Vec2): void {
     // Collecting joints. A new joint is added; clicking one already in the outline
     // finishes picking and begins the outward-expansion phase (needs ≥2 joints).
     const j = scene.jointAt(p, pickRadius());
-    if (!j) return; // empty space: ignore
-    if (jointDraftIds.includes(j.id)) {
-      if (jointDraftIds.length >= 2) jointDraftExpanding = true;
-    } else {
-      jointDraftIds.push(j.id);
+    if (j) {
+      if (jointDraftIds.includes(j.id)) {
+        if (jointDraftIds.length >= 2) jointDraftExpanding = true;
+      } else {
+        jointDraftIds.push(j.id);
+      }
+      return;
     }
-    return;
+    addSliderRiderToDraft(p); // no joint, but maybe a slider rail under the cursor
+    return; // otherwise empty space: ignore
   }
   if (draftBody.length > 0) {
     addBodyPoint(p); // already drawing a freehand polygon
     return;
   }
-  // Fresh start: a joint begins joint-build mode; empty space begins a freehand polygon.
+  // Fresh start: a joint (or a slider rail) begins joint-build mode; empty space begins a
+  // freehand polygon.
   const j = scene.jointAt(p, pickRadius());
   if (j) jointDraftIds = [j.id];
-  else addBodyPoint(p);
+  else if (!addSliderRiderToDraft(p)) addBodyPoint(p);
+}
+
+/**
+ * If `p` lands on a slider rail (but not on an existing joint), drop a grid-snapped free
+ * joint there, attach it to that slider as a rider, and add it to the body-from-joints
+ * draft. The joint is tracked in `jointDraftCreated` so an aborted draft removes it; on a
+ * finished build it gets absorbed into the body and stays a rider. Returns whether it hit.
+ */
+function addSliderRiderToDraft(p: Vec2): boolean {
+  const s = scene.sliderAt(p, pickRadius());
+  if (!s) return false;
+  const rider = scene.addFreeJoint(snap(p));
+  scene.attachSliderRider(s.id, rider.id);
+  jointDraftIds.push(rider.id);
+  jointDraftCreated.push(rider.id);
+  return true;
 }
 
 /** Finalize a body-from-joints: margin = how far the cursor is from the last joint. */
@@ -674,7 +715,8 @@ function finalizeJointBody(p: Vec2): void {
   const lastId = jointDraftIds[jointDraftIds.length - 1];
   const last = scene.jointWorld(scene.getJoint(lastId)!);
   const margin = Math.max(JOINT_BODY_MIN_MARGIN, dist(p, last));
-  scene.buildBodyFromJoints(jointDraftIds, margin);
+  const body = scene.buildBodyFromJoints(jointDraftIds, margin);
+  if (body) jointDraftCreated = []; // absorbed into the body now — don't clean them up
   markDirty();
   disarmTool();
 }
@@ -753,6 +795,13 @@ canvas.addEventListener("mousedown", (e) => {
     if (j) {
       driver = { jointId: j.id, target: world };
       canvas.style.cursor = "grabbing";
+    } else {
+      // No joint under the cursor: grab the body itself and drive the grabbed point.
+      const b = scene.bodyAt(world);
+      if (b) {
+        driver = { bodyId: b.id, local: rotate(sub(world, b.pos), -b.angle), target: world };
+        canvas.style.cursor = "grabbing";
+      }
     }
   }
 });
@@ -809,7 +858,14 @@ canvas.addEventListener("mousemove", (e) => {
     const rotatable = selectedBodyVertexAt(world) >= 0 || scene.bodyAt(world) !== undefined;
     canvas.style.cursor = rotatable ? "grab" : "crosshair";
   }
-  if (mode === "sim" && driver) driver.target = world;
+  if (mode === "sim") {
+    if (driver) driver.target = world;
+    else {
+      // Hint that joints and bodies are both grabbable to drive the mechanism.
+      const grabbable = hoverJoint !== null || scene.bodyAt(world) !== undefined;
+      canvas.style.cursor = grabbable ? "grab" : "default";
+    }
+  }
 });
 
 window.addEventListener("mouseup", (e) => {
@@ -952,8 +1008,21 @@ window.addEventListener("keydown", (e) => {
 /** Run a solve and log how long the calculation took (debug). */
 function timedSolve(label: string, drv: Driver | null, iterations = 100): void {
   const t0 = performance.now();
-  solve(scene, drv, iterations);
+  solveBreaks = solve(scene, drv, iterations);
   console.log(`[Disjointed] ${label} solve: ${(performance.now() - t0).toFixed(3)} ms`);
+  updateSimError();
+}
+
+/** Show/hide the red "assembly impossible" banner from the last solve's unsatisfied constraints. */
+function updateSimError(): void {
+  const show = mode === "sim" && solveBreaks.length > 0;
+  simErrorEl.classList.toggle("hidden", !show);
+  if (show) {
+    simErrorEl.textContent =
+      solveBreaks.length === 1
+        ? "Assembly impossible — a constraint can't be satisfied"
+        : `Assembly impossible — ${solveBreaks.length} constraints can't be satisfied`;
+  }
 }
 
 /** Joints currently highlighted as in-progress tool picks. */
@@ -1010,6 +1079,7 @@ function frame(): void {
     rotatePivot: rotateDrag?.pivot ?? null,
     gridStep,
     gridVisible,
+    breaks: mode === "sim" ? solveBreaks : [],
   });
   requestAnimationFrame(frame);
 }

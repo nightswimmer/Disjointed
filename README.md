@@ -4,7 +4,7 @@ A simple web app for creating and simulating **2D planar mechanisms** — bodies
 round-able shapes) coupled by joints (pins, grounds, sliders) that you can then drag and watch move.
 
 > Status: working. Draw a mechanism (freehand or from joints), edit it, switch to simulate, and
-> drag a joint to drive it. The solver and shape/edit logic are covered by headless tests.
+> drag any part of it to drive it. The solver and shape/edit logic are covered by headless tests.
 
 ## Concepts
 
@@ -31,8 +31,8 @@ to **Select** mode. Press **Esc** to abort the current placement.
 
 | Tool | Shortcut | Action |
 | --- | --- | --- |
-| **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. |
-| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. |
+| **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. |
+| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **slider rail (or rail node)** and it's automatically attached to that slider as a rider. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
 | **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
@@ -63,10 +63,17 @@ normal (green) rider.
 **Undo / redo:** `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Shift+Z` (or `Ctrl/Cmd+Y`) redoes — covering edits to the drawn layout.
 
 ### Simulate
-Drag any joint. It becomes the *driving joint*: its body follows the cursor and every
-connected body moves with it. Structural constraints always win over the cursor — a grounded
-body can only rotate about its ground point, and the dragged joint snaps to the nearest point
-it can actually reach. Your drawn layout is preserved when you switch back to Draw.
+Drag any joint, or **any part of a body**, to drive the mechanism. The grabbed point follows the
+cursor and every connected body moves with it. Structural constraints always win over the cursor —
+a grounded body can only rotate about its ground point, and the grabbed point walks to the nearest
+position it can actually reach. Your drawn layout is preserved when you switch back to Draw.
+
+**Impossible assemblies.** Grounded joints are sacred — they never move. If a mechanism can't be
+assembled (a constraint can't be satisfied), the solver keeps every solvable part working and
+flags only the genuinely impossible connections: each shows a **red dotted line** between the two
+points that can't meet (pulled as close together as the rest of the assembly allows), and a red
+**"Assembly impossible"** banner appears. A connected-but-impossible piece won't disturb the parts
+that *can* be solved.
 
 ### Grid & snapping
 The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**
@@ -102,12 +109,18 @@ npm test         # headless tests: solver, persistence, body building, shape edi
 A small **iterative position-based solver** (Gauss-Seidel projection) satisfies the
 constraints. Each constraint participant is reduced to a uniform "host" — a rigid body, a free
 joint (a movable point), or a fixed world anchor — so pins, grounds, sliders and the mouse
-driver all share one routine. After driving, the solver keeps sweeping the structural
+driver all share one routine. The driver can pull either a joint or an arbitrary point fixed in a
+body's frame, which is what lets you grab anywhere on a body to drive it. After driving, the solver keeps sweeping the structural
 constraints until the worst error is below a tolerance (capped), so complex or closed-loop
 mechanisms converge tightly instead of drifting. The driver is step-limited and yields to
 structural constraints, keeping dragging stable even when you pull toward a point the mechanism
-can't reach. Sliders are prismatic constraints with end-stops; the rail is either a body (which
-moves) or a world-fixed line built from two grounded free joints. Body outlines are
+can't reach. Grounds are inviolable: a grounded joint is treated as a fixed world point by every
+pin/slider/driver, so pinning to it can never drag the body it sits on. When an assembly can't be
+solved, the solver disables only the genuinely unreachable pins/sliders (never a ground),
+re-solves the rest, then pulls the disabled ones as close as the freedom allows and reports them
+as breaks — so a connected impossible piece doesn't corrupt the parts that can be solved. Sliders
+are prismatic constraints with end-stops; the rail is either a body (which moves) or a world-fixed
+line built from two grounded free joints. Body outlines are
 generated from a control polygon + corner radius (rounded corners via fillet or outward offset).
 The fillet rounds convex and concave (reflex) corners correctly, and splits each edge between its
 two corners so neighbouring fillets never overlap or fold — even on thin shapes at large radii.

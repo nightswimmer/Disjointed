@@ -2,6 +2,7 @@
 import { Scene } from "./model";
 import { Vec2, sub } from "./geometry";
 import { View } from "./view";
+import { ConstraintBreak } from "./solver";
 
 export interface RenderInput {
   scene: Scene;
@@ -36,6 +37,8 @@ export interface RenderInput {
   gridStep: number;
   /** Whether to draw the world-locked grid. */
   gridVisible: boolean;
+  /** Unsatisfiable constraints (impossible assembly): red dotted lines between points that can't meet. */
+  breaks: ConstraintBreak[];
 }
 
 /** On-screen joint radius in CSS pixels (kept constant regardless of zoom). */
@@ -220,6 +223,21 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.setLineDash([]);
     // Hollow center marks a revolute pin.
     if (roles.pinned.has(j.id)) dot(ctx, p, px(2), "#1e1f24");
+  }
+
+  // Impossible-assembly markers: a red dotted line between each pair of points that, given
+  // the (hard) grounds and other constraints, can't be brought together.
+  if (input.breaks.length > 0) {
+    ctx.strokeStyle = "#ff4d4d";
+    ctx.lineWidth = px(2);
+    ctx.setLineDash([px(5), px(4)]);
+    for (const b of input.breaks) {
+      ctx.beginPath();
+      ctx.moveTo(b.a.x, b.a.y);
+      ctx.lineTo(b.b.x, b.b.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 
   // Rotate pivot crosshair (drawn over everything while rotating about a point).

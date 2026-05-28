@@ -4,32 +4,15 @@
       "Read",
       "Edit",
       "Write",
-      "Bash(echo *)",
-      "Bash(git *)",
-      "Bash(npm *)",
-      "Bash(node *)",
-      "Bash(npx *)",
-      "Bash(grep *)",
-      "Bash(curl *)",
-      "Bash(node_modules/.bin/* *)",
-      "Bash(find *)",
-      "Bash(xargs *)",
-      "Bash(cat *)",
-      "Bash(ls *)",
-      "Bash(wc *)",
-      "Bash(tail *)",
-      "Bash(sed -i * scripts/*)",
-      "Bash(npx tsx scripts/*)",
-      "Bash(curl -s * http://localhost:*)",
-      "Bash(tail -* /tmp/vite.log)",
-      "Bash(jobs -p)",
-      "Bash(xargs -r kill)",
-      "Bash(npx tsc --noEmit *)",
-      "Bash(cd * && npx *)",
-      "Bash(cat > *)"
+      "Bash(*)"
     ],
     "deny": [
-      "Bash(rm -rf *)"
+      "Bash(rm -rf *)",
+      "Bash(git push *)",
+      "Bash(git commit *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean *)",
+      "Bash(> *)"
     ],
     "additionalDirectories": [
       "C:\\Github\\nightswimmer\\Disjointed\\scripts"
