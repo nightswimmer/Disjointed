@@ -15,6 +15,10 @@
           <button data-mode="sim" class="mode-btn icon-btn" title="Simulate mode — drag to drive the mechanism" aria-label="Simulate mode">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l11 6-11 6z" fill="currentColor" stroke="none"/></svg>
           </button>
+          <button id="run-btn" class="icon-btn hidden" title="Run / pause actuator animation (Space)" aria-label="Run animation">
+            <svg class="icon-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l11 6-11 6z" fill="currentColor" stroke="none"/></svg>
+            <svg class="icon-pause" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="4" width="4" height="12" fill="currentColor" stroke="none"/><rect x="11" y="4" width="4" height="12" fill="currentColor" stroke="none"/></svg>
+          </button>
         </div>
         <div class="group" id="tool-group">
           <button data-tool="body" class="tool-btn icon-btn" title="Draw a body (B)" aria-label="Body tool">
@@ -43,6 +47,32 @@
           <button id="mirror-v-btn" class="icon-btn" title="Mirror the selected body top↔bottom" aria-label="Mirror vertically">
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10" stroke-dasharray="2 2"/><path d="M6 8l4-4 4 4z" fill="currentColor" fill-opacity="0.18"/><path d="M6 12l4 4 4-4z" fill="currentColor" fill-opacity="0.18"/></svg>
           </button>
+        </div>
+        <div class="group" id="actuator-group">
+          <button data-tool="linearActuator" class="tool-btn icon-btn" title="Create a linear actuator on a slider — auto-travels back and forth in animation (L)" aria-label="Linear actuator tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="2.3" fill="currentColor" stroke="none"/><path d="M6 10l-2-1.6M6 10l-2 1.6" /><path d="M14 10l2-1.6M14 10l2 1.6" /></svg>
+          </button>
+          <button data-tool="motor" class="tool-btn icon-btn" title="Create a motor on a body — pick pivot then crank pin; spins in animation (M)" aria-label="Motor tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none"/><line x1="10" y1="10" x2="15" y2="6.5"/><circle cx="15" cy="6.5" r="1.6" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </div>
+        <div class="group hidden" id="actuator-props">
+          <label class="select-label" id="actuator-speed-label" title="Cycles per second (one back-and-forth per cycle)">
+            <span class="prop-tag">▶◀</span>
+            <input id="actuator-speed" type="number" min="0" step="0.05" value="0.5" />
+            <span class="prop-unit">Hz</span>
+          </label>
+          <div class="profile-toggle" id="actuator-profile" role="group" aria-label="Linear actuator motion profile">
+            <button type="button" data-profile="triangle" title="Triangle wave — constant speed end to end">/\</button>
+            <button type="button" data-profile="sine" title="Sine wave — smooth ease in/out at the endstops">~</button>
+          </div>
+        </div>
+        <div class="group hidden" id="motor-props">
+          <label class="select-label" title="Revolutions per second">
+            <span class="prop-tag">↻</span>
+            <input id="motor-speed" type="number" min="0" step="0.05" value="0.25" />
+            <span class="prop-unit">Hz</span>
+          </label>
         </div>
         <div class="group" id="color-group">
           <input id="body-color" type="color" value="#4f9dff"

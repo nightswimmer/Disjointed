@@ -20,6 +20,11 @@ and a fillet that handles convex + concave corners without overlapping on thin s
 sliders with end-stops whose rail is either two
 joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded),
 with joints auto-attached as riders when placed on a rail (Joint tool or body-from-joints);
+**linear actuators** (a self-driving rider on a slider that travels back and forth in animation
+at a configurable speed + motion profile) and **motors** (a pivot + crank pair on a body whose
+crank pin orbits the pivot at a configurable angular speed in animation), with a sim-mode
+**Run animation** toggle (▶/⏸ button or Space) that drives them all and **phase-fit on play** so
+toggling pause/play resumes smoothly from the current pose;
 a configurable, toggle-able grid with snap-to-grid for placement and dragging;
 editing utilities (copy/paste a body+its joints/constraints, mirror H/V in place, and a rotate
 tool that turns a body about its centroid or a node and snaps to 45°);
@@ -29,9 +34,10 @@ dotted lines plus an on-canvas error banner). The solver and shape/edit logic ar
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
 **UI polish**: the toolbar is icon buttons with tooltips; a dark/light **theme toggle** (persisted)
 themes both the chrome and the canvas; a **body-colour swatch** sets the new-body default or
-recolours the selected body (paste keeps the source colour); and in draw mode, **dotted connectors**
-mark constraints whose endpoints don't yet touch (blue between pinned joints, green from a slider
-rider to its rail midpoint).
+recolours the selected body (paste keeps the source colour); an **inline speed/profile panel**
+appears in the toolbar when an actuator's rider or a motor's body / pivot / crank is selected;
+and in draw mode, **dotted connectors** mark constraints whose endpoints don't yet touch
+(blue between pinned joints, green from a slider rider to its rail midpoint).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -65,7 +71,14 @@ rider to its rail midpoint).
     two joints `railA`/`railB`, plus a `riders` list of joints confined to the segment between
     them, with end-stops). The rail is either **two joints on one body** (it moves with that
     body, coupling two bodies) or **two free joints** (a track fixed in world space — `addSlider`
-    auto-grounds them). Riders may be body joints or free joints.
+    auto-grounds them). Riders may be body joints or free joints. Two new "powered" constraints
+    layer on top of the above: `linearActuator` (a slider id + its driven rider id, `speed` in
+    cycles/s, `profile: "triangle"|"sine"`) and `motor` (a body + pivot/crank joint ids on it,
+    `speed` in revs/s). Off-animation they're inert (the actuator's rider is a normal slider
+    rider; the motor's body is a normal body). With the sim-mode animation running, the main
+    loop computes a world target per actuator/motor each frame and passes them to `solve` as
+    `anchors`; the solver treats those targets like additional (moving) grounds — sacred, never
+    disabled — so pins/sliders propagate the imposed motion through the rest of the assembly.
   - Body construction: `addBody(worldVerts, radius?, round?)` (freehand uses `fillet`);
     `buildBodyFromJoints(jointIds, margin)` stores **one control point per joint** with
     `round: "offset"`. Per joint: a **loose free joint (or a free slider rider) is absorbed**
@@ -91,17 +104,30 @@ rider to its rail midpoint).
   - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
     (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
     `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
+  - Construction helpers for the powered constraints: `addLinearActuator(sliderId, worldPos?)`
+    drops a free joint on the rail (snapped to the click point, or rail midpoint), attaches
+    it as a slider rider, and stores the actuator constraint that will drive it during
+    animation. `addMotor(bodyId, pivotJointId, crankJointId)` validates that both joints
+    belong to the body (and aren't the same joint) before storing the motor constraint.
+    Cascade removal: dropping a slider removes any actuators on it (the rider survives as a
+    free joint); removing a body's joints prunes any motor that referenced them.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 5`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 6`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
-    `controlLocal`/`radius`/`round` for pre-v5 bodies).
-- **solver.ts** — `solve(scene, driver, iterations, relax): ConstraintBreak[]`. Operates on a
-  **host abstraction** (`hostFor`): each constraint participant is a body, a free joint
+    `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
+    actuator/motor constraints, which load fine as-is).
+- **solver.ts** — `solve(scene, driver, iterations, relax, anchors?): ConstraintBreak[]`. Operates
+  on a **host abstraction** (`hostFor`): each constraint participant is a body, a free joint
   (translate-only point), or a fixed world point — which unifies pin/ground/slider/driver. A
   separate **`pinHostFor`** makes *any* grounded joint (free or on a body) a fixed point when
   something *pins* to it, so a pin can't drag the body a grounded joint sits on (the joint's own
-  ground constraint still uses the body host, to lock multi-ground bodies' rotation). Returns the
-  list of unsatisfiable **`ConstraintBreak`s** (empty when solvable). See "Solver notes" below.
+  ground constraint still uses the body host, to lock multi-ground bodies' rotation). The
+  optional **`anchors`** map (joint id → world target) is threaded through every solver phase
+  (sweep / residual / settle / phase A/B/C / projectGrounds / break reporting) and treated
+  **exactly like ground constraints** — sacred, never disabled, projected at the end of each
+  sweep — which is how linear-actuator riders and motor pivot/crank pairs are driven during
+  animation without growing a new solver concept. Returns the list of unsatisfiable
+  **`ConstraintBreak`s** (empty when solvable). See "Solver notes" below.
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.2..5).
 - **renderer.ts** — draws under the camera transform in world space: world-locked grid
@@ -111,13 +137,16 @@ rider to its rail midpoint).
   rail joints get a green ring; **a loose free joint gets a muted dashed ring — but a free joint
   that rides a slider or defines a rail drops the dashed ring and renders as anchored**), corner-handle squares
   for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
-  expansion preview, slider rail preview) and a rotate-pivot crosshair. **Impossible-assembly
-  breaks** are drawn as **red dotted lines** between the points that can't meet (`input.breaks`,
-  sim mode only). **Draw-mode connectors**: a constraint whose endpoints sit apart is drawn dotted
-  so the link still reads as connected — **blue** between two pinned joints (skipped when their dots
-  overlap), and **green** from each slider rider to the **rail midpoint** (skipped when the rider is
-  already on the rail, via `distToSegment`). Cosmetic sizes are divided by the zoom. Structural
-  colours come from a **`Theme`** palette (`DARK_THEME`/`LIGHT_THEME`, in `input.theme`): only `ink`
+  expansion preview, slider rail preview) and a rotate-pivot crosshair. **Powered constraints**:
+  every motor draws a dashed yellow arm from its pivot to its crank, with a curved-arrow rotation
+  badge centred on the pivot; every linear-actuator rider gets a green dashed outer ring on top
+  of its normal slider-rider dot to badge it as self-driving. **Impossible-assembly breaks** are
+  drawn as **red dotted lines** between the points that can't meet (`input.breaks`, sim mode only).
+  **Draw-mode connectors**: a constraint whose endpoints sit apart is drawn dotted so the link
+  still reads as connected — **blue** between two pinned joints (skipped when their dots overlap),
+  and **green** from each slider rider to the **rail midpoint** (skipped when the rider is already
+  on the rail, via `distToSegment`). Cosmetic sizes are divided by the zoom. Structural colours
+  come from a **`Theme`** palette (`DARK_THEME`/`LIGHT_THEME`, in `input.theme`): only `ink`
   (highlights/draft/handle fill), `surface` (joint rings, pin centres, handle outline), `grid`, and
   `jointFill` flip between light/dark — the semantic accents (pin blue, slider/rail green,
   ground/rotate yellow, error red) and per-body colours stay fixed.
@@ -132,6 +161,26 @@ rider to its rail midpoint).
   The **Joint** tool auto-attaches a placed node to a slider when it lands on a rail/rail-node;
   the **body-from-joints** draft turns a bare slider-rail click into a grid-snapped rider joint
   (tracked in `jointDraftCreated`, removed if the draft is aborted). Also a `timedSolve` debug log.
+  - **Actuator / motor tools** (`L` / `M`, draw mode, one-shot): **Linear actuator** is a single click
+    on a slider rail → calls `addLinearActuator` (snapped to the click point). **Motor** is two clicks
+    — first joint becomes the pivot (tracked in `motorPivotDraft`, highlighted via `activeJoints`),
+    second joint on the **same body** becomes the crank pin (mismatched second click restarts the
+    draft at the new joint). Both tools select the resulting element so the inline properties panel
+    appears right away.
+  - **Animation** (`#run-btn`, sim-mode only; Space toggles): `setAnimating(on)` flips a `running`
+    flag and, on **play**, calls `fitPhases()` so each actuator/motor's `phaseAccum` matches the
+    current pose — pressing play resumes from whatever the user (or the previous run) left in sim.
+    Each frame, if `animating`, the loop advances every phase by `speed*dt` (clamped per frame to
+    cap big jumps after the tab is backgrounded), `computeAnchors()` translates phases into world
+    targets per actuator/motor (one per actuator rider, two per motor — pivot + crank), and the
+    main solve passes those targets via the solver's `anchors` parameter. Animation defaults to
+    **off** on entering sim so dragging-to-drive keeps working until the user starts it.
+  - **Inline properties panel** (`#actuator-props` / `#motor-props`): mirrors the body-colour
+    pattern — `syncPropsPanel()` runs each frame, hides both panels when neither element is
+    selected, otherwise populates the speed field (and, for an actuator, the `/\` ↔ `~` profile
+    toggle). Change-detected so editing the speed input mid-drag doesn't get clobbered.
+    `selectedLinearActuator()` and `selectedMotor()` find the constraint the current `selection`
+    identifies (rider / slider for actuators; body / pivot / crank for motors).
   - **Edit utilities**: `copySelection`/`pasteAt` (clipboard is a `BodyClip` held in `main`;
     paste lands at the cursor, grid-snapped), `mirrorSelection("h"|"v")`, and a **rotate** tool.
     Rotate is a persistent mode (not one-shot): `startRotate` picks the pivot (a control node of
@@ -159,7 +208,7 @@ rider to its rail midpoint).
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or first-letter shortcut —
-`B`/`J`/`C`/`G`/`S`) lets you place one element, then it returns to **Select** mode. `Esc`
+`B`/`J`/`C`/`G`/`S`/`L`/`M`) lets you place one element, then it returns to **Select** mode. `Esc`
 aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
@@ -179,6 +228,13 @@ aborts the current placement.
 - **Slider** (`S`) — click two joints on the *same body* (a rail that moves with it), or two
   *free joints* (a world-fixed track — they get grounded automatically), to create a slider rail
   (riders are attached later via Connect). A free+body or cross-body pair restarts the draft.
+- **Linear actuator** (`L`) — click a *slider rail* to drop a **self-driving rider** on it (a free
+  joint attached as a rider, plus a `linearActuator` constraint that drives it during animation).
+  Off-animation the rider is a normal slider rider (draggable / pinnable). Default speed 0.5 Hz,
+  default profile `triangle`.
+- **Motor** (`M`) — click a joint to set the **pivot** (must be on a body), then another joint on
+  the *same body* for the **crank pin** (a cross-body second click restarts the draft at that
+  joint). Creates a `motor` constraint that spins the body during animation. Default speed 0.25 Hz.
 
 Select mode (default, no tool armed):
 - Click a body, joint, or slider rail to **select** it (highlighted); **left-drag** moves the
@@ -205,6 +261,11 @@ Simulate mode:
   joint under the cursor, `bodyAt` grabs the body and the grab point (a body-frame offset) is
   driven. Entering sim snapshots all poses and runs a settle solve; leaving sim restores the drawn
   layout so editing is non-destructive.
+- **Run animation** (`▶`/`⏸` button in the sim-mode toolbar; **Space** toggles): drives every
+  linear actuator and motor in the scene at their configured speed. Defaults to **off** on entering
+  sim, so dragging-to-drive works first. Pressing play **phase-fits** every actuator/motor so the
+  motion resumes smoothly from the current pose (the user can pause, drag a part somewhere new,
+  and pressing play continues from there).
 - **Impossible assemblies** are flagged, not faked: grounds never move, the solvable parts still
   solve, and every unsatisfiable pin/slider draws a **red dotted line** between the two points
   that can't meet (pulled as close as the assembly allows), with a red **"Assembly impossible"**
@@ -318,6 +379,14 @@ Persistence:
   pivot node stays fixed), `mirrorBody` (joint reflected, centroid + area preserved), and
   copy/paste (`extractBody`/`insertBody`: independent offset duplicate, joints/grounds/sliders
   duplicated with fresh ids, cross-body pins dropped, **source colour preserved**).
+- **actuators.ts** — the two new powered constraints end-to-end: `addLinearActuator` places its
+  rider on the rail and registers it with the slider; `addMotor` rejects pivot==crank, free-joint
+  pivots, and cross-body cranks. The solver's `anchors` parameter drives an actuator rider to
+  arbitrary on-rail targets (rider stays on rail, lands exactly on each anchor including the
+  endpoints), and pivot+crank anchors on one body act as a motor (pivot fixed, crank orbits at
+  constant radius, downstream pin propagates the rotation). Serialize/load round-trips both
+  constraint kinds intact; removing a slider drops its actuator (rider survives as a free joint);
+  removing a motor's body drops the motor (via joint-pruning).
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
@@ -368,6 +437,13 @@ Persistence:
 - Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
   control polygon is a snapshot taken at build time.
 - More joint types as needed.
+- **Actuator / motor follow-ups**: editing speed/profile while in sim (selection clears on mode
+  change today, so the inline panel only appears in draw); copy/paste carrying actuators + motors
+  in the `BodyClip` (today the body + its joints survive but the powered constraints don't);
+  investigating a reported flicker of "Assembly impossible" while *dragging* an actuator's rider
+  after stopping animation in a closed loop (not currently reproducible — see the diagnosis at the
+  end of this section for context, fix candidate A is "project the driver target onto the rail
+  before solving" for slider riders).
 - Optional: File System Access API for true "re-open the last file by path" (Chromium only).
   Current persistence is download/upload + localStorage autosave (restores the last session).
 

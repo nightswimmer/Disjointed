@@ -258,17 +258,22 @@ function railHostFor(railBody: Body | null, fixedPos: Vec2): RailHost {
 
 /** Shared empty exclusion set (no constraints disabled). */
 const NONE: ReadonlySet<number> = new Set<number>();
+/** Shared empty temp-anchor map (no animation actuators active). */
+const NO_ANCHORS: ReadonlyMap<number, Vec2> = new Map<number, Vec2>();
 
 /**
  * One Gauss-Seidel sweep over the structural constraints (pin / ground / slider). `skip`
  * names "broken" units to leave disabled — a pin by its constraint id, a slider rider by
- * its joint id (ids are globally unique). Grounds are never skipped.
+ * its joint id (ids are globally unique). Grounds are never skipped. `anchors` adds extra
+ * world targets joint ids must meet (animation actuators / motors) — treated like grounds
+ * during this sweep so the solver pulls everything else onto them.
  */
 function sweepStructural(
   scene: Scene,
   relax: number,
   grounded: Set<number>,
-  skip: ReadonlySet<number> = NONE
+  skip: ReadonlySet<number> = NONE,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
 ): void {
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
@@ -305,37 +310,54 @@ function sweepStructural(
       }
     }
   }
+  // Animation anchors get a coincident pull each sweep — same treatment as grounds (and
+  // they're in `grounded`, so the projection below also snaps them exactly into place).
+  if (anchors.size > 0) {
+    for (const [jointId, target] of anchors) {
+      const j = scene.getJoint(jointId);
+      if (!j) continue;
+      solveCoincident(hostFor(scene, j, grounded), fixedHost(target), relax);
+    }
+  }
   // Grounds get the last word every sweep, so no other constraint can drag a grounded
   // joint off its anchor — an impossible assembly leaves its error on the pins/sliders.
-  projectGrounds(scene);
+  projectGrounds(scene, anchors);
 }
 
 /**
- * Hard-project every ground: snap each grounded joint exactly onto its anchor so it can
- * never be moved. A grounded *free* joint is already an immovable fixed host (we just keep
- * it exact); a grounded *body* joint is restored by translating its body so the joint
- * lands on the anchor — pure translation preserves the angle, so combined with the sweep's
- * rotation impulse the body effectively pivots about the anchor (correct revolute-to-ground
- * motion) while the anchor stays put. A body carrying *several* grounds is over-determined;
- * we translate it by the average of the per-ground corrections, so conflicting grounds
- * settle deterministically at the midpoint instead of teleporting between them each sweep.
+ * Hard-project every ground (and every animation `anchor`): snap each grounded joint exactly
+ * onto its anchor so it can never be moved. A grounded *free* joint is already an immovable
+ * fixed host (we just keep it exact); a grounded *body* joint is restored by translating its
+ * body so the joint lands on the anchor — pure translation preserves the angle, so combined
+ * with the sweep's rotation impulse the body effectively pivots about the anchor (correct
+ * revolute-to-ground motion) while the anchor stays put. A body carrying *several* grounds
+ * is over-determined; we translate it by the average of the per-ground corrections, so
+ * conflicting grounds settle deterministically at the midpoint instead of teleporting between
+ * them each sweep. Animation anchors join the same averaging, so a motor's pivot+crank pair
+ * (two anchors on one body) settles to the pose that satisfies both.
  */
-function projectGrounds(scene: Scene): void {
+function projectGrounds(scene: Scene, anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS): void {
   const perBody = new Map<number, { sum: Vec2; n: number }>();
+  const visit = (joint: Joint, anchor: Vec2): void => {
+    if (joint.bodyId === null) {
+      joint.local = { x: anchor.x, y: anchor.y };
+      return;
+    }
+    const body = scene.getBody(joint.bodyId);
+    if (!body) return;
+    const world = add(body.pos, rotate(joint.local, body.angle));
+    const corr = sub(anchor, world);
+    const e = perBody.get(body.id) ?? { sum: { x: 0, y: 0 }, n: 0 };
+    perBody.set(body.id, { sum: add(e.sum, corr), n: e.n + 1 });
+  };
   for (const con of scene.constraints) {
     if (con.kind !== "ground") continue;
     const j = scene.getJoint(con.joint);
-    if (!j) continue;
-    if (j.bodyId === null) {
-      j.local = { x: con.anchor.x, y: con.anchor.y };
-      continue;
-    }
-    const body = scene.getBody(j.bodyId);
-    if (!body) continue;
-    const world = add(body.pos, rotate(j.local, body.angle));
-    const corr = sub(con.anchor, world);
-    const e = perBody.get(body.id) ?? { sum: { x: 0, y: 0 }, n: 0 };
-    perBody.set(body.id, { sum: add(e.sum, corr), n: e.n + 1 });
+    if (j) visit(j, con.anchor);
+  }
+  for (const [jointId, target] of anchors) {
+    const j = scene.getJoint(jointId);
+    if (j) visit(j, target);
   }
   for (const [id, e] of perBody) {
     const body = scene.getBody(id)!;
@@ -343,10 +365,15 @@ function projectGrounds(scene: Scene): void {
   }
 }
 
-/** Joint ids fixed by a ground constraint (used to make grounded free joints immovable). */
-function groundedJoints(scene: Scene): Set<number> {
+/**
+ * Joint ids that are fixed to a world point this solve — ground constraints plus any
+ * animation `anchors` (actuator targets, motor pivot/crank). Used to treat them as
+ * immovable hosts for pins/sliders/the driver, so nothing can drag them off-target.
+ */
+function groundedJoints(scene: Scene, anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS): Set<number> {
   const set = new Set<number>();
   for (const c of scene.constraints) if (c.kind === "ground") set.add(c.joint);
+  for (const id of anchors.keys()) set.add(id);
   return set;
 }
 
@@ -397,8 +424,17 @@ interface StructuralUnit {
   ground: boolean;
 }
 
-/** Visit every structural unit (pin, ground, slider rider) with its current error. */
-function eachUnit(scene: Scene, grounded: Set<number>, visit: (u: StructuralUnit) => void): void {
+/**
+ * Visit every structural unit (pin, ground, slider rider, animation anchor) with its current
+ * error. Animation anchors count as `ground: true` units — they're sacred for the same reasons
+ * a ground is (the user is asking the actuator/motor to put the joint exactly there).
+ */
+function eachUnit(
+  scene: Scene,
+  grounded: Set<number>,
+  visit: (u: StructuralUnit) => void,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
+): void {
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
       const ja = scene.getJoint(con.jointA);
@@ -431,14 +467,27 @@ function eachUnit(scene: Scene, grounded: Set<number>, visit: (u: StructuralUnit
       }
     }
   }
+  // Animation anchors are sacred too: a joint that should sit exactly at a moving target.
+  // Their ids may collide with a constraint id; that's fine — visit() callers key by id.
+  for (const [jointId, target] of anchors) {
+    const j = scene.getJoint(jointId);
+    if (!j) continue;
+    const a = scene.jointWorld(j);
+    visit({ id: jointId, a, b: target, error: len(sub(a, target)), ground: true });
+  }
 }
 
 /** Largest positional error across the active (non-`skip`) structural units (world units). */
-function structuralResidual(scene: Scene, grounded: Set<number>, skip: ReadonlySet<number> = NONE): number {
+function structuralResidual(
+  scene: Scene,
+  grounded: Set<number>,
+  skip: ReadonlySet<number> = NONE,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
+): number {
   let max = 0;
   eachUnit(scene, grounded, (u) => {
     if (!skip.has(u.id)) max = Math.max(max, u.error);
-  });
+  }, anchors);
   return max;
 }
 
@@ -446,13 +495,14 @@ function structuralResidual(scene: Scene, grounded: Set<number>, skip: ReadonlyS
 function worstActiveUnit(
   scene: Scene,
   grounded: Set<number>,
-  skip: ReadonlySet<number>
+  skip: ReadonlySet<number>,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
 ): { id: number; error: number } | null {
   let best: { id: number; error: number } | null = null;
   eachUnit(scene, grounded, (u) => {
     if (u.ground || skip.has(u.id)) return;
     if (!best || u.error > best.error) best = { id: u.id, error: u.error };
-  });
+  }, anchors);
   return best;
 }
 
@@ -462,13 +512,19 @@ function worstActiveUnit(
  * oscillation that full relaxation shows on an unconverged scene, so the active set reaches
  * its true least-error pose and the "worst active unit" reading is meaningful.
  */
-function settle(scene: Scene, grounded: Set<number>, skip: ReadonlySet<number>, relax: number): void {
+function settle(
+  scene: Scene,
+  grounded: Set<number>,
+  skip: ReadonlySet<number>,
+  relax: number,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
+): void {
   let prev = Infinity;
   for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
-    const res = structuralResidual(scene, grounded, skip);
+    const res = structuralResidual(scene, grounded, skip, anchors);
     if (res < STRUCTURAL_TOL || prev - res < STRUCTURAL_TOL) break;
     prev = res;
-    sweepStructural(scene, relax, grounded, skip);
+    sweepStructural(scene, relax, grounded, skip, anchors);
   }
 }
 
@@ -504,11 +560,16 @@ function applyBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<nu
 }
 
 /** Largest gap across the disabled ("broken") units (world units). */
-function brokenResidual(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>): number {
+function brokenResidual(
+  scene: Scene,
+  grounded: Set<number>,
+  broken: ReadonlySet<number>,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
+): number {
   let max = 0;
   eachUnit(scene, grounded, (u) => {
     if (!u.ground && broken.has(u.id)) max = Math.max(max, u.error);
-  });
+  }, anchors);
   return max;
 }
 
@@ -520,13 +581,18 @@ function brokenResidual(scene: Scene, grounded: Set<number>, broken: ReadonlySet
  * red-line gap without disturbing anything that's actually satisfied. Stops once the gap
  * stabilizes (the freedom is used up).
  */
-function closeBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>): void {
+function closeBroken(
+  scene: Scene,
+  grounded: Set<number>,
+  broken: ReadonlySet<number>,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
+): void {
   if (broken.size === 0) return;
   let prev = Infinity;
   for (let i = 0; i < CLOSE_SWEEPS; i++) {
     applyBroken(scene, grounded, broken, CLOSE_RELAX);
-    settle(scene, grounded, broken, 1); // re-tighten the active set + grounds to convergence
-    const gap = brokenResidual(scene, grounded, broken);
+    settle(scene, grounded, broken, 1, anchors); // re-tighten the active set + grounds + anchors to convergence
+    const gap = brokenResidual(scene, grounded, broken, anchors);
     if (prev - gap < CLOSE_TOL) break; // freedom exhausted — gap won't shrink meaningfully further
     prev = gap;
   }
@@ -537,12 +603,17 @@ function closeBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<nu
  * whose gap is still visible, plus any ground that can't be met (e.g. two grounds fighting
  * over one body — grounds are never disabled, so they surface here instead).
  */
-function breaksForBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>): ConstraintBreak[] {
+function breaksForBroken(
+  scene: Scene,
+  grounded: Set<number>,
+  broken: ReadonlySet<number>,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
+): ConstraintBreak[] {
   const breaks: ConstraintBreak[] = [];
   eachUnit(scene, grounded, (u) => {
     const isBreak = u.ground ? u.error > BREAK_TOL : broken.has(u.id) && u.error > BREAK_TOL;
     if (isBreak) breaks.push({ a: u.a, b: u.b, error: u.error });
-  });
+  }, anchors);
   return breaks;
 }
 
@@ -564,37 +635,39 @@ export function solve(
   scene: Scene,
   driver: Driver | null,
   iterations = 100,
-  relax = 1
+  relax = 1,
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
 ): ConstraintBreak[] {
-  const grounded = groundedJoints(scene);
+  const grounded = groundedJoints(scene, anchors);
 
   // Phase A — normal solve with the mouse driver, then converge to tolerance.
   for (let iter = 0; iter < iterations; iter++) {
-    sweepStructural(scene, relax, grounded);
+    sweepStructural(scene, relax, grounded, NONE, anchors);
     if (driver) {
       const host = driverHost(scene, driver, grounded);
       if (host) solveCoincident(host, fixedHost(driver.target), 1, DRIVER_MAX_STEP);
     }
   }
   for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
-    if (structuralResidual(scene, grounded) < STRUCTURAL_TOL) break;
-    sweepStructural(scene, relax, grounded);
+    if (structuralResidual(scene, grounded, NONE, anchors) < STRUCTURAL_TOL) break;
+    sweepStructural(scene, relax, grounded, NONE, anchors);
   }
-  if (structuralResidual(scene, grounded) < STRUCTURAL_TOL) return []; // everything resolved
+  if (structuralResidual(scene, grounded, NONE, anchors) < STRUCTURAL_TOL) return []; // everything resolved
 
   // Phase B — over-constrained. Greedily disable the worst-violated non-ground unit and
-  // re-settle, until the remaining (active) constraints can all be satisfied. Grounds are
-  // never disabled, so the disabled units are exactly the pins/sliders that can't be met.
+  // re-settle, until the remaining (active) constraints can all be satisfied. Grounds and
+  // animation anchors are never disabled, so the disabled units are exactly the pins/sliders
+  // that can't be met (anchors join grounds as "sacred").
   const broken = new Set<number>();
   for (let guard = 0; guard <= scene.constraints.length; guard++) {
-    settle(scene, grounded, broken, STABILIZE_RELAX);
-    const worst = worstActiveUnit(scene, grounded, broken);
+    settle(scene, grounded, broken, STABILIZE_RELAX, anchors);
+    const worst = worstActiveUnit(scene, grounded, broken, anchors);
     if (!worst || worst.error < BREAK_TOL) break;
     broken.add(worst.id);
   }
 
   // Phase C — pull the disabled units as close as the now-rigid assembly allows, then report
   // whatever gap remains as a red-line break.
-  closeBroken(scene, grounded, broken);
-  return breaksForBroken(scene, grounded, broken);
+  closeBroken(scene, grounded, broken, anchors);
+  return breaksForBroken(scene, grounded, broken, anchors);
 }

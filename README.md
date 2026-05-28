@@ -20,6 +20,11 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
     segment **between** those two joints, with hard stops at each end. The rail can be two joints
     on one body (it moves with the body, coupling two bodies) or **two free joints**, which makes
     a track fixed in world space — the two free joints get grounded automatically.
+  - **Linear actuator** — a special rider on a slider that travels back and forth along the rail
+    automatically when animation runs. Configurable speed (Hz) and motion profile (triangle = constant
+    speed, sine = smooth ease). Off-animation it behaves like any other rider — draggable, pinnable.
+  - **Motor** — a pivot + crank pair on one body; the crank pin orbits the pivot at a configurable
+    angular speed (Hz) when animation runs. Off-animation the body behaves normally.
 
 ## Usage
 
@@ -39,6 +44,8 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
 | **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
+| **Linear actuator** | `L` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
+| **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
 
 **Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
 **Drag** the selection to move it. A selected body shows **corner handles** — drag one to reshape
@@ -61,6 +68,11 @@ leaves its joints; a joint detaches from any rail.
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
 and editing it recolours the body.
 
+**Actuator / motor speed.** Select an actuator's rider, the slider it rides, or a motor's body
+(or its pivot / crank joint) and a small inline panel appears in the toolbar with a speed field
+(in Hz) — and, for linear actuators, a `/\` ↔ `~` profile toggle (triangle for constant-speed
+end-to-end travel, sine for smooth ease in/out at the endstops).
+
 Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
 rail-defining joints get a **green ring**, and a **loose free joint a dashed ring**. Once a free
 joint is attached to a slider it's no longer loose, so it drops the dashed ring and shows as a
@@ -75,6 +87,11 @@ Drag any joint, or **any part of a body**, to drive the mechanism. The grabbed p
 cursor and every connected body moves with it. Structural constraints always win over the cursor —
 a grounded body can only rotate about its ground point, and the grabbed point walks to the nearest
 position it can actually reach. Your drawn layout is preserved when you switch back to Draw.
+
+**Animate (▶ button or `Space`).** With any linear actuators / motors in the scene, press the
+run-animation button in the sim-mode toolbar (or Spacebar) to drive them all at their configured
+speeds. Press again to pause. Pressing play **resumes from the current pose** — phases auto-fit so
+the motion picks up smoothly from wherever you (or the previous animation) left things.
 
 **Impossible assemblies.** Grounded joints are sacred — they never move. If a mechanism can't be
 assembled (a constraint can't be satisfied), the solver keeps every solvable part working and
@@ -109,7 +126,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors
 ```
 
 ## How it works
@@ -132,6 +149,10 @@ line built from two grounded free joints. Body outlines are
 generated from a control polygon + corner radius (rounded corners via fillet or outward offset).
 The fillet rounds convex and concave (reflex) corners correctly, and splits each edge between its
 two corners so neighbouring fillets never overlap or fold — even on thin shapes at large radii.
+**Actuators and motors** are layered on top of the same solver: while animation runs, each
+actuator/motor computes a world target for its joint(s) from its phase + speed, and the solver
+takes those targets as additional "moving grounds" — sacred just like a normal ground, so
+pins/sliders propagate the imposed motion through the whole assembly.
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),
 `renderer.ts`, `main.ts`. Tests live in [`scripts/`](scripts/).

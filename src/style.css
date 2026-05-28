@@ -175,8 +175,79 @@ select#grid-size-presets {
 
 #tool-group.hidden,
 #edit-group.hidden,
-#color-group.hidden {
+#color-group.hidden,
+#actuator-group.hidden,
+#actuator-props.hidden,
+#motor-props.hidden,
+#run-btn.hidden {
   display: none;
+}
+
+/* Run-animation toggle: shows the play glyph when paused, pause glyph when running. */
+#run-btn .icon-pause {
+  display: none;
+}
+#run-btn.running .icon-play {
+  display: none;
+}
+#run-btn.running .icon-pause {
+  display: block;
+}
+#run-btn.running {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* Inline properties panel for a selected actuator / motor. */
+#actuator-props,
+#motor-props {
+  padding-left: 8px;
+  border-left: 1px solid var(--panel-border);
+}
+
+.prop-tag {
+  color: var(--text-dim);
+  font-size: 13px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.prop-unit {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+input[type="number"]#actuator-speed,
+input[type="number"]#motor-speed {
+  width: 64px;
+  cursor: text;
+}
+
+.profile-toggle {
+  display: inline-flex;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.profile-toggle button {
+  border: none;
+  border-radius: 0;
+  padding: 6px 10px;
+  font-family: monospace;
+  font-size: 14px;
+  background: var(--control);
+  color: var(--text);
+}
+
+.profile-toggle button + button {
+  border-left: 1px solid var(--panel-border);
+}
+
+.profile-toggle button.active {
+  background: var(--accent-dim);
+  color: #fff;
 }
 
 /* Body-colour swatch: a square chip that matches the icon-button footprint. */

@@ -1,12 +1,12 @@
 import "./style.css";
-import { Scene, SceneData, BodyClip } from "./model";
+import { Scene, SceneData, BodyClip, LinearActuatorConstraint, MotorConstraint } from "./model";
 import { solve, Driver, ConstraintBreak } from "./solver";
 import { render, DARK_THEME, LIGHT_THEME } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, roundedConvexBody } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
-type Tool = "body" | "joint" | "connect" | "ground" | "slider" | "rotate";
+type Tool = "body" | "joint" | "connect" | "ground" | "slider" | "rotate" | "linearActuator" | "motor";
 /** An existing element picked in normal/select mode. */
 type Selection = { kind: "body" | "joint" | "slider"; id: number };
 
@@ -33,6 +33,13 @@ const gridSizePresets = document.getElementById("grid-size-presets") as HTMLSele
 const themeBtn = document.getElementById("theme-btn") as HTMLButtonElement;
 const colorGroup = document.getElementById("color-group")!;
 const colorInput = document.getElementById("body-color") as HTMLInputElement;
+const actuatorGroup = document.getElementById("actuator-group")!;
+const actuatorProps = document.getElementById("actuator-props")!;
+const motorProps = document.getElementById("motor-props")!;
+const actuatorSpeedInput = document.getElementById("actuator-speed") as HTMLInputElement;
+const motorSpeedInput = document.getElementById("motor-speed") as HTMLInputElement;
+const profileToggle = document.getElementById("actuator-profile")!;
+const runBtn = document.getElementById("run-btn") as HTMLButtonElement;
 
 const scene = new Scene();
 
@@ -117,6 +124,22 @@ type RotateDrag = {
   moved: boolean;
 };
 let rotateDrag: RotateDrag | null = null;
+/** Motor tool: first click picks the pivot joint, second the crank pin on the same body. */
+let motorPivotDraft: number | null = null;
+
+// --- animation (actuators / motors) -------------------------------------
+/**
+ * Animation state. Driven by the Run-animation toggle in sim mode. While `running`,
+ * each frame advances `phaseAccum` for every actuator/motor by `speed * dt`, computes a
+ * target world position for the driven joint(s), and the solver pulls everything else
+ * onto those targets (they're passed as `anchors` to `solve`). When paused, no phases
+ * advance and the scene drives by mouse only. `phaseAccum` carries cycles for linear
+ * actuators and radians for motors; pressing play refits each phase to the joint's
+ * current state so the motion picks up smoothly from wherever the user left it.
+ */
+let animating = false;
+let animLastTimestamp: number | null = null;
+const animPhase = new Map<number, number>(); // constraint id → phase accumulator
 
 // --- grid / snapping -------------------------------------------------------
 /** Grid spacing (and snap increment) in world units; mirrors the renderer's grid. */
@@ -198,7 +221,7 @@ function defaultCursor(): string {
 // --- hint text -----------------------------------------------------------
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
-  sim: "Drag any joint, or any part of a body, to drive the mechanism.",
+  sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
   select: "Click to select · drag to move · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · [ and ] round corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
@@ -206,6 +229,8 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   ground: "Click a joint to lock its position (it can still rotate).",
   slider: "Click two joints on the same body to create a slider rail.",
   rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. Snaps to 45°.",
+  linearActuator: "Click a slider rail to drop a self-driving rider — it travels back and forth when animation runs.",
+  motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
 };
 
 function updateHint(): void {
@@ -231,6 +256,37 @@ document.getElementById("load-btn")!.addEventListener("click", () => fileInput.c
 // Copy/paste are keyboard-only (Ctrl/Cmd+C / V); no toolbar buttons.
 document.getElementById("mirror-h-btn")!.addEventListener("click", () => mirrorSelection("h"));
 document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorSelection("v"));
+
+runBtn.addEventListener("click", () => setAnimating(!animating));
+
+// Inline speed / profile editing for whatever actuator or motor the selection identifies.
+actuatorSpeedInput.addEventListener("input", () => {
+  const a = selectedLinearActuator();
+  if (!a) return;
+  const v = Number(actuatorSpeedInput.value);
+  if (Number.isFinite(v) && v >= 0) {
+    a.speed = v;
+    markDirty();
+  }
+});
+motorSpeedInput.addEventListener("input", () => {
+  const m = selectedMotor();
+  if (!m) return;
+  const v = Number(motorSpeedInput.value);
+  if (Number.isFinite(v) && v >= 0) {
+    m.speed = v;
+    markDirty();
+  }
+});
+profileToggle.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const a = selectedLinearActuator();
+    if (!a) return;
+    a.profile = (btn.dataset.profile === "sine" ? "sine" : "triangle");
+    syncPropsPanel();
+    markDirty();
+  });
+});
 
 gridBtn.addEventListener("click", () => {
   gridVisible = !gridVisible;
@@ -283,15 +339,20 @@ function setMode(next: Mode): void {
     solveBreaks = []; // leaving sim: clear any impossible-assembly markers
   }
   mode = next;
+  // Animation is sim-only; always start sim with it off so dragging-to-drive works first.
+  setAnimating(false);
   document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((b) =>
     b.classList.toggle("active", b.dataset.mode === mode)
   );
   toolGroup.classList.toggle("hidden", mode === "sim");
   editGroup.classList.toggle("hidden", mode === "sim");
   colorGroup.classList.toggle("hidden", mode === "sim");
+  actuatorGroup.classList.toggle("hidden", mode === "sim");
+  runBtn.classList.toggle("hidden", mode === "draw");
   canvas.style.cursor = mode === "sim" ? "grab" : "crosshair";
   updateHint();
   updateSimError(); // show/hide the banner for the mode we just entered
+  syncPropsPanel(); // selection cleared → properties panels hide
 }
 
 function setTool(next: Tool): void {
@@ -327,6 +388,7 @@ function resetTransient(): void {
   jointDraftExpanding = false;
   selectedJoint = null;
   sliderDraftIds = [];
+  motorPivotDraft = null;
   selection = null;
   driver = null;
   rotateDrag = null;
@@ -548,6 +610,41 @@ function handleDrawClick(p: Vec2): void {
           sliderDraftIds = [j.id]; // mismatched (different bodies, or free + body) — restart here
         }
       }
+      break;
+    }
+    case "linearActuator": {
+      // Single click on a slider rail: drop a self-driving rider on it (a free joint
+      // attached as a rider) and create the actuator constraint that will drive it.
+      const s = scene.sliderAt(p, pickRadius());
+      if (!s) break;
+      const created = scene.addLinearActuator(s.id, snap(p));
+      if (created) {
+        selection = { kind: "joint", id: created.riderId };
+        placed = true;
+      }
+      break;
+    }
+    case "motor": {
+      // Two clicks: pivot joint, then crank pin (both on the same body).
+      const j = scene.jointAt(p, pickRadius());
+      if (!j || j.bodyId === null) break; // motor lives on a body — free joints aren't pivots
+      if (motorPivotDraft === null) {
+        motorPivotDraft = j.id;
+        break;
+      }
+      if (j.id === motorPivotDraft) break; // same joint clicked again — ignore
+      const pivot = scene.getJoint(motorPivotDraft)!;
+      if (pivot.bodyId !== j.bodyId) {
+        // Cranked at a joint that isn't on the pivot's body — restart with this as the new pivot.
+        motorPivotDraft = j.id;
+        break;
+      }
+      const motor = scene.addMotor(pivot.bodyId!, motorPivotDraft, j.id);
+      if (motor) {
+        selection = { kind: "body", id: pivot.bodyId! };
+        placed = true;
+      }
+      motorPivotDraft = null;
       break;
     }
   }
@@ -988,9 +1085,17 @@ const TOOL_KEYS: Record<string, Tool> = {
   g: "ground",
   s: "slider",
   r: "rotate",
+  l: "linearActuator",
+  m: "motor",
 };
 
 window.addEventListener("keydown", (e) => {
+  // Space toggles the actuator animation (sim mode only).
+  if (e.code === "Space" && mode === "sim" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    setAnimating(!animating);
+    return;
+  }
   // Undo / redo: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y.
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === "z") {
@@ -1054,11 +1159,195 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
+// --- actuators / motors --------------------------------------------------
+/** All linear-actuator constraints in the scene. */
+function linearActuators(): LinearActuatorConstraint[] {
+  return scene.constraints.filter(
+    (c): c is LinearActuatorConstraint => c.kind === "linearActuator"
+  );
+}
+function motors(): MotorConstraint[] {
+  return scene.constraints.filter((c): c is MotorConstraint => c.kind === "motor");
+}
+
+/** The actuator that owns the currently selected joint (its rider), or null. */
+function selectedLinearActuator(): LinearActuatorConstraint | null {
+  if (!selection) return null;
+  if (selection.kind === "joint") {
+    return linearActuators().find((a) => a.riderId === selection!.id) ?? null;
+  }
+  if (selection.kind === "slider") {
+    return linearActuators().find((a) => a.sliderId === selection!.id) ?? null;
+  }
+  return null;
+}
+
+/** The motor identified by the current selection (body / pivot / crank joint), or null. */
+function selectedMotor(): MotorConstraint | null {
+  if (!selection) return null;
+  const ms = motors();
+  if (selection.kind === "body") return ms.find((m) => m.bodyId === selection!.id) ?? null;
+  if (selection.kind === "joint") {
+    return ms.find(
+      (m) => m.pivotJointId === selection!.id || m.crankJointId === selection!.id
+    ) ?? null;
+  }
+  return null;
+}
+
+/**
+ * Triangle wave that traces 0 → 1 → 0 over one cycle (`p` in cycles). The natural "linear
+ * actuator" motion: constant speed end-to-end, instant reverse at each endstop.
+ */
+function triangleWave(p: number): number {
+  const f = ((p % 1) + 1) % 1; // wrap into [0,1)
+  return f < 0.5 ? 2 * f : 2 * (1 - f);
+}
+/** Phase at which the triangle wave equals `s` ∈ [0,1], ascending branch (so it moves toward 1 next). */
+function triangleInverse(s: number): number {
+  return Math.max(0, Math.min(0.5, s / 2));
+}
+/** Sine-shaped wave 0 → 1 → 0 over one cycle: smooth ease in/out at the endstops. */
+function sineWave(p: number): number {
+  return 0.5 * (1 - Math.cos(2 * Math.PI * p));
+}
+function sineInverse(s: number): number {
+  return Math.acos(Math.max(-1, Math.min(1, 1 - 2 * s))) / (2 * Math.PI);
+}
+
+/**
+ * Fit each actuator/motor's phase accumulator so the next-frame target matches its current
+ * world state — called when toggling animation **on**, so play picks up smoothly from
+ * whatever pose the user left in sim (incl. after a drag while paused). Linear: phase in
+ * cycles, fit to current rider position fraction along the rail. Motor: phase in radians,
+ * fit to the current crank-relative-to-pivot angle.
+ */
+function fitPhases(): void {
+  animPhase.clear();
+  for (const a of linearActuators()) {
+    const slider = scene.constraints.find((c) => c.id === a.sliderId && c.kind === "slider");
+    const rider = scene.getJoint(a.riderId);
+    if (!slider || slider.kind !== "slider" || !rider) continue;
+    const ja = scene.getJoint(slider.railA);
+    const jb = scene.getJoint(slider.railB);
+    if (!ja || !jb) continue;
+    const pa = scene.jointWorld(ja);
+    const pb = scene.jointWorld(jb);
+    const dx = pb.x - pa.x;
+    const dy = pb.y - pa.y;
+    const dl = Math.hypot(dx, dy);
+    if (dl < 1e-9) continue;
+    const q = scene.jointWorld(rider);
+    const s = Math.max(0, Math.min(1, ((q.x - pa.x) * dx + (q.y - pa.y) * dy) / (dl * dl)));
+    animPhase.set(a.id, a.profile === "sine" ? sineInverse(s) : triangleInverse(s));
+  }
+  for (const m of motors()) {
+    const jp = scene.getJoint(m.pivotJointId);
+    const jc = scene.getJoint(m.crankJointId);
+    if (!jp || !jc) continue;
+    const pp = scene.jointWorld(jp);
+    const pc = scene.jointWorld(jc);
+    animPhase.set(m.id, Math.atan2(pc.y - pp.y, pc.x - pp.x)); // radians
+  }
+}
+
+/**
+ * Build this frame's anchors map (joint id → world target) for the solver. One target per
+ * linear-actuator rider (computed from its phase + the current rail), and two targets per
+ * motor (pivot fixed + crank on its orbit). Anchors are only emitted while animation is
+ * running; otherwise the scene runs purely under mouse-drag drivers.
+ */
+function computeAnchors(): Map<number, Vec2> {
+  const anchors = new Map<number, Vec2>();
+  if (!animating) return anchors;
+  for (const a of linearActuators()) {
+    const slider = scene.constraints.find((c) => c.id === a.sliderId && c.kind === "slider");
+    if (!slider || slider.kind !== "slider") continue;
+    const ja = scene.getJoint(slider.railA);
+    const jb = scene.getJoint(slider.railB);
+    if (!ja || !jb) continue;
+    const pa = scene.jointWorld(ja);
+    const pb = scene.jointWorld(jb);
+    const dl = Math.hypot(pb.x - pa.x, pb.y - pa.y);
+    if (dl < 1e-9) continue;
+    const phase = animPhase.get(a.id) ?? 0;
+    const s = a.profile === "sine" ? sineWave(phase) : triangleWave(phase);
+    anchors.set(a.riderId, vec(pa.x + (pb.x - pa.x) * s, pa.y + (pb.y - pa.y) * s));
+  }
+  for (const m of motors()) {
+    const jp = scene.getJoint(m.pivotJointId);
+    const jc = scene.getJoint(m.crankJointId);
+    if (!jp || !jc) continue;
+    const pp = scene.jointWorld(jp);
+    const pc = scene.jointWorld(jc);
+    const r = dist(pp, pc); // current crank radius (frozen by the pivot anchor below)
+    if (r < 1e-6) continue;
+    const theta = animPhase.get(m.id) ?? 0;
+    // Pivot stays exactly where it is now; crank orbits at the current radius.
+    anchors.set(m.pivotJointId, vec(pp.x, pp.y));
+    anchors.set(m.crankJointId, vec(pp.x + r * Math.cos(theta), pp.y + r * Math.sin(theta)));
+  }
+  return anchors;
+}
+
+/** Advance every actuator/motor phase by its speed * dt. */
+function advancePhases(dt: number): void {
+  for (const a of linearActuators()) {
+    animPhase.set(a.id, (animPhase.get(a.id) ?? 0) + a.speed * dt);
+  }
+  for (const m of motors()) {
+    animPhase.set(m.id, (animPhase.get(m.id) ?? 0) + 2 * Math.PI * m.speed * dt);
+  }
+}
+
+/** Toggle animation on / off. On start, fit phases so the wave resumes from the current state. */
+function setAnimating(on: boolean): void {
+  if (on === animating) return;
+  animating = on;
+  animLastTimestamp = null;
+  if (on) fitPhases();
+  runBtn.classList.toggle("running", animating);
+}
+
+/**
+ * Sync the inline actuator / motor properties panels to the current selection. Hidden when
+ * nothing relevant is selected. Like `syncColorPicker`, change-detected so we don't clobber
+ * the input value mid-edit.
+ */
+let propsSyncKey = "";
+function syncPropsPanel(): void {
+  const a = selectedLinearActuator();
+  const m = a ? null : selectedMotor(); // actuator panel wins when both could apply (the joint case)
+  const key = a
+    ? `a${a.id}:${a.speed}:${a.profile}`
+    : m
+    ? `m${m.id}:${m.speed}`
+    : "";
+  if (key === propsSyncKey) return;
+  propsSyncKey = key;
+  actuatorProps.classList.toggle("hidden", !a);
+  motorProps.classList.toggle("hidden", !m);
+  if (a) {
+    actuatorSpeedInput.value = String(a.speed);
+    profileToggle.querySelectorAll<HTMLButtonElement>("button").forEach((b) =>
+      b.classList.toggle("active", b.dataset.profile === a.profile)
+    );
+  }
+  if (m) {
+    motorSpeedInput.value = String(m.speed);
+  }
+}
+
 // --- main loop -----------------------------------------------------------
 /** Run a solve and log how long the calculation took (debug). */
-function timedSolve(label: string, drv: Driver | null, iterations = 100): void {
+function timedSolve(
+  label: string,
+  drv: Driver | null,
+  iterations = 100,
+  anchors?: Map<number, Vec2>
+): void {
   const t0 = performance.now();
-  solveBreaks = solve(scene, drv, iterations);
+  solveBreaks = solve(scene, drv, iterations, 1, anchors);
   console.log(`[Disjointed] ${label} solve: ${(performance.now() - t0).toFixed(3)} ms`);
   updateSimError();
 }
@@ -1081,6 +1370,7 @@ function activeJoints(): number[] {
   if (tool === "connect") return selectedJoint !== null ? [selectedJoint] : [];
   if (tool === "slider") return sliderDraftIds;
   if (tool === "body") return jointDraftIds;
+  if (tool === "motor") return motorPivotDraft !== null ? [motorPivotDraft] : [];
   return [];
 }
 
@@ -1110,9 +1400,21 @@ function bodyJointDraftView(): { outline: Vec2[]; preview: Vec2[] | null } | nul
   return { outline, preview };
 }
 
-function frame(): void {
-  if (mode === "sim" && driver) timedSolve("drive", driver);
+function frame(now?: number): void {
+  // Animation tick: advance every actuator/motor phase by dt (capped to avoid huge jumps
+  // after the tab is backgrounded), then solve once per frame with the computed anchors so
+  // the driven joints reach their targets and propagate motion through pins/sliders.
+  if (mode === "sim" && animating) {
+    const t = now ?? performance.now();
+    const dt = animLastTimestamp === null ? 0 : Math.min(0.1, (t - animLastTimestamp) / 1000);
+    animLastTimestamp = t;
+    if (dt > 0) advancePhases(dt);
+    timedSolve("anim", driver, 60, computeAnchors());
+  } else if (mode === "sim" && driver) {
+    timedSolve("drive", driver);
+  }
   syncColorPicker();
+  syncPropsPanel();
   render(ctx, {
     scene,
     view,

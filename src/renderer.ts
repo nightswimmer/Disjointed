@@ -81,6 +81,12 @@ interface JointRoles {
   grounded: Set<number>;
   slider: Set<number>; // joints that ride a rail
   rail: Set<number>; // joints that define a rail
+  /** Joints that are a linear actuator's rider (self-driving in animation). */
+  actuator: Set<number>;
+  /** Joints used as a motor's pivot (stationary in animation). */
+  motorPivot: Set<number>;
+  /** Joints used as a motor's crank pin (orbits the pivot in animation). */
+  motorCrank: Set<number>;
 }
 
 function collectRoles(scene: Scene): JointRoles {
@@ -89,6 +95,9 @@ function collectRoles(scene: Scene): JointRoles {
     grounded: new Set(),
     slider: new Set(),
     rail: new Set(),
+    actuator: new Set(),
+    motorPivot: new Set(),
+    motorCrank: new Set(),
   };
   for (const c of scene.constraints) {
     if (c.kind === "pin") {
@@ -100,6 +109,11 @@ function collectRoles(scene: Scene): JointRoles {
       for (const r of c.riders) roles.slider.add(r);
       roles.rail.add(c.railA);
       roles.rail.add(c.railB);
+    } else if (c.kind === "linearActuator") {
+      roles.actuator.add(c.riderId);
+    } else if (c.kind === "motor") {
+      roles.motorPivot.add(c.pivotJointId);
+      roles.motorCrank.add(c.crankJointId);
     }
   }
   return roles;
@@ -216,6 +230,44 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     if (c.kind === "ground") drawGroundSymbol(ctx, c.anchor, s);
   }
 
+  // Motors: a thin yellow arm from pivot to crank (the rotation arm) plus a curved
+  // arrow at the pivot indicating that side spins. Drawn before the joints so the
+  // joint dots sit on top.
+  for (const c of scene.constraints) {
+    if (c.kind !== "motor") continue;
+    const jp = scene.getJoint(c.pivotJointId);
+    const jc = scene.getJoint(c.crankJointId);
+    if (!jp || !jc) continue;
+    const pp = scene.jointWorld(jp);
+    const pc = scene.jointWorld(jc);
+    ctx.strokeStyle = "#ffd166";
+    ctx.lineWidth = px(1.5);
+    ctx.setLineDash([px(5), px(3)]);
+    ctx.beginPath();
+    ctx.moveTo(pp.x, pp.y);
+    ctx.lineTo(pc.x, pc.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Curved-arrow rotation badge centred on the pivot.
+    const r = px(11);
+    ctx.lineWidth = px(1.6);
+    ctx.beginPath();
+    ctx.arc(pp.x, pp.y, r, -Math.PI * 0.65, Math.PI * 0.65);
+    ctx.stroke();
+    // Tiny arrowhead at the open end of the arc, pointing along the rotation direction.
+    const ah = px(4);
+    const ang = Math.PI * 0.65;
+    const tip = { x: pp.x + r * Math.cos(ang), y: pp.y + r * Math.sin(ang) };
+    const tx = -Math.sin(ang); // tangent direction
+    const ty = Math.cos(ang);
+    ctx.beginPath();
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(tip.x - tx * ah - Math.cos(ang) * ah * 0.5, tip.y - ty * ah - Math.sin(ang) * ah * 0.5);
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(tip.x - tx * ah + Math.cos(ang) * ah * 0.5, tip.y - ty * ah + Math.sin(ang) * ah * 0.5);
+    ctx.stroke();
+  }
+
   // Draw mode: connections aren't solved here, so a constraint whose endpoints sit apart
   // gets a dotted connector — it reads as linked even though the points don't touch.
   if (input.mode === "draw") {
@@ -302,6 +354,23 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.setLineDash([]);
     // Hollow center marks a revolute pin.
     if (roles.pinned.has(j.id)) dot(ctx, p, px(2), theme.surface);
+  }
+
+  // Linear-actuator riders: a green dashed ring around the joint badges it as self-driving
+  // along the rail. Drawn after the joints so the badge ring sits on top of the joint dot.
+  if (roles.actuator.size > 0) {
+    ctx.strokeStyle = "#5bd6a6";
+    ctx.lineWidth = px(1.5);
+    ctx.setLineDash([px(3), px(3)]);
+    for (const id of roles.actuator) {
+      const j = scene.getJoint(id);
+      if (!j) continue;
+      const p = scene.jointWorld(j);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, px(JOINT_R + 4), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 
   // Impossible-assembly markers: a red dotted line between each pair of points that, given

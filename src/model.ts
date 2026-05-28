@@ -83,7 +83,44 @@ export interface SliderConstraint {
   riders: number[];
 }
 
-export type Constraint = PinConstraint | GroundConstraint | SliderConstraint;
+/**
+ * A linear actuator: a free joint (the `rider`) confined to `sliderId`'s rail that travels
+ * back and forth along it at `speed` cycles per second when animation is running. Off-animation
+ * it behaves like any other rider on that slider (draggable, pinnable). `profile` picks the
+ * motion: `"triangle"` is end-to-end at constant velocity (the natural mechanical actuator),
+ * `"sine"` eases in/out at each endstop.
+ */
+export interface LinearActuatorConstraint {
+  kind: "linearActuator";
+  id: number;
+  sliderId: number;
+  riderId: number;
+  speed: number;
+  profile: "triangle" | "sine";
+}
+
+/**
+ * A motor: a body whose `pivotJointId` joint stays at its current world position while
+ * `crankJointId` orbits it at `speed` revolutions per second when animation is running. Both
+ * joints must belong to `bodyId`. Off-animation, the body behaves normally. The motor only
+ * acts during animation, where it temporarily anchors both joints (pivot fixed + crank on its
+ * orbit) — two anchors on one body fully determine its pose, which the existing solver handles.
+ */
+export interface MotorConstraint {
+  kind: "motor";
+  id: number;
+  bodyId: number;
+  pivotJointId: number;
+  crankJointId: number;
+  speed: number;
+}
+
+export type Constraint =
+  | PinConstraint
+  | GroundConstraint
+  | SliderConstraint
+  | LinearActuatorConstraint
+  | MotorConstraint;
 
 /** Serializable snapshot of an entire scene (for save / load / autosave). */
 export interface SceneData {
@@ -113,7 +150,11 @@ export interface BodyClip {
   pins: { a: number; b: number }[];
 }
 
-const FORMAT_VERSION = 5;
+const FORMAT_VERSION = 6;
+
+/** Default speeds for newly-created actuators. */
+const DEFAULT_LINEAR_ACTUATOR_SPEED = 0.5; // cycles per second (one back-and-forth every 2s)
+const DEFAULT_MOTOR_SPEED = 0.25;          // revolutions per second (4s per turn)
 
 const PALETTE = [
   "#4f9dff",
@@ -330,6 +371,73 @@ export class Scene {
       | SliderConstraint
       | undefined;
     if (c && !c.riders.includes(jointId)) c.riders.push(jointId);
+  }
+
+  /**
+   * Create a linear actuator on `sliderId`: places a new free joint on the rail (at the
+   * point on the rail nearest `worldPos`, or the rail midpoint if `worldPos` is omitted),
+   * attaches it as a rider of that slider, and creates the actuator constraint that drives
+   * the rider during animation. Returns the new constraint, or null if the slider is
+   * missing / degenerate. The rider stays at its placed position until animation runs.
+   */
+  addLinearActuator(sliderId: number, worldPos?: Vec2): LinearActuatorConstraint | null {
+    const slider = this.constraints.find(
+      (c) => c.id === sliderId && c.kind === "slider"
+    ) as SliderConstraint | undefined;
+    if (!slider) return null;
+    const ja = this.getJoint(slider.railA);
+    const jb = this.getJoint(slider.railB);
+    if (!ja || !jb) return null;
+    const a = this.jointWorld(ja);
+    const b = this.jointWorld(jb);
+    const d = sub(b, a);
+    const dl = Math.hypot(d.x, d.y);
+    if (dl < 1e-9) return null;
+    const dir = { x: d.x / dl, y: d.y / dl };
+    // Place the actuator's rider at the closest point on the rail segment to worldPos
+    // (midpoint when worldPos isn't given), so a single click anywhere on the rail lands
+    // the actuator under the cursor.
+    const t = worldPos
+      ? Math.max(0, Math.min(dl, dir.x * (worldPos.x - a.x) + dir.y * (worldPos.y - a.y)))
+      : dl / 2;
+    const place = vec(a.x + dir.x * t, a.y + dir.y * t);
+    const rider = this.addFreeJoint(place);
+    this.attachSliderRider(sliderId, rider.id);
+    const c: LinearActuatorConstraint = {
+      kind: "linearActuator",
+      id: this.id(),
+      sliderId,
+      riderId: rider.id,
+      speed: DEFAULT_LINEAR_ACTUATOR_SPEED,
+      profile: "triangle",
+    };
+    this.constraints.push(c);
+    return c;
+  }
+
+  /**
+   * Create a motor on `bodyId` using `pivotJointId` as the rotation centre and `crankJointId`
+   * as the orbiting crank pin. Both joints must already belong to that body; returns null on
+   * a mismatch or missing element. Off-animation the body behaves normally; while animation is
+   * running the motor pins the pivot in place and spins the crank around it at `speed` revs/s.
+   */
+  addMotor(bodyId: number, pivotJointId: number, crankJointId: number): MotorConstraint | null {
+    if (pivotJointId === crankJointId) return null;
+    if (!this.getBody(bodyId)) return null;
+    const jp = this.getJoint(pivotJointId);
+    const jc = this.getJoint(crankJointId);
+    if (!jp || !jc) return null;
+    if (jp.bodyId !== bodyId || jc.bodyId !== bodyId) return null;
+    const c: MotorConstraint = {
+      kind: "motor",
+      id: this.id(),
+      bodyId,
+      pivotJointId,
+      crankJointId,
+      speed: DEFAULT_MOTOR_SPEED,
+    };
+    this.constraints.push(c);
+    return c;
   }
 
   getBody(id: number): Body | undefined {
@@ -592,17 +700,33 @@ export class Scene {
   /**
    * Drop or trim constraints after some joints are removed: a pin/ground that uses
    * a gone joint is dropped; a slider is dropped if a *rail* joint is gone, but only
-   * loses the affected *riders* otherwise (the rail itself survives).
+   * loses the affected *riders* otherwise (the rail itself survives). A second pass
+   * drops any actuator whose slider was just removed (the actuator's rider survives
+   * as a free joint, but the actuator itself is meaningless without its slider).
    */
   private pruneConstraints(removed: Set<number>): void {
-    this.constraints = this.constraints
+    const trimmed = this.constraints
       .map((c) => pruneConstraint(c, removed))
       .filter((c): c is Constraint => c !== null);
+    const sliderIds = new Set(trimmed.filter((c) => c.kind === "slider").map((c) => c.id));
+    this.constraints = trimmed.filter(
+      (c) => c.kind !== "linearActuator" || sliderIds.has(c.sliderId)
+    );
   }
 
-  /** Remove a single constraint (e.g. a slider) by id, leaving its joints intact. */
+  /**
+   * Remove a single constraint (e.g. a slider) by id, leaving its joints intact. Removing
+   * a slider cascades to any actuator bound to it (the actuator's rider stays around as a
+   * free joint); other constraint kinds have no cascade.
+   */
   removeConstraint(id: number): void {
-    this.constraints = this.constraints.filter((c) => c.id !== id);
+    const c = this.constraints.find((x) => x.id === id);
+    this.constraints = this.constraints.filter((x) => x.id !== id);
+    if (c && c.kind === "slider") {
+      this.constraints = this.constraints.filter(
+        (x) => !(x.kind === "linearActuator" && x.sliderId === id)
+      );
+    }
   }
 
   clear(): void {
@@ -685,10 +809,17 @@ export class Scene {
  * Given a set of removed joint ids, return the constraint to keep — possibly a
  * trimmed copy — or `null` to drop it. Pins/grounds drop if any referenced joint is
  * gone; sliders drop only if a rail joint is gone, otherwise they shed dead riders.
+ * A linear actuator drops if its rider is gone (the slider may have been trimmed but
+ * the actuator's rider is the joint we just removed); a motor drops if either of its
+ * joints is gone.
  */
 function pruneConstraint(c: Constraint, removed: Set<number>): Constraint | null {
   if (c.kind === "pin") return removed.has(c.jointA) || removed.has(c.jointB) ? null : c;
   if (c.kind === "ground") return removed.has(c.joint) ? null : c;
+  if (c.kind === "linearActuator") return removed.has(c.riderId) ? null : c;
+  if (c.kind === "motor") {
+    return removed.has(c.pivotJointId) || removed.has(c.crankJointId) ? null : c;
+  }
   if (removed.has(c.railA) || removed.has(c.railB)) return null;
   const riders = c.riders.filter((r) => !removed.has(r));
   return riders.length === c.riders.length ? c : { ...c, riders };
