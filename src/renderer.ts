@@ -319,11 +319,15 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   const selectedJointId =
     input.selection?.kind === "joint" ? input.selection.id : null;
   const roles = collectRoles(scene);
+  // Joints involved in any unsatisfiable constraint — painted red to flag the stuck points.
+  const brokenJoints = new Set<number>();
+  for (const b of input.breaks) for (const id of b.joints) brokenJoints.add(id);
   for (const j of scene.joints) {
     const p = scene.jointWorld(j);
     const isHover = input.hoverJoint === j.id;
     const isSelected = input.activeJoints.includes(j.id) || j.id === selectedJointId;
     const isDriver = input.driverJoint === j.id;
+    const isBroken = brokenJoints.has(j.id);
     // A body-less joint reads as "loose" (muted dashed ring) only while unconstrained;
     // once it rides a slider or defines a (grounded) rail it's anchored, so it renders
     // like any constrained joint rather than a loose point.
@@ -333,11 +337,14 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     if (roles.pinned.has(j.id)) fill = "#4f9dff";
     if (roles.slider.has(j.id)) fill = "#5bd6a6";
     if (roles.grounded.has(j.id)) fill = "#ffd166";
+    if (isBroken) fill = "#ff4d4d"; // unsatisfiable constraint endpoint — overrides role colour
 
-    const r = px(isHover || isSelected || isDriver ? JOINT_R + 2 : JOINT_R);
+    const r = px(isHover || isSelected || isDriver || isBroken ? JOINT_R + 2 : JOINT_R);
     dot(ctx, p, r, fill);
-    ctx.lineWidth = px(2);
-    ctx.strokeStyle = isDriver
+    ctx.lineWidth = px(isBroken ? 2.5 : 2);
+    ctx.strokeStyle = isBroken
+      ? "#ff4d4d" // unsatisfiable constraint endpoint — red ring matches the break line
+      : isDriver
       ? "#ff4d4d"
       : isSelected
       ? theme.ink
@@ -346,8 +353,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       : isFree
       ? "#9aa0ac" // free joints get a muted dashed ring
       : theme.surface;
-    // A dashed outline marks a free (body-less) joint.
-    if (isFree && !isSelected && !isDriver) ctx.setLineDash([px(3), px(3)]);
+    // A dashed outline marks a free (body-less) joint — but a broken joint uses a solid red ring.
+    if (isFree && !isSelected && !isDriver && !isBroken) ctx.setLineDash([px(3), px(3)]);
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.stroke();

@@ -40,6 +40,7 @@ const actuatorSpeedInput = document.getElementById("actuator-speed") as HTMLInpu
 const motorSpeedInput = document.getElementById("motor-speed") as HTMLInputElement;
 const profileToggle = document.getElementById("actuator-profile")!;
 const runBtn = document.getElementById("run-btn") as HTMLButtonElement;
+const autopauseBtn = document.getElementById("autopause-btn") as HTMLButtonElement;
 
 const scene = new Scene();
 
@@ -140,6 +141,13 @@ let motorPivotDraft: number | null = null;
 let animating = false;
 let animLastTimestamp: number | null = null;
 const animPhase = new Map<number, number>(); // constraint id → phase accumulator
+// Auto-pause: when on, the animation halts after the assembly reports breaks for a few
+// consecutive frames. Session-only (not persisted), only affects the animation tick.
+// A short debounce filters solver chatter — complex closed loops can occasionally miss
+// convergence in a single 60-iteration frame even when geometrically solvable.
+let pauseOnImpossible = false;
+let impossibleFrames = 0;
+const IMPOSSIBLE_PAUSE_FRAMES = 3;
 
 // --- grid / snapping -------------------------------------------------------
 /** Grid spacing (and snap increment) in world units; mirrors the renderer's grid. */
@@ -258,6 +266,7 @@ document.getElementById("mirror-h-btn")!.addEventListener("click", () => mirrorS
 document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorSelection("v"));
 
 runBtn.addEventListener("click", () => setAnimating(!animating));
+autopauseBtn.addEventListener("click", () => setPauseOnImpossible(!pauseOnImpossible));
 
 // Inline speed / profile editing for whatever actuator or motor the selection identifies.
 actuatorSpeedInput.addEventListener("input", () => {
@@ -349,6 +358,7 @@ function setMode(next: Mode): void {
   colorGroup.classList.toggle("hidden", mode === "sim");
   actuatorGroup.classList.toggle("hidden", mode === "sim");
   runBtn.classList.toggle("hidden", mode === "draw");
+  autopauseBtn.classList.toggle("hidden", mode === "draw");
   canvas.style.cursor = mode === "sim" ? "grab" : "crosshair";
   updateHint();
   updateSimError(); // show/hide the banner for the mode we just entered
@@ -824,8 +834,17 @@ function handleBodyClick(p: Vec2): void {
       }
       return;
     }
-    addSliderRiderToDraft(p); // no joint, but maybe a slider rail under the cursor
-    return; // otherwise empty space: ignore
+    if (addSliderRiderToDraft(p)) return; // landed on a slider rail
+    // No joint and no rail under the cursor: mint a joint at the click point for the
+    // new body to use. On top of an existing body, the joint is added to that body and
+    // the build later gives the new body a coincident pinned twin (joining them). On
+    // empty space, a free joint that gets absorbed into the new body.
+    const at = snap(p);
+    const under = scene.bodyAt(p);
+    const created = under ? scene.addJoint(under.id, at) : scene.addFreeJoint(at);
+    jointDraftIds.push(created.id);
+    jointDraftCreated.push(created.id);
+    return;
   }
   if (draftBody.length > 0) {
     addBodyPoint(p); // already drawing a freehand polygon
@@ -1305,8 +1324,16 @@ function setAnimating(on: boolean): void {
   if (on === animating) return;
   animating = on;
   animLastTimestamp = null;
+  impossibleFrames = 0; // any stretch of impossible frames is per-run
   if (on) fitPhases();
   runBtn.classList.toggle("running", animating);
+}
+
+/** Toggle the auto-pause-on-impossible safety. Affects only the animation loop. */
+function setPauseOnImpossible(on: boolean): void {
+  pauseOnImpossible = on;
+  autopauseBtn.classList.toggle("armed", pauseOnImpossible);
+  autopauseBtn.setAttribute("aria-pressed", pauseOnImpossible ? "true" : "false");
 }
 
 /**
@@ -1410,6 +1437,10 @@ function frame(now?: number): void {
     animLastTimestamp = t;
     if (dt > 0) advancePhases(dt);
     timedSolve("anim", driver, 60, computeAnchors());
+    // Safety: stop the animation once the assembly has reported breaks for a few frames
+    // in a row (a brief debounce filters single-frame solver chatter on complex loops).
+    impossibleFrames = solveBreaks.length > 0 ? impossibleFrames + 1 : 0;
+    if (pauseOnImpossible && impossibleFrames >= IMPOSSIBLE_PAUSE_FRAMES) setAnimating(false);
   } else if (mode === "sim" && driver) {
     timedSolve("drive", driver);
   }

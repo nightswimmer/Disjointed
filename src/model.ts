@@ -11,8 +11,7 @@ import {
   clone,
   sub,
   dist,
-  normalize,
-  distToLine,
+  distToSegment,
   filletPolygon,
   roundedConvexBody,
   polygonCentroid,
@@ -506,7 +505,7 @@ export class Scene {
     );
   }
 
-  /** Slider whose rail line passes within `radius` (world units) of the point. */
+  /** Slider whose rail *segment* passes within `radius` (world units) of the point. */
   sliderAt(p: Vec2, radius: number): SliderConstraint | undefined {
     for (let i = this.constraints.length - 1; i >= 0; i--) {
       const c = this.constraints[i];
@@ -515,9 +514,8 @@ export class Scene {
       const jb = this.getJoint(c.railB);
       if (!ja || !jb) continue;
       const a = this.jointWorld(ja);
-      const dir = normalize(sub(this.jointWorld(jb), a));
-      if (dir.x === 0 && dir.y === 0) continue;
-      if (distToLine(p, a, dir) <= radius) return c;
+      const b = this.jointWorld(jb);
+      if (distToSegment(p, a, b) <= radius) return c;
     }
     return undefined;
   }

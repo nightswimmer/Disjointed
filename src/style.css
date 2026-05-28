@@ -179,7 +179,8 @@ select#grid-size-presets {
 #actuator-group.hidden,
 #actuator-props.hidden,
 #motor-props.hidden,
-#run-btn.hidden {
+#run-btn.hidden,
+#autopause-btn.hidden {
   display: none;
 }
 
@@ -197,6 +198,14 @@ select#grid-size-presets {
   background: var(--accent-dim);
   border-color: var(--accent);
   color: #fff;
+}
+
+/* Auto-pause toggle: an opt-in safety so animation halts on impossible assembly.
+   When armed, the icon turns the same red as the impossible-assembly banner. */
+#autopause-btn.armed {
+  background: rgba(255, 77, 77, 0.18);
+  border-color: #ff4d4d;
+  color: #ff4d4d;
 }
 
 /* Inline properties panel for a selected actuator / motor. */

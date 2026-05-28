@@ -27,12 +27,15 @@ export interface Driver {
 /**
  * A constraint that couldn't be satisfied (the assembly is impossible): the two world
  * points that should coincide but can't, and the leftover gap between them. The UI draws
- * a red dotted line between `a` and `b` and flags the assembly as unsolvable.
+ * a red dotted line between `a` and `b` and flags the assembly as unsolvable. `joints` lists
+ * the joint ids involved (pin endpoints, the grounded joint, an unreachable slider rider,
+ * or the anchor's joint) so the renderer can mark them red.
  */
 export interface ConstraintBreak {
   a: Vec2;
   b: Vec2;
   error: number;
+  joints: number[];
 }
 
 /** Inverse mass of a free (body-less) joint — a light translational point particle. */
@@ -415,6 +418,7 @@ const CLOSE_TOL = 0.05;
  * pin/ground constraint id or the rider's joint id (globally unique). `a`/`b` are the two
  * world points that should coincide (for a rider, `b` is the nearest point on the rail
  * segment); `error` is their gap. `ground` marks the units that are sacred (never disabled).
+ * `joints` lists the joint ids the unit involves, used to mark "stuck" joints in the UI.
  */
 interface StructuralUnit {
   id: number;
@@ -422,6 +426,7 @@ interface StructuralUnit {
   b: Vec2;
   error: number;
   ground: boolean;
+  joints: number[];
 }
 
 /**
@@ -442,12 +447,12 @@ function eachUnit(
       if (!ja || !jb) continue;
       const a = scene.jointWorld(ja);
       const b = scene.jointWorld(jb);
-      visit({ id: con.id, a, b, error: len(sub(a, b)), ground: false });
+      visit({ id: con.id, a, b, error: len(sub(a, b)), ground: false, joints: [con.jointA, con.jointB] });
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
       if (!j) continue;
       const a = scene.jointWorld(j);
-      visit({ id: con.id, a, b: con.anchor, error: len(sub(a, con.anchor)), ground: true });
+      visit({ id: con.id, a, b: con.anchor, error: len(sub(a, con.anchor)), ground: true, joints: [con.joint] });
     } else if (con.kind === "slider") {
       const ja = scene.getJoint(con.railA);
       const jb = scene.getJoint(con.railB);
@@ -463,7 +468,7 @@ function eachUnit(
         const q = scene.jointWorld(jq);
         const s = Math.max(0, Math.min(dl, dot(sub(q, a0), dir))); // nearest point on the rail segment
         const closest = add(a0, scale(dir, s));
-        visit({ id: riderId, a: q, b: closest, error: len(sub(q, closest)), ground: false });
+        visit({ id: riderId, a: q, b: closest, error: len(sub(q, closest)), ground: false, joints: [riderId] });
       }
     }
   }
@@ -473,7 +478,7 @@ function eachUnit(
     const j = scene.getJoint(jointId);
     if (!j) continue;
     const a = scene.jointWorld(j);
-    visit({ id: jointId, a, b: target, error: len(sub(a, target)), ground: true });
+    visit({ id: jointId, a, b: target, error: len(sub(a, target)), ground: true, joints: [jointId] });
   }
 }
 
@@ -612,7 +617,7 @@ function breaksForBroken(
   const breaks: ConstraintBreak[] = [];
   eachUnit(scene, grounded, (u) => {
     const isBreak = u.ground ? u.error > BREAK_TOL : broken.has(u.id) && u.error > BREAK_TOL;
-    if (isBreak) breaks.push({ a: u.a, b: u.b, error: u.error });
+    if (isBreak) breaks.push({ a: u.a, b: u.b, error: u.error, joints: u.joints });
   }, anchors);
   return breaks;
 }

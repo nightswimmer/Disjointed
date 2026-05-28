@@ -38,7 +38,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 
 | Tool | Shortcut | Action |
 | --- | --- | --- |
-| **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. |
+| **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **slider rail (or rail node)** and it's automatically attached to that slider as a rider. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
@@ -96,9 +96,14 @@ the motion picks up smoothly from wherever you (or the previous animation) left 
 **Impossible assemblies.** Grounded joints are sacred — they never move. If a mechanism can't be
 assembled (a constraint can't be satisfied), the solver keeps every solvable part working and
 flags only the genuinely impossible connections: each shows a **red dotted line** between the two
-points that can't meet (pulled as close together as the rest of the assembly allows), and a red
-**"Assembly impossible"** banner appears. A connected-but-impossible piece won't disturb the parts
-that *can* be solved.
+points that can't meet (pulled as close together as the rest of the assembly allows), the joints
+involved are drawn **red**, and a red **"Assembly impossible"** banner appears. A
+connected-but-impossible piece won't disturb the parts that *can* be solved.
+
+**Auto-pause on impossible** (warning-triangle button in the sim-mode toolbar). Toggle it on to
+have the animation halt automatically when the assembly can't be assembled — useful when running
+a motor or actuator into an unreachable configuration. A short debounce filters single-frame
+solver chatter, so it only fires once the impossibility persists for a few frames.
 
 ### Grid & snapping
 The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**

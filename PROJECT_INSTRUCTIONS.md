@@ -116,7 +116,10 @@ and in draw mode, **dotted connectors** mark constraints whose endpoints don't y
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, which load fine as-is).
-- **solver.ts** — `solve(scene, driver, iterations, relax, anchors?): ConstraintBreak[]`. Operates
+- **solver.ts** — `solve(scene, driver, iterations, relax, anchors?): ConstraintBreak[]` (each
+  `ConstraintBreak` carries `a`/`b`/`error` plus a `joints: number[]` list naming the joints
+  involved — pin endpoints, the grounded joint, an unreachable slider rider, or the anchor's joint
+  — so the UI can paint them red). Operates
   on a **host abstraction** (`hostFor`): each constraint participant is a body, a free joint
   (translate-only point), or a fixed world point — which unifies pin/ground/slider/driver. A
   separate **`pinHostFor`** makes *any* grounded joint (free or on a body) a fixed point when
@@ -130,7 +133,9 @@ and in draw mode, **dotted connectors** mark constraints whose endpoints don't y
   **`ConstraintBreak`s** (empty when solvable). See "Solver notes" below.
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.2..5).
-- **renderer.ts** — draws under the camera transform in world space: world-locked grid
+- **renderer.ts** — joints involved in any `ConstraintBreak.joints` are painted red (fill +
+  stroke + slight size bump) so the stuck points stand out alongside the existing red dotted
+  break lines. Draws under the camera transform in world space: world-locked grid
   (spacing = `gridStep`, drawn only when `gridVisible`),
   bodies (selected/hovered highlighted), slider rails as bounded segments with end-caps,
   ground symbols, joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
@@ -175,6 +180,15 @@ and in draw mode, **dotted connectors** mark constraints whose endpoints don't y
     targets per actuator/motor (one per actuator rider, two per motor — pivot + crank), and the
     main solve passes those targets via the solver's `anchors` parameter. Animation defaults to
     **off** on entering sim so dragging-to-drive keeps working until the user starts it.
+  - **Auto-pause on impossible** (`#autopause-btn`, sim-mode only): a toggle that stops the
+    animation when the assembly can't be solved. Session-only state (`pauseOnImpossible`, not
+    persisted). The check is debounced: `setAnimating(false)` fires only after
+    `IMPOSSIBLE_PAUSE_FRAMES` (3) **consecutive** animation frames with non-empty `solveBreaks`,
+    to filter out single-frame solver-convergence misses on complex closed loops. Visual indicators
+    (red banner, red break lines, red joints) are *not* debounced — they reflect whatever the
+    current solve found. Manual drag is unaffected (no pause concept). **Note**: the debounce
+    helps but still false-positives on some borderline mechanisms; the next intended fix is on the
+    solver side (more iterations / better convergence handling for animated anchors).
   - **Inline properties panel** (`#actuator-props` / `#motor-props`): mirrors the body-colour
     pattern — `syncPropsPanel()` runs each frame, hides both panels when neither element is
     selected, otherwise populates the speed field (and, for an actuator, the `/\` ↔ `~` profile
@@ -216,8 +230,12 @@ aborts the current placement.
   absorbed; grounded free joints, joints on other bodies, and a **rider on another body** get a
   pinned twin — pinning to a cross-body rider joins the two bodies so they ride the slider together;
   a **slider rail node** gets a twin attached to the slider as its own rider; a bare **slider-rail**
-  click drops a rider point there), click an already-added joint to finish, then move the cursor
-  out to size the outward margin (live preview) and click to finalize.
+  click drops a rider point there; **a click on an existing body** mints a fresh joint on that body
+  at the click point so the new body gets a pinned twin there — joining the two bodies; **a click
+  on empty space** mints a free joint at the click point that gets absorbed into the new body),
+  click an already-added joint to finish, then move the cursor out to size the outward margin
+  (live preview) and click to finalize. Joints minted mid-draft are tracked so an aborted draft
+  removes them.
 - **Joint** (`J`) — click inside a body to attach a joint; click where bodies overlap to drop
   a joint in each and pin them together; click **empty space** to place a free (body-less) joint.
   A node placed on a **slider rail (or rail node)** is auto-attached to that slider as a rider.
@@ -269,7 +287,11 @@ Simulate mode:
 - **Impossible assemblies** are flagged, not faked: grounds never move, the solvable parts still
   solve, and every unsatisfiable pin/slider draws a **red dotted line** between the two points
   that can't meet (pulled as close as the assembly allows), with a red **"Assembly impossible"**
-  banner. A connected impossible piece does not disturb the parts that can be solved.
+  banner. The joints involved in each break are also drawn **red** (red fill + red ring + slight
+  size bump). A connected impossible piece does not disturb the parts that can be solved. The
+  sim-mode toolbar has an **Auto-pause** toggle (warning-triangle icon) that halts the animation
+  once the assembly stays impossible for a few frames in a row — useful for stopping motors /
+  actuators before they push past a physically unreachable configuration.
 
 Navigation (both modes):
 - **Mouse wheel** zooms toward the cursor.
@@ -369,7 +391,8 @@ Persistence:
   while an unreachable pin breaks; a solvable four-bar with an impossible pendant keeps the
   four-bar intact (only the pendant flagged); and the key case — two grounded pieces pinned at
   their free ends, plus a third piece pinned across both grounds at an impossible span — solves
-  the good pin and flags only the third piece, with both grounds unmoved.
+  the good pin and flags only the third piece, with both grounds unmoved. Also asserts each
+  break's `joints` list names both stuck endpoints so the UI can paint them red.
 - **shape-edit.ts** — `filletPolygon` (convex + concave validity, radius 0 passthrough; a
   **reflex corner rounds into the notch, not the material**; a **narrow-neck shape stays
   simple — no self-intersection — across radii up to 200**) and body editing (`setBodyRadius` /
@@ -432,6 +455,12 @@ Persistence:
   fires only for an actual **rail node**; a rider-on-another-body falls through to the pin branch, so
   the new body is **pinned** to the existing rider — joining the two bodies, which then ride the
   slider together through the shared pin.
+- **Slider hit-test matched the infinite rail line, not the segment.** `sliderAt` used `distToLine`,
+  so a click far past the rail's endpoints (but co-linear) still hit the slider — and the Joint tool
+  auto-attached the placed joint as a rider even though it sat well outside the visible rail. Fixed:
+  `sliderAt` now uses `distToSegment`, so the pick matches the rendered segment. Tightens the
+  hit-test for the Joint placement, Connect attach, Linear actuator drop, Select pick, and the
+  body-from-joints rail click — all of which use this helper.
 
 ## Backlog / next steps (not yet built)
 - Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
@@ -439,11 +468,18 @@ Persistence:
 - More joint types as needed.
 - **Actuator / motor follow-ups**: editing speed/profile while in sim (selection clears on mode
   change today, so the inline panel only appears in draw); copy/paste carrying actuators + motors
-  in the `BodyClip` (today the body + its joints survive but the powered constraints don't);
-  investigating a reported flicker of "Assembly impossible" while *dragging* an actuator's rider
-  after stopping animation in a closed loop (not currently reproducible — see the diagnosis at the
-  end of this section for context, fix candidate A is "project the driver target onto the rail
-  before solving" for slider riders).
+  in the `BodyClip` (today the body + its joints survive but the powered constraints don't).
+- **Auto-pause false positives.** The "auto-pause on impossible" feature works for genuinely
+  unreachable configurations, and a 3-frame debounce filters obvious solver chatter — but the
+  animation still pauses on some borderline complex closed-loop scenes that *are* solvable. The
+  next angle to try is on the **solver** side rather than the UI: animation runs only 60
+  iterations per frame, and the convergence cleanup may bail early when anchors move quickly,
+  surfacing transient breaks. Candidates: bump iterations for animated frames, give the cleanup
+  loop more headroom when `anchors` are present, or run a short verification solve before
+  reporting breaks during animation. Investigating a reported flicker of "Assembly impossible"
+  while *dragging* an actuator's rider after stopping animation in a closed loop falls in the
+  same bucket (fix candidate A is "project the driver target onto the rail before solving" for
+  slider riders).
 - Optional: File System Access API for true "re-open the last file by path" (Chromium only).
   Current persistence is download/upload + localStorage autosave (restores the last session).
 

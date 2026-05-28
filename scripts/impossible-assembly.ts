@@ -57,6 +57,9 @@ function makeScene(anchorAt: { x: number; y: number }) {
     // The handle can reach at most 40px from the ground; the anchor is 500px away, so the
     // gap is large and positive (nearest possible is 460; an unstable rest leaves more).
     check("break error reflects the unreachable gap", b.error > 400, `${b.error.toFixed(2)} px`);
+    // The break names both pin endpoints so the UI can paint them red.
+    const flagsBoth = b.joints.includes(jHandle.id) && b.joints.includes(anchor.id);
+    check("break names both stuck joints", flagsBoth, `joints ${b.joints.join(",")}`);
   }
 }
 
