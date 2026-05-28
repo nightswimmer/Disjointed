@@ -27,6 +27,11 @@ and a converge-to-tolerance solver with **impossible-assembly handling** (ground
 unreachable pins/sliders are isolated, the rest still solves, and the breaks are drawn as red
 dotted lines plus an on-canvas error banner). The solver and shape/edit logic are verified
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
+**UI polish**: the toolbar is icon buttons with tooltips; a dark/light **theme toggle** (persisted)
+themes both the chrome and the canvas; a **body-colour swatch** sets the new-body default or
+recolours the selected body (paste keeps the source colour); and in draw mode, **dotted connectors**
+mark constraints whose endpoints don't yet touch (blue between pinned joints, green from a slider
+rider to its rail midpoint).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -80,8 +85,9 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
     move). Copy/paste: `extractBody(id)` snapshots a `BodyClip` (control polygon + its joints +
     the constraints referencing *only* those joints — grounds, fully-internal sliders, intra-body
     pins; cross-body pins are dropped), stored in world coords relative to the original centroid;
-    `insertBody(clip, at)` translates the whole fragment so the centroid lands at `at` and
-    recreates everything with fresh ids.
+    the clip also carries the body's **`color`**; `insertBody(clip, at)` translates the whole
+    fragment so the centroid lands at `at`, recreates everything with fresh ids, and restores the
+    colour.
   - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
     (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
     `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
@@ -107,9 +113,17 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
   for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
   expansion preview, slider rail preview) and a rotate-pivot crosshair. **Impossible-assembly
   breaks** are drawn as **red dotted lines** between the points that can't meet (`input.breaks`,
-  sim mode only). Cosmetic sizes are divided by the zoom.
-- **main.ts** — canvas/DPI setup, toolbar wiring, mode/tool state (tools are one-shot + have
-  keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
+  sim mode only). **Draw-mode connectors**: a constraint whose endpoints sit apart is drawn dotted
+  so the link still reads as connected — **blue** between two pinned joints (skipped when their dots
+  overlap), and **green** from each slider rider to the **rail midpoint** (skipped when the rider is
+  already on the rail, via `distToSegment`). Cosmetic sizes are divided by the zoom. Structural
+  colours come from a **`Theme`** palette (`DARK_THEME`/`LIGHT_THEME`, in `input.theme`): only `ink`
+  (highlights/draft/handle fill), `surface` (joint rings, pin centres, handle outline), `grid`, and
+  `jointFill` flip between light/dark — the semantic accents (pin blue, slider/rail green,
+  ground/rotate yellow, error red) and per-body colours stay fixed.
+- **main.ts** — canvas/DPI setup, toolbar wiring (the toolbar is **icon buttons** — SVG glyphs with
+  tooltips; wiring is by id/`data-*`/class, never button text), mode/tool state (tools are one-shot +
+  have keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
   pointer + key handling, persistence (save/load/autosave) plus a **snapshot undo/redo history**
   (`pushHistory`/`undo`/`redo`; `markDirty` records a step + autosaves), and the
   requestAnimationFrame render/solve loop. `timedSolve` captures the solver's `ConstraintBreak`s
@@ -126,6 +140,14 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
     with the resulting absolute body angle snapped to 45° (`snapAngle`/`ROTATE_SNAP_TOL`) and only
     the incremental delta applied per move via `scene.rotateBody`. Copy/paste are also on
     `Ctrl/Cmd+C`/`V`; rotate on `R`.
+  - **Theme** (`#theme-btn`): a dark/light toggle that sets `data-theme` on `<html>` (CSS vars drive
+    the chrome) and passes the matching `DARK_THEME`/`LIGHT_THEME` palette to the renderer; the
+    choice persists in `localStorage` (`disjointed:theme`, separate from scene autosave).
+  - **Body colour** (`#body-color`): a colour input that does double duty — with a body selected it
+    recolours that body (live, `markDirty`); with nothing selected it sets `defaultBodyColor`, the
+    colour given to newly drawn / built bodies (paste keeps the source colour instead). The swatch
+    is synced to the selection each frame by `syncColorPicker` (change-detected so it never clobbers
+    the picker mid-drag). The `#color-group` hides in sim mode like the tool/edit groups.
   - **Grid / snapping** (session-only state, not persisted): `gridVisible`, `snapEnabled`,
     `gridStep` (clamped 1–200 via `parseGridSize`; number input + a preset `<select>`). `snap(p)`
     rounds a world point to the nearest grid intersection when enabled (identity otherwise) and is
@@ -167,10 +189,10 @@ Select mode (default, no tool armed):
   selected body's control polygon keeps it selected (so an edge double-click isn't lost).
 - `Delete` removes the selection: a body takes its joints/constraints with it; a slider keeps
   its joints; a joint detaches from any rail and any constraints referencing it go.
-- **Edit utilities** (toolbar edit group, act on a selected body): **Copy/Paste**
-  (`Ctrl/Cmd+C`/`V` or buttons) duplicates a body with its joints + own constraints; the copy
-  lands at the cursor (grid-snapped) and is selected. **Mirror H/V** reflects the body + joints
-  in place about its centroid.
+- **Edit utilities** (act on a selected body): **Copy/Paste** (`Ctrl/Cmd+C`/`V`, **keyboard-only**
+  now — no toolbar buttons) duplicates a body with its joints + own constraints, **keeping its
+  colour**; the copy lands at the cursor (grid-snapped) and is selected. **Mirror H/V** (toolbar,
+  grouped with **Rotate**) reflects the body + joints in place about its centroid.
 
 Rotate tool (`R`, draw mode — a mode, not one-shot):
 - Drag a body to rotate it about its **centroid**; drag a **control node** of the already-selected
@@ -295,7 +317,7 @@ Persistence:
 - **edit-utils.ts** — `rotateBody` (90° about the centroid carries the joint + ground anchor; a
   pivot node stays fixed), `mirrorBody` (joint reflected, centroid + area preserved), and
   copy/paste (`extractBody`/`insertBody`: independent offset duplicate, joints/grounds/sliders
-  duplicated with fresh ids, cross-body pins dropped).
+  duplicated with fresh ids, cross-body pins dropped, **source colour preserved**).
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from

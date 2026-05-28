@@ -23,7 +23,9 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
 
 ## Usage
 
-There are two modes, switched from the toolbar.
+There are two modes, switched from the toolbar. The toolbar uses **icon buttons** — hover any of
+them for a tooltip naming the tool and its shortcut. A **theme toggle** (sun / moon) at the right
+switches between **dark and light** themes; your choice is remembered across sessions.
 
 ### Draw
 Tools are **one-shot**: pick a tool (or press its shortcut), place one element, and you return
@@ -47,18 +49,24 @@ when Snap is on), or double-click a **node** to remove it (kept to a minimum of 
 **Delete** to remove the selection: a body takes its joints and constraints with it; a slider rail
 leaves its joints; a joint detaches from any rail.
 
-**Editing utilities** (toolbar edit group, on a selected body):
-- **Copy / Paste** (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`, or the buttons) — duplicate a body together with
+**Editing utilities** (on a selected body):
+- **Copy / Paste** (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`, keyboard only) — duplicate a body together with
   its joints and the constraints that belong only to it (grounds, fully-internal sliders). The copy
-  lands at the cursor (grid-snapped when Snap is on) and becomes the selection. Cross-body pins
-  aren't reproduced.
+  **keeps the original's colour**, lands at the cursor (grid-snapped when Snap is on) and becomes
+  the selection. Cross-body pins aren't reproduced.
 - **Mirror H / V** — reflect the selected body (and its joints) left↔right or top↔bottom, in place
-  about its centroid.
+  about its centroid. Grouped in the toolbar next to **Rotate**.
+
+**Body colour.** A colour swatch in the toolbar sets the active colour: with **nothing selected**
+it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
+and editing it recolours the body.
 
 Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
 rail-defining joints get a **green ring**, and a **loose free joint a dashed ring**. Once a free
 joint is attached to a slider it's no longer loose, so it drops the dashed ring and shows as a
-normal (green) rider.
+normal (green) rider. While drawing, a constraint whose endpoints don't yet touch is drawn as a
+**dotted connector** so the link still reads as connected: **blue** between two pinned joints, and
+**green** from a slider rider to the **middle of its rail**.
 
 **Undo / redo:** `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Shift+Z` (or `Ctrl/Cmd+Y`) redoes — covering edits to the drawn layout.
 

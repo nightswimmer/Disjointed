@@ -105,6 +105,7 @@ export interface BodyClip {
   controlWorld: Vec2[];
   radius: number;
   round: RoundMode;
+  color: string;
   centroid: Vec2;
   joints: { tmp: number; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
@@ -525,6 +526,7 @@ export class Scene {
       controlWorld: this.bodyControlWorld(body).map(clone),
       radius: body.radius,
       round: body.round,
+      color: body.color,
       centroid: clone(body.pos),
       joints: attached.map((j) => ({ tmp: j.id, world: this.jointWorld(j) })),
       grounds,
@@ -546,6 +548,7 @@ export class Scene {
       clip.round
     );
     if (body.local.length < 3) return null;
+    body.color = clip.color; // paste keeps the source body's colour
     const idMap = new Map<number, number>(); // tmp id → new joint id
     for (const j of clip.joints) {
       idMap.set(j.tmp, this.addJoint(body.id, add(j.world, offset)).id);

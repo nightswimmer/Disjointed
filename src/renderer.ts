@@ -1,6 +1,6 @@
 /** Canvas rendering of the scene plus transient editor/sim overlays. */
 import { Scene } from "./model";
-import { Vec2, sub } from "./geometry";
+import { Vec2, sub, distToSegment } from "./geometry";
 import { View } from "./view";
 import { ConstraintBreak } from "./solver";
 
@@ -39,7 +39,39 @@ export interface RenderInput {
   gridVisible: boolean;
   /** Unsatisfiable constraints (impossible assembly): red dotted lines between points that can't meet. */
   breaks: ConstraintBreak[];
+  /** Structural colour palette (light/dark). */
+  theme: Theme;
 }
+
+/**
+ * Theme-dependent canvas colours. Only the structural tones flip between light and dark;
+ * the semantic accents (pin blue, slider/rail green, ground/rotate yellow, error red) and
+ * per-body colours read fine on either background and stay hardcoded below.
+ */
+export interface Theme {
+  /** High-contrast "ink": selection highlights, draft outlines, edit-handle fill. */
+  ink: string;
+  /** Background-matching tone: joint rings, pin centres, edit-handle outline. */
+  surface: string;
+  /** World-grid line colour. */
+  grid: string;
+  /** Default (roleless) joint fill. */
+  jointFill: string;
+}
+
+export const DARK_THEME: Theme = {
+  ink: "#ffffff",
+  surface: "#1e1f24",
+  grid: "#26282f",
+  jointFill: "#e6e8ee",
+};
+
+export const LIGHT_THEME: Theme = {
+  ink: "#1f2329",
+  surface: "#f4f5f7",
+  grid: "#d9dce2",
+  jointFill: "#3a3d46",
+};
 
 /** On-screen joint radius in CSS pixels (kept constant regardless of zoom). */
 const JOINT_R = 6;
@@ -74,7 +106,7 @@ function collectRoles(scene: Scene): JointRoles {
 }
 
 export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void {
-  const { scene, view } = input;
+  const { scene, view, theme } = input;
   const dpr = window.devicePixelRatio || 1;
   const w = ctx.canvas.clientWidth;
   const h = ctx.canvas.clientHeight;
@@ -93,7 +125,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   const right = (w - view.tx) / s;
   const bottom = (h - view.ty) / s;
 
-  if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep);
+  if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
 
   // Bodies.
   const selectedBody =
@@ -107,7 +139,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.closePath();
     ctx.fillStyle = body.color + (isSelected ? "55" : isHover ? "44" : "33");
     ctx.fill();
-    ctx.strokeStyle = isSelected ? "#ffffff" : body.color;
+    ctx.strokeStyle = isSelected ? theme.ink : body.color;
     ctx.lineWidth = px(isSelected || isHover ? 3 : 2);
     ctx.stroke();
   }
@@ -126,7 +158,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       ctx,
       scene.jointWorld(ja),
       scene.jointWorld(jb),
-      sel ? "#ffffff" : "#5bd6a6",
+      sel ? theme.ink : "#5bd6a6",
       px(sel ? 2.5 : 1.5),
       px(6)
     );
@@ -143,7 +175,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   // Draft body being drawn (freehand polygon).
   if (input.draftBody && input.draftBody.length > 0) {
     const pts = input.draftBody;
-    ctx.strokeStyle = "#ffffff";
+    ctx.strokeStyle = theme.ink;
     ctx.lineWidth = px(1.5);
     ctx.setLineDash([px(5), px(4)]);
     ctx.beginPath();
@@ -151,7 +183,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     if (input.cursor) ctx.lineTo(input.cursor.x, input.cursor.y);
     ctx.stroke();
     ctx.setLineDash([]);
-    for (const p of pts) dot(ctx, p, px(3), "#ffffff");
+    for (const p of pts) dot(ctx, p, px(3), theme.ink);
   }
 
   // Body-from-joints: dashed outline through the picked joints, and the expanded preview.
@@ -160,7 +192,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.setLineDash([px(5), px(4)]);
     if (!preview) {
       // Still picking joints: a dashed path through them, trailing to the cursor.
-      ctx.strokeStyle = "#ffffff";
+      ctx.strokeStyle = theme.ink;
       ctx.lineWidth = px(1.5);
       ctx.beginPath();
       outline.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
@@ -176,12 +208,59 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       ctx.stroke();
     }
     ctx.setLineDash([]);
-    for (const p of outline) dot(ctx, p, px(3), "#ffffff");
+    for (const p of outline) dot(ctx, p, px(3), theme.ink);
   }
 
   // Ground anchors.
   for (const c of scene.constraints) {
     if (c.kind === "ground") drawGroundSymbol(ctx, c.anchor, s);
+  }
+
+  // Draw mode: connections aren't solved here, so a constraint whose endpoints sit apart
+  // gets a dotted connector — it reads as linked even though the points don't touch.
+  if (input.mode === "draw") {
+    ctx.lineWidth = px(1.5);
+    ctx.setLineDash([px(4), px(4)]);
+    // Pins (blue): line between the two joints when their dots don't overlap.
+    ctx.strokeStyle = "#4f9dff";
+    const pinTouch = px(2 * JOINT_R); // centres closer than two radii → the dots overlap
+    for (const c of scene.constraints) {
+      if (c.kind !== "pin") continue;
+      const ja = scene.getJoint(c.jointA);
+      const jb = scene.getJoint(c.jointB);
+      if (!ja || !jb) continue;
+      const pa = scene.jointWorld(ja);
+      const pb = scene.jointWorld(jb);
+      if (Math.hypot(pb.x - pa.x, pb.y - pa.y) <= pinTouch) continue;
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
+    }
+    // Sliders (green): line from each rider to the rail's midpoint when the rider is off
+    // the rail. The rider's dot sitting on the rail line counts as touching.
+    ctx.strokeStyle = "#5bd6a6";
+    const railTouch = px(JOINT_R);
+    for (const c of scene.constraints) {
+      if (c.kind !== "slider") continue;
+      const ra = scene.getJoint(c.railA);
+      const rb = scene.getJoint(c.railB);
+      if (!ra || !rb) continue;
+      const a = scene.jointWorld(ra);
+      const b = scene.jointWorld(rb);
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      for (const riderId of c.riders) {
+        const rj = scene.getJoint(riderId);
+        if (!rj) continue;
+        const p = scene.jointWorld(rj);
+        if (distToSegment(p, a, b) <= railTouch) continue; // already on the rail
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(mid.x, mid.y);
+        ctx.stroke();
+      }
+    }
+    ctx.setLineDash([]);
   }
 
   // Joints.
@@ -198,7 +277,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     // like any constrained joint rather than a loose point.
     const isFree = j.bodyId === null && !roles.slider.has(j.id) && !roles.rail.has(j.id);
 
-    let fill = "#e6e8ee";
+    let fill = theme.jointFill;
     if (roles.pinned.has(j.id)) fill = "#4f9dff";
     if (roles.slider.has(j.id)) fill = "#5bd6a6";
     if (roles.grounded.has(j.id)) fill = "#ffd166";
@@ -209,12 +288,12 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.strokeStyle = isDriver
       ? "#ff4d4d"
       : isSelected
-      ? "#ffffff"
+      ? theme.ink
       : roles.rail.has(j.id)
       ? "#5bd6a6" // rail-defining joints get a green ring
       : isFree
       ? "#9aa0ac" // free joints get a muted dashed ring
-      : "#1e1f24";
+      : theme.surface;
     // A dashed outline marks a free (body-less) joint.
     if (isFree && !isSelected && !isDriver) ctx.setLineDash([px(3), px(3)]);
     ctx.beginPath();
@@ -222,7 +301,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.stroke();
     ctx.setLineDash([]);
     // Hollow center marks a revolute pin.
-    if (roles.pinned.has(j.id)) dot(ctx, p, px(2), "#1e1f24");
+    if (roles.pinned.has(j.id)) dot(ctx, p, px(2), theme.surface);
   }
 
   // Impossible-assembly markers: a red dotted line between each pair of points that, given
@@ -259,8 +338,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   if (input.editVertices) {
     const h = px(5);
     ctx.lineWidth = px(2);
-    ctx.strokeStyle = "#1e1f24";
-    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = theme.surface;
+    ctx.fillStyle = theme.ink;
     for (const v of input.editVertices) {
       ctx.beginPath();
       ctx.rect(v.x - h, v.y - h, 2 * h, 2 * h);
@@ -277,9 +356,10 @@ function drawGrid(
   right: number,
   bottom: number,
   lineWidth: number,
-  step: number
+  step: number,
+  color: string
 ): void {
-  ctx.strokeStyle = "#26282f";
+  ctx.strokeStyle = color;
   ctx.lineWidth = lineWidth;
   ctx.beginPath();
   for (let x = Math.floor(left / step) * step; x <= right; x += step) {

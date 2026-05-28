@@ -55,6 +55,7 @@ const near = (a: Vec2, b: Vec2, tol = 1e-6) => dist(a, b) < tol;
   const j2 = s.addJoint(body.id, { x: 0, y: 0 });
   s.addGround(j1.id, s.jointWorld(j1));
   s.addSlider(j1.id, j2.id); // rail fully on this body → should be copied
+  body.color = "#abcdef"; // a distinctive colour the paste should preserve
 
   const clip = s.extractBody(body.id)!;
   const at = { x: 120, y: 20 }; // centroid (20,20) → translate by (100,0)
@@ -69,6 +70,7 @@ const near = (a: Vec2, b: Vec2, tol = 1e-6) => dist(a, b) < tol;
   // The duplicate references only its own fresh joints (no shared ids with the original).
   const origIds = new Set([j1.id, j2.id]);
   check("duplicate joints are fresh ids", newJoints.every((j) => !origIds.has(j.id)));
+  check("paste preserves the source colour", s.getBody(newId)!.color === "#abcdef", s.getBody(newId)!.color);
 
   // Independence: moving the original body leaves the copy untouched.
   const copyPosBefore = { ...s.getBody(newId)!.pos };

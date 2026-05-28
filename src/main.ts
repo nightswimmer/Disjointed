@@ -1,7 +1,7 @@
 import "./style.css";
 import { Scene, SceneData, BodyClip } from "./model";
 import { solve, Driver, ConstraintBreak } from "./solver";
-import { render } from "./renderer";
+import { render, DARK_THEME, LIGHT_THEME } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, roundedConvexBody } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
 
@@ -30,8 +30,55 @@ const gridBtn = document.getElementById("grid-btn") as HTMLButtonElement;
 const snapBtn = document.getElementById("snap-btn") as HTMLButtonElement;
 const gridSizeInput = document.getElementById("grid-size") as HTMLInputElement;
 const gridSizePresets = document.getElementById("grid-size-presets") as HTMLSelectElement;
+const themeBtn = document.getElementById("theme-btn") as HTMLButtonElement;
+const colorGroup = document.getElementById("color-group")!;
+const colorInput = document.getElementById("body-color") as HTMLInputElement;
 
 const scene = new Scene();
+
+// --- theme (light/dark) --------------------------------------------------
+// Chrome is themed via a `data-theme` attribute on <html> (CSS vars); the canvas reads the
+// matching palette below. Preference persists across sessions (separate from scene autosave).
+const THEME_KEY = "disjointed:theme";
+let theme: "dark" | "light" =
+  localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+function applyTheme(): void {
+  document.documentElement.dataset.theme = theme;
+}
+function toggleTheme(): void {
+  theme = theme === "dark" ? "light" : "dark";
+  localStorage.setItem(THEME_KEY, theme);
+  applyTheme();
+}
+applyTheme();
+themeBtn.addEventListener("click", toggleTheme);
+
+// --- body colour ---------------------------------------------------------
+// The toolbar colour input does double duty: with a body selected it recolours that body;
+// with nothing selected it sets the colour applied to newly drawn bodies. The swatch is
+// kept in sync with the current selection by `syncColorPicker` (called each frame).
+let defaultBodyColor = colorInput.value;
+colorInput.addEventListener("input", () => {
+  const c = colorInput.value;
+  if (selection?.kind === "body") {
+    const body = scene.getBody(selection.id);
+    if (body) {
+      body.color = c;
+      markDirty();
+    }
+  } else {
+    defaultBodyColor = c;
+  }
+});
+/** Reflect the selected body's colour (or the new-body default) in the swatch. */
+let colorSyncKey = "";
+function syncColorPicker(): void {
+  const body = selection?.kind === "body" ? scene.getBody(selection.id) : null;
+  const key = body ? `b${body.id}:${body.color}` : `d:${defaultBodyColor}`;
+  if (key === colorSyncKey) return; // avoid clobbering the picker mid-drag
+  colorSyncKey = key;
+  colorInput.value = body ? body.color : defaultBodyColor;
+}
 
 // --- interaction state ---------------------------------------------------
 let mode: Mode = "draw";
@@ -181,8 +228,7 @@ document.getElementById("clear-btn")!.addEventListener("click", () => {
 });
 document.getElementById("save-btn")!.addEventListener("click", saveToFile);
 document.getElementById("load-btn")!.addEventListener("click", () => fileInput.click());
-document.getElementById("copy-btn")!.addEventListener("click", copySelection);
-document.getElementById("paste-btn")!.addEventListener("click", () => pasteAt(cursor));
+// Copy/paste are keyboard-only (Ctrl/Cmd+C / V); no toolbar buttons.
 document.getElementById("mirror-h-btn")!.addEventListener("click", () => mirrorSelection("h"));
 document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorSelection("v"));
 
@@ -242,6 +288,7 @@ function setMode(next: Mode): void {
   );
   toolGroup.classList.toggle("hidden", mode === "sim");
   editGroup.classList.toggle("hidden", mode === "sim");
+  colorGroup.classList.toggle("hidden", mode === "sim");
   canvas.style.cursor = mode === "sim" ? "grab" : "crosshair";
   updateHint();
   updateSimError(); // show/hide the banner for the mode we just entered
@@ -716,7 +763,10 @@ function finalizeJointBody(p: Vec2): void {
   const last = scene.jointWorld(scene.getJoint(lastId)!);
   const margin = Math.max(JOINT_BODY_MIN_MARGIN, dist(p, last));
   const body = scene.buildBodyFromJoints(jointDraftIds, margin);
-  if (body) jointDraftCreated = []; // absorbed into the body now — don't clean them up
+  if (body) {
+    body.color = defaultBodyColor;
+    jointDraftCreated = []; // absorbed into the body now — don't clean them up
+  }
   markDirty();
   disarmTool();
 }
@@ -735,7 +785,7 @@ function addBodyPoint(p: Vec2): void {
 
 function finishBody(): void {
   if (draftBody.length >= 3) {
-    scene.addBody(draftBody);
+    scene.addBody(draftBody).color = defaultBodyColor;
     draftBody = [];
     markDirty();
     disarmTool();
@@ -1062,6 +1112,7 @@ function bodyJointDraftView(): { outline: Vec2[]; preview: Vec2[] | null } | nul
 
 function frame(): void {
   if (mode === "sim" && driver) timedSolve("drive", driver);
+  syncColorPicker();
   render(ctx, {
     scene,
     view,
@@ -1080,6 +1131,7 @@ function frame(): void {
     gridStep,
     gridVisible,
     breaks: mode === "sim" ? solveBreaks : [],
+    theme: theme === "light" ? LIGHT_THEME : DARK_THEME,
   });
   requestAnimationFrame(frame);
 }
