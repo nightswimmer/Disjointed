@@ -1,6 +1,6 @@
 import "./style.css";
 import { Scene, SceneData, BodyClip, LinearActuatorConstraint, MotorConstraint } from "./model";
-import { solve, Driver, ConstraintBreak } from "./solver";
+import { solve, Driver, ConstraintBreak, SolveStats, solverConfig } from "./solver";
 import { render, DARK_THEME, LIGHT_THEME } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, roundedConvexBody } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
@@ -41,6 +41,16 @@ const motorSpeedInput = document.getElementById("motor-speed") as HTMLInputEleme
 const profileToggle = document.getElementById("actuator-profile")!;
 const runBtn = document.getElementById("run-btn") as HTMLButtonElement;
 const autopauseBtn = document.getElementById("autopause-btn") as HTMLButtonElement;
+const animIterCtrl = document.getElementById("anim-iter-ctrl")!;
+const animIterInput = document.getElementById("anim-iter") as HTMLInputElement;
+const animIterValue = document.getElementById("anim-iter-value")!;
+const cleanupMaxCtrl = document.getElementById("cleanup-max-ctrl")!;
+const cleanupMaxInput = document.getElementById("cleanup-max") as HTMLInputElement;
+const cleanupMaxValue = document.getElementById("cleanup-max-value")!;
+const structTolCtrl = document.getElementById("struct-tol-ctrl")!;
+const structTolInput = document.getElementById("struct-tol") as HTMLInputElement;
+const breakTolCtrl = document.getElementById("break-tol-ctrl")!;
+const breakTolInput = document.getElementById("break-tol") as HTMLInputElement;
 
 const scene = new Scene();
 
@@ -148,6 +158,22 @@ const animPhase = new Map<number, number>(); // constraint id → phase accumula
 let pauseOnImpossible = false;
 let impossibleFrames = 0;
 const IMPOSSIBLE_PAUSE_FRAMES = 3;
+// Phase-A sweep count used by the animation tick. Tunable live via the toolbar slider so the
+// trade-off between convergence (higher = more accurate, fewer spurious breaks) and per-frame
+// cost (lower = cheaper) can be felt on the actual mechanism.
+let animIterations = 100;
+// Rolling stats for the per-frame animation solve, surfaced in the debug log. Reset on stop.
+let animSolveMin = Infinity;
+let animSolveMax = 0;
+let animSolveSum = 0;
+let animSolveCount = 0;
+let animErrorFrames = 0; // frames whose solve reported at least one break
+let animCleanupSum = 0;
+let animCleanupMax = 0;
+let animPhaseASum = 0;
+let animPhaseAMax = 0;
+let animResidualSum = 0;
+let animResidualMax = 0;
 
 // --- grid / snapping -------------------------------------------------------
 /** Grid spacing (and snap increment) in world units; mirrors the renderer's grid. */
@@ -267,6 +293,36 @@ document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorS
 
 runBtn.addEventListener("click", () => setAnimating(!animating));
 autopauseBtn.addEventListener("click", () => setPauseOnImpossible(!pauseOnImpossible));
+animIterInput.addEventListener("input", () => {
+  const n = parseInt(animIterInput.value, 10);
+  if (Number.isFinite(n) && n > 0) {
+    animIterations = n;
+    animIterValue.textContent = String(n);
+  }
+});
+cleanupMaxInput.addEventListener("input", () => {
+  const n = parseInt(cleanupMaxInput.value, 10);
+  if (Number.isFinite(n) && n >= 0) {
+    solverConfig.maxCleanupSweeps = n;
+    cleanupMaxValue.textContent = String(n);
+  }
+});
+structTolInput.addEventListener("input", () => {
+  const n = parseFloat(structTolInput.value);
+  if (Number.isFinite(n) && n >= 0) solverConfig.structuralTol = n;
+});
+breakTolInput.addEventListener("input", () => {
+  const n = parseFloat(breakTolInput.value);
+  if (Number.isFinite(n) && n >= 0) solverConfig.breakTol = n;
+});
+// Seed the tuning controls from the actual runtime values (solverConfig / animIterations are
+// the single source of truth — the HTML carries no defaults, so they can't drift apart).
+animIterInput.value = String(animIterations);
+animIterValue.textContent = String(animIterations);
+cleanupMaxInput.value = String(solverConfig.maxCleanupSweeps);
+cleanupMaxValue.textContent = String(solverConfig.maxCleanupSweeps);
+structTolInput.value = String(solverConfig.structuralTol);
+breakTolInput.value = String(solverConfig.breakTol);
 
 // Inline speed / profile editing for whatever actuator or motor the selection identifies.
 actuatorSpeedInput.addEventListener("input", () => {
@@ -359,6 +415,10 @@ function setMode(next: Mode): void {
   actuatorGroup.classList.toggle("hidden", mode === "sim");
   runBtn.classList.toggle("hidden", mode === "draw");
   autopauseBtn.classList.toggle("hidden", mode === "draw");
+  animIterCtrl.classList.toggle("hidden", mode === "draw");
+  cleanupMaxCtrl.classList.toggle("hidden", mode === "draw");
+  structTolCtrl.classList.toggle("hidden", mode === "draw");
+  breakTolCtrl.classList.toggle("hidden", mode === "draw");
   canvas.style.cursor = mode === "sim" ? "grab" : "crosshair";
   updateHint();
   updateSimError(); // show/hide the banner for the mode we just entered
@@ -1325,7 +1385,22 @@ function setAnimating(on: boolean): void {
   animating = on;
   animLastTimestamp = null;
   impossibleFrames = 0; // any stretch of impossible frames is per-run
-  if (on) fitPhases();
+  if (on) {
+    fitPhases();
+  } else {
+    // Stop: clear the rolling solve-time stats so the next run starts fresh.
+    animSolveMin = Infinity;
+    animSolveMax = 0;
+    animSolveSum = 0;
+    animSolveCount = 0;
+    animErrorFrames = 0;
+    animCleanupSum = 0;
+    animCleanupMax = 0;
+    animPhaseASum = 0;
+    animPhaseAMax = 0;
+    animResidualSum = 0;
+    animResidualMax = 0;
+  }
   runBtn.classList.toggle("running", animating);
 }
 
@@ -1366,7 +1441,8 @@ function syncPropsPanel(): void {
 }
 
 // --- main loop -----------------------------------------------------------
-/** Run a solve and log how long the calculation took (debug). */
+/** Run a solve and log how long the calculation took (debug). For the per-frame animation
+ * solve, also tracks min/max/avg across the run so the line shows the rolling distribution. */
 function timedSolve(
   label: string,
   drv: Driver | null,
@@ -1374,8 +1450,37 @@ function timedSolve(
   anchors?: Map<number, Vec2>
 ): void {
   const t0 = performance.now();
-  solveBreaks = solve(scene, drv, iterations, 1, anchors);
-  console.log(`[Disjointed] ${label} solve: ${(performance.now() - t0).toFixed(3)} ms`);
+  const stats: SolveStats = { phaseASweeps: 0, cleanupSweeps: 0, finalResidual: 0 };
+  solveBreaks = solve(scene, drv, iterations, 1, anchors, stats);
+  const dt = performance.now() - t0;
+  if (label === "anim") {
+    animSolveMin = Math.min(animSolveMin, dt);
+    animSolveMax = Math.max(animSolveMax, dt);
+    animSolveSum += dt;
+    animSolveCount++;
+    if (solveBreaks.length > 0) animErrorFrames++;
+    animPhaseASum += stats.phaseASweeps;
+    animPhaseAMax = Math.max(animPhaseAMax, stats.phaseASweeps);
+    animCleanupSum += stats.cleanupSweeps;
+    animCleanupMax = Math.max(animCleanupMax, stats.cleanupSweeps);
+    animResidualSum += stats.finalResidual;
+    animResidualMax = Math.max(animResidualMax, stats.finalResidual);
+    const avg = animSolveSum / animSolveCount;
+    const phaseAAvg = animPhaseASum / animSolveCount;
+    const cleanupAvg = animCleanupSum / animSolveCount;
+    const residualAvg = animResidualSum / animSolveCount;
+    const errPct = (animErrorFrames / animSolveCount) * 100;
+    console.log(
+      `[Disjointed] ${label} solve: ${dt.toFixed(3)} ms ` +
+        `(min ${animSolveMin.toFixed(3)} / max ${animSolveMax.toFixed(3)} / avg ${avg.toFixed(3)}) ` +
+        `phaseA: ${stats.phaseASweeps} (avg ${phaseAAvg.toFixed(1)} / max ${animPhaseAMax}) ` +
+        `cleanup: ${stats.cleanupSweeps} (avg ${cleanupAvg.toFixed(1)} / max ${animCleanupMax}) ` +
+        `residual: ${stats.finalResidual.toExponential(2)} (avg ${residualAvg.toExponential(2)} / max ${animResidualMax.toExponential(2)}) ` +
+        `errors: ${animErrorFrames} / ${animSolveCount} (${errPct.toFixed(3)}%)`
+    );
+  } else {
+    console.log(`[Disjointed] ${label} solve: ${dt.toFixed(3)} ms`);
+  }
   updateSimError();
 }
 
@@ -1436,7 +1541,7 @@ function frame(now?: number): void {
     const dt = animLastTimestamp === null ? 0 : Math.min(0.1, (t - animLastTimestamp) / 1000);
     animLastTimestamp = t;
     if (dt > 0) advancePhases(dt);
-    timedSolve("anim", driver, 60, computeAnchors());
+    timedSolve("anim", driver, animIterations, computeAnchors());
     // Safety: stop the animation once the assembly has reported breaks for a few frames
     // in a row (a brief debounce filters single-frame solver chatter on complex loops).
     impossibleFrames = solveBreaks.length > 0 ? impossibleFrames + 1 : 0;

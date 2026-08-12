@@ -105,6 +105,13 @@ have the animation halt automatically when the assembly can't be assembled — u
 a motor or actuator into an unreachable configuration. A short debounce filters single-frame
 solver chatter, so it only fires once the impossibility persists for a few frames.
 
+**Solver tuning** (advanced, sim-mode toolbar). Four small controls let you trade solve accuracy
+against per-frame cost live: the animation iteration cap (`it`), the convergence-sweep cap (`cl`),
+and the structural / break tolerances (`st` / `br`). The defaults are right for most mechanisms —
+these exist for dialing in complex closed-loop scenes where the animation occasionally flags a
+solvable assembly as impossible. The browser console logs rolling solve statistics while the
+animation runs.
+
 ### Grid & snapping
 The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**
 toggles snap-to-grid, and the number field (with a preset dropdown) sets the spacing — any value
@@ -160,7 +167,9 @@ takes those targets as additional "moving grounds" — sacred just like a normal
 pins/sliders propagate the imposed motion through the whole assembly.
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),
-`renderer.ts`, `main.ts`. Tests live in [`scripts/`](scripts/).
+`renderer.ts`, `main.ts`, plus `analyzer.ts` — a standalone topology diagnostic (kinematic
+islands, degrees of freedom, loop / block decomposition) groundwork for future solver
+optimizations. Tests live in [`scripts/`](scripts/).
 
 ## License
 

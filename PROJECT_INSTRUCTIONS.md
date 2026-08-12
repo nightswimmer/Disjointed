@@ -38,6 +38,13 @@ recolours the selected body (paste keeps the source colour); an **inline speed/p
 appears in the toolbar when an actuator's rider or a motor's body / pivot / crank is selected;
 and in draw mode, **dotted connectors** mark constraints whose endpoints don't yet touch
 (blue between pinned joints, green from a slider rider to its rail midpoint).
+**Solver tuning / instrumentation** (aimed at the auto-pause false positives): the sim-mode
+toolbar has four live tuning controls (Phase-A iteration cap, cleanup-sweep cap, structural
+tolerance, break tolerance) backed by a mutable `solverConfig`; `solve` takes an optional
+`SolveStats` out-param and the animation loop logs rolling per-run solve stats (time, sweep
+counts, residuals, error-frame %). A new **`analyzer.ts`** (topology diagnostic, not yet wired
+to any UI) reports kinematic islands, DOF, loops, propagation order, and bridge/BCC
+decomposition — Stage 1 of exploring a propagation-based solver.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -116,7 +123,7 @@ and in draw mode, **dotted connectors** mark constraints whose endpoints don't y
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, which load fine as-is).
-- **solver.ts** — `solve(scene, driver, iterations, relax, anchors?): ConstraintBreak[]` (each
+- **solver.ts** — `solve(scene, driver, iterations, relax, anchors?, stats?): ConstraintBreak[]` (each
   `ConstraintBreak` carries `a`/`b`/`error` plus a `joints: number[]` list naming the joints
   involved — pin endpoints, the grounded joint, an unreachable slider rider, or the anchor's joint
   — so the UI can paint them red). Operates
@@ -130,7 +137,24 @@ and in draw mode, **dotted connectors** mark constraints whose endpoints don't y
   **exactly like ground constraints** — sacred, never disabled, projected at the end of each
   sweep — which is how linear-actuator riders and motor pivot/crank pairs are driven during
   animation without growing a new solver concept. Returns the list of unsatisfiable
-  **`ConstraintBreak`s** (empty when solvable). See "Solver notes" below.
+  **`ConstraintBreak`s** (empty when solvable). The former module constants live in a mutable
+  exported **`solverConfig`** (`structuralTol`, `breakTol`, `maxCleanupSweeps`) so the UI can
+  tune them at runtime; an optional **`SolveStats`** out-param reports Phase-A sweeps run,
+  cleanup sweeps run, and the final residual. Phase A **early-exits** once the structural
+  residual is under tolerance — but **only when no driver is present**: the driver is
+  step-limited (`DRIVER_MAX_STEP` per sweep), so a weakly-constrained grab keeps residual ≈ 0
+  and an unconditional early-exit would starve the drag to one pull per solve. See "Solver
+  notes" below.
+- **analyzer.ts** — read-only **topology diagnostic** (Stage 1 of the propagation-solver
+  exploration; not yet imported by the app — call `formatReport(analyzeScene(scene), scene)`
+  from a console/debug hook). Builds a constraint graph (bodies + free joints as nodes; pins +
+  slider-rider couplings as edges), finds kinematic islands (union-find), and per island
+  reports: Grübler-Kutzbach DOF (pins/grounds remove 2 DOF, a slider rider — point-on-line —
+  removes 1), cyclomatic loop count (grounds modeled as edges to a virtual world node so
+  loops-through-ground are counted), BFS propagation order from anchors, back-edges, and a
+  Tarjan **bridge / biconnected-component decomposition** classifying bodies into loop cores
+  (must be solved together) vs propagatable tree branches, with articulation bodies joining
+  blocks. Labels are `#id`-based (bodies have no user-facing name).
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.2..5).
 - **renderer.ts** — joints involved in any `ConstraintBreak.joints` are painted red (fill +
@@ -189,6 +213,14 @@ and in draw mode, **dotted connectors** mark constraints whose endpoints don't y
     current solve found. Manual drag is unaffected (no pause concept). **Note**: the debounce
     helps but still false-positives on some borderline mechanisms; the next intended fix is on the
     solver side (more iterations / better convergence handling for animated anchors).
+  - **Solver tuning controls** (sim-mode toolbar, next to Auto-pause): a Phase-A iteration
+    slider (10–300; sets `animIterations`, the per-frame animation solve budget — was a
+    hardcoded 60), a cleanup-sweep cap slider, and structural / break tolerance number inputs
+    writing straight into `solverConfig`. The inputs are **seeded from the runtime values at
+    startup** (the HTML carries no defaults, so they can't drift). Session-only, not persisted.
+    `timedSolve("anim", …)` accumulates rolling stats across an animation run — solve time
+    min/max/avg, Phase-A and cleanup sweep counts, final residual, and the % of frames that
+    reported breaks — logged each frame, reset when the animation stops.
   - **Inline properties panel** (`#actuator-props` / `#motor-props`): mirrors the body-colour
     pattern — `syncPropsPanel()` runs each frame, hides both panels when neither element is
     selected, otherwise populates the speed field (and, for an actuator, the `/\` ↔ `~` profile
@@ -461,6 +493,13 @@ Persistence:
   `sliderAt` now uses `distToSegment`, so the pick matches the rendered segment. Tightens the
   hit-test for the Joint placement, Connect attach, Linear actuator drop, Select pick, and the
   body-from-joints rail click — all of which use this helper.
+- **Phase-A early-exit starved the mouse driver.** The first version of the early-exit broke out
+  of Phase A whenever the structural residual was under tolerance — but the driver is step-limited
+  to `DRIVER_MAX_STEP` per sweep, so dragging something weakly constrained (a lone free joint, an
+  unconstrained body) kept residual ≈ 0, exited after one sweep, and the dragged point crawled at
+  8 units/frame instead of tracking the cursor. Fixed: the early-exit only fires when **no driver
+  is present** (the pure-animation case it was built for); with a driver the loop runs the full
+  budget, as before.
 
 ## Backlog / next steps (not yet built)
 - Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
@@ -469,17 +508,19 @@ Persistence:
 - **Actuator / motor follow-ups**: editing speed/profile while in sim (selection clears on mode
   change today, so the inline panel only appears in draw); copy/paste carrying actuators + motors
   in the `BodyClip` (today the body + its joints survive but the powered constraints don't).
-- **Auto-pause false positives.** The "auto-pause on impossible" feature works for genuinely
-  unreachable configurations, and a 3-frame debounce filters obvious solver chatter — but the
-  animation still pauses on some borderline complex closed-loop scenes that *are* solvable. The
-  next angle to try is on the **solver** side rather than the UI: animation runs only 60
-  iterations per frame, and the convergence cleanup may bail early when anchors move quickly,
-  surfacing transient breaks. Candidates: bump iterations for animated frames, give the cleanup
-  loop more headroom when `anchors` are present, or run a short verification solve before
-  reporting breaks during animation. Investigating a reported flicker of "Assembly impossible"
-  while *dragging* an actuator's rider after stopping animation in a closed loop falls in the
-  same bucket (fix candidate A is "project the driver target onto the rail before solving" for
-  slider riders).
+- **Auto-pause false positives — investigation in progress.** The "auto-pause on impossible"
+  feature works for genuinely unreachable configurations, and a 3-frame debounce filters obvious
+  solver chatter — but the animation still pauses on some borderline complex closed-loop scenes
+  that *are* solvable. The solver-side instrumentation for this is now in place: live tuning
+  controls (iterations / cleanup cap / tolerances via `solverConfig`), `SolveStats`, and rolling
+  per-run animation stats in the console — use them to find which knob actually clears a given
+  false positive. **Stage 1 of a propagation-solver exploration is also done** (`analyzer.ts`:
+  island / DOF / loop-core / BCC decomposition, not yet wired to UI); next stages would be a
+  debug hook to run it on the live scene, then prototyping closed-form propagation for tree
+  branches with the iterative solver kept for loop cores. Investigating a reported flicker of
+  "Assembly impossible" while *dragging* an actuator's rider after stopping animation in a
+  closed loop falls in the same bucket (fix candidate A is "project the driver target onto the
+  rail before solving" for slider riders).
 - Optional: File System Access API for true "re-open the last file by path" (Chromium only).
   Current persistence is download/upload + localStorage autosave (restores the last session).
 

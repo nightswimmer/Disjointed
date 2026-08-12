@@ -208,6 +208,34 @@ select#grid-size-presets {
   color: #ff4d4d;
 }
 
+/* Animation iteration slider: tunes the per-frame Phase-A sweep count live. */
+.iter-ctrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+}
+.iter-ctrl.hidden {
+  display: none;
+}
+#anim-iter,
+#cleanup-max {
+  width: 100px;
+  cursor: pointer;
+}
+#anim-iter-value,
+#cleanup-max-value {
+  min-width: 36px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+input[type="number"]#struct-tol,
+input[type="number"]#break-tol {
+  width: 70px;
+  cursor: text;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Inline properties panel for a selected actuator / motor. */
 #actuator-props,
 #motor-props {

@@ -38,6 +38,30 @@ export interface ConstraintBreak {
   joints: number[];
 }
 
+/** Optional out-parameter for `solve` — populated with per-call counters useful for tuning. */
+export interface SolveStats {
+  /** Number of Phase-A sweeps actually run (≤ `iterations`; less when early-out kicked in). */
+  phaseASweeps: number;
+  /** Number of post-Phase-A cleanup sweeps run before residual fell below `structuralTol`. */
+  cleanupSweeps: number;
+  /** Worst constraint error in the final pose (tested against `structuralTol` and `breakTol`). */
+  finalResidual: number;
+}
+
+/**
+ * Live-tunable solver knobs. Held in a mutable object (rather than module-level constants) so the
+ * UI's debug panel can adjust them at runtime without a rebuild — useful for feeling out the
+ * convergence/error trade-off on real mechanisms.
+ */
+export const solverConfig = {
+  /** Convergence target: keep sweeping until the worst constraint error is below this. */
+  structuralTol: 1e-4,
+  /** Final per-constraint error above which a constraint counts as a genuine "break". */
+  breakTol: 1e-1,
+  /** Safety cap on convergence sweeps so an over-constrained scene can't loop forever. */
+  maxCleanupSweeps: 1000,
+};
+
 /** Inverse mass of a free (body-less) joint — a light translational point particle. */
 const FREE_INV_MASS = 1;
 
@@ -387,16 +411,6 @@ function groundedJoints(scene: Scene, anchors: ReadonlyMap<number, Vec2> = NO_AN
  * around a ground point) instead of overshooting and spinning the body.
  */
 const DRIVER_MAX_STEP = 8;
-/** Convergence target: keep sweeping until the worst constraint error is below this (world units). */
-const STRUCTURAL_TOL = 1e-4;
-/** Safety cap on convergence sweeps so an over-constrained scene can't loop forever. */
-const MAX_CLEANUP_SWEEPS = 1000;
-/**
- * Final per-constraint error (world units) above which a constraint counts as an
- * unsatisfiable "break". Well above the convergence slop of a solvable scene
- * (STRUCTURAL_TOL), so only a genuinely impossible assembly is flagged.
- */
-const BREAK_TOL = 1e-1;
 /**
  * Under-relaxation used to settle an over-constrained scene. Full-relaxation Gauss-Seidel
  * oscillates when the assembly can't be satisfied, so it never settles and leaves inflated,
@@ -525,9 +539,9 @@ function settle(
   anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
 ): void {
   let prev = Infinity;
-  for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
+  for (let i = 0; i < solverConfig.maxCleanupSweeps; i++) {
     const res = structuralResidual(scene, grounded, skip, anchors);
-    if (res < STRUCTURAL_TOL || prev - res < STRUCTURAL_TOL) break;
+    if (res < solverConfig.structuralTol || prev - res < solverConfig.structuralTol) break;
     prev = res;
     sweepStructural(scene, relax, grounded, skip, anchors);
   }
@@ -616,7 +630,7 @@ function breaksForBroken(
 ): ConstraintBreak[] {
   const breaks: ConstraintBreak[] = [];
   eachUnit(scene, grounded, (u) => {
-    const isBreak = u.ground ? u.error > BREAK_TOL : broken.has(u.id) && u.error > BREAK_TOL;
+    const isBreak = u.ground ? u.error > solverConfig.breakTol : broken.has(u.id) && u.error > solverConfig.breakTol;
     if (isBreak) breaks.push({ a: u.a, b: u.b, error: u.error, joints: u.joints });
   }, anchors);
   return breaks;
@@ -641,23 +655,47 @@ export function solve(
   driver: Driver | null,
   iterations = 100,
   relax = 1,
-  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS
+  anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS,
+  stats?: SolveStats
 ): ConstraintBreak[] {
   const grounded = groundedJoints(scene, anchors);
+  // Initialise stats: callers that pass `stats` see these zeroed even on early return.
+  if (stats) {
+    stats.phaseASweeps = 0;
+    stats.cleanupSweeps = 0;
+    stats.finalResidual = 0;
+  }
 
-  // Phase A — normal solve with the mouse driver, then converge to tolerance.
+  // Phase A — driver + structural blended sweeps, bounded by `iterations` but early-exiting
+  // once the structural residual is already within tolerance (so the slider acts as a maximum
+  // on easy frames rather than a hard count). Driverless only: the driver is step-limited
+  // (DRIVER_MAX_STEP per sweep), so a weakly-constrained grab (a lone free joint, an
+  // unconstrained body) keeps residual ≈ 0 and an unconditional early-exit would cut the
+  // driver to one pull per solve — the dragged point would crawl instead of tracking the
+  // cursor. With a driver present the loop always runs the full budget, as it did before.
+  let phaseASweeps = 0;
   for (let iter = 0; iter < iterations; iter++) {
     sweepStructural(scene, relax, grounded, NONE, anchors);
     if (driver) {
       const host = driverHost(scene, driver, grounded);
       if (host) solveCoincident(host, fixedHost(driver.target), 1, DRIVER_MAX_STEP);
     }
+    phaseASweeps++;
+    if (!driver && structuralResidual(scene, grounded, NONE, anchors) < solverConfig.structuralTol) break;
   }
-  for (let i = 0; i < MAX_CLEANUP_SWEEPS; i++) {
-    if (structuralResidual(scene, grounded, NONE, anchors) < STRUCTURAL_TOL) break;
+  let cleanupSweepsDone = 0;
+  for (let i = 0; i < solverConfig.maxCleanupSweeps; i++) {
+    if (structuralResidual(scene, grounded, NONE, anchors) < solverConfig.structuralTol) break;
     sweepStructural(scene, relax, grounded, NONE, anchors);
+    cleanupSweepsDone++;
   }
-  if (structuralResidual(scene, grounded, NONE, anchors) < STRUCTURAL_TOL) return []; // everything resolved
+  const postCleanupResidual = structuralResidual(scene, grounded, NONE, anchors);
+  if (stats) {
+    stats.phaseASweeps = phaseASweeps;
+    stats.cleanupSweeps = cleanupSweepsDone;
+    stats.finalResidual = postCleanupResidual;
+  }
+  if (postCleanupResidual < solverConfig.structuralTol) return []; // everything resolved
 
   // Phase B — over-constrained. Greedily disable the worst-violated non-ground unit and
   // re-settle, until the remaining (active) constraints can all be satisfied. Grounds and
@@ -667,12 +705,13 @@ export function solve(
   for (let guard = 0; guard <= scene.constraints.length; guard++) {
     settle(scene, grounded, broken, STABILIZE_RELAX, anchors);
     const worst = worstActiveUnit(scene, grounded, broken, anchors);
-    if (!worst || worst.error < BREAK_TOL) break;
+    if (!worst || worst.error < solverConfig.breakTol) break;
     broken.add(worst.id);
   }
 
   // Phase C — pull the disabled units as close as the now-rigid assembly allows, then report
   // whatever gap remains as a red-line break.
   closeBroken(scene, grounded, broken, anchors);
+  if (stats) stats.finalResidual = structuralResidual(scene, grounded, NONE, anchors);
   return breaksForBroken(scene, grounded, broken, anchors);
 }

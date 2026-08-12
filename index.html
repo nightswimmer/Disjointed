@@ -22,6 +22,26 @@
           <button id="autopause-btn" class="icon-btn hidden" title="Auto-pause the animation when the assembly is impossible" aria-label="Auto-pause on impossible assembly" aria-pressed="false">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 L17 16 L3 16 Z"/><line x1="10" y1="8" x2="10" y2="12.5"/><circle cx="10" cy="14.5" r="0.9" fill="currentColor" stroke="none"/></svg>
           </button>
+          <!-- Solver tuning controls: values are seeded from solverConfig / animIterations in
+               main.ts at startup, so no defaults live here. -->
+          <label id="anim-iter-ctrl" class="iter-ctrl hidden" title="Max Phase-A sweeps per animation frame (higher = better convergence, slower; loop early-exits when satisfied)">
+            <span class="prop-tag">it</span>
+            <input id="anim-iter" type="range" min="10" max="300" step="10" />
+            <span id="anim-iter-value" class="prop-unit"></span>
+          </label>
+          <label id="cleanup-max-ctrl" class="iter-ctrl hidden" title="Max cleanup sweeps (post-Phase-A convergence cap)">
+            <span class="prop-tag">cl</span>
+            <input id="cleanup-max" type="range" min="0" max="5000" step="100" />
+            <span id="cleanup-max-value" class="prop-unit"></span>
+          </label>
+          <label id="struct-tol-ctrl" class="iter-ctrl hidden" title="Structural tolerance — convergence target (world units)">
+            <span class="prop-tag">st</span>
+            <input id="struct-tol" type="number" step="any" min="0" />
+          </label>
+          <label id="break-tol-ctrl" class="iter-ctrl hidden" title="Break tolerance — final per-constraint error above which a constraint is flagged as broken (world units)">
+            <span class="prop-tag">br</span>
+            <input id="break-tol" type="number" step="any" min="0" />
+          </label>
         </div>
         <div class="group" id="tool-group">
           <button data-tool="body" class="tool-btn icon-btn" title="Draw a body (B)" aria-label="Body tool">
