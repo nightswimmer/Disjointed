@@ -45,6 +45,16 @@ tolerance, break tolerance) backed by a mutable `solverConfig`; `solve` takes an
 counts, residuals, error-frame %). A new **`analyzer.ts`** (topology diagnostic, not yet wired
 to any UI) reports kinematic islands, DOF, loops, propagation order, and bridge/BCC
 decomposition — Stage 1 of exploring a propagation-based solver.
+**Joint containment**: an attached joint can never be placed or dragged outside its body —
+drags clamp to the nearest point on the outline (the joint slides along the edge), and a
+grid-snapped placement that would land outside falls back to the exact click point.
+**Node ↔ joint link**: a joint sitting exactly on one of its body's control vertices is
+*stuck* to it (how joint-built bodies keep joints and nodes together) — dragging the node
+carries the joint, and dragging the joint moves the node, reshaping/re-rounding the body
+(the former "live-link joint-built bodies" backlog item). The link is coincidence-based
+(no stored mapping), so it survives save/load, copy/paste, mirror, and rotate.
+The "Assembly impossible" banner now overlays the **canvas area** (below the toolbar)
+instead of covering the toolbar.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -53,7 +63,9 @@ decomposition — Stage 1 of exploring a propagation-based solver.
 
 ### Architecture (`src/`)
 - **geometry.ts** — Vec2 math; polygon centroid / area / inertia; point-in-polygon;
-  point-to-line distance; `distToSegment` (point to a clamped segment); `convexHull`;
+  point-to-line distance; `distToSegment` (point to a clamped segment);
+  `closestPointOnPolygon` (nearest point on a closed polygon's boundary — used to clamp
+  joints inside their body); `convexHull`;
   `roundedConvexBody` (hull + outward rounded offset = Minkowski sum with a disk, sampled
   adaptively to `margin`); `filletPolygon` (round a polygon's corners in place with tangent
   arcs — convex and concave/reflex corners). The fillet runs in passes: per-corner desired
@@ -96,8 +108,20 @@ decomposition — Stage 1 of exploring a propagation-based solver.
     new joint **attached to that slider as its own rider** (the body connects to the slider track,
     not pinned to a rail endpoint). Editing: `moveBodyVertex`,
     `insertBodyVertex` (add a control vertex),
-    `removeBodyVertex` (drop one, kept ≥ 3), `setBodyRadius`, `moveJoint`, `moveBody` — all go
-    through `rebuildBody`, so attached joints stay anchored.
+    `removeBodyVertex` (drop one, kept ≥ 3), `setBodyRadius`, `moveJoint`, `moveBody` — shape
+    edits go through `rebuildBody`, so attached joints stay anchored. **Joint containment**:
+    `pointInBody` / `clampIntoBody` test/clamp a world point against a body's rounded outline;
+    `moveJoint` (via the private `shiftJoint`) clamps an attached joint's target inside its
+    body, so a drag can't take it outside (free joints are unclamped; ground anchors follow).
+    **Node ↔ joint link** (`VERTEX_LINK_EPS = 1e-6`): `moveBodyVertex` carries any joint of
+    that body exactly coincident with the moved control vertex (moved *after* the rebuild, so
+    every other joint stays anchored); `moveJoint` on a joint coincident with a control vertex
+    delegates to `moveBodyVertex` — so the link is bidirectional and coincidence-based (no
+    stored mapping; survives save/load, copy/paste, mirror, rotate). Edge cases: only the
+    body's *own* joints follow a node (a pinned twin's partner on another body stays put — the
+    pin shows as a dotted connector until sim closes it), and rounding a freehand body's
+    corner after linking dissolves that link on the next drag (the control corner leaves the
+    rounded outline, where a joint may not go).
   - Edit utilities: `rotateBody(id, pivot, delta)` rigidly turns a body about a fixed world
     point (joints follow; ground anchors rotate too; no rebuild needed). `mirrorBody(id, "h"|"v")`
     reflects the control polygon + attached joints + their ground anchors across a centroid axis,
@@ -190,6 +214,12 @@ decomposition — Stage 1 of exploring a propagation-based solver.
   The **Joint** tool auto-attaches a placed node to a slider when it lands on a rail/rail-node;
   the **body-from-joints** draft turns a bare slider-rail click into a grid-snapped rider joint
   (tracked in `jointDraftCreated`, removed if the draft is aborted). Also a `timedSolve` debug log.
+  **Snap containment fallback**: both the Joint tool and body-from-joints joint minting hit-test
+  against the raw click point but place at the snapped point — if snapping would land outside a
+  body being attached to, they fall back to the exact click point (inside by hit-test), so a
+  joint is never created outside its body. The `#sim-error` banner lives inside a
+  **`#canvas-wrap`** container (index.html / style.css) wrapping the canvas, so it overlays the
+  canvas top-center *below* the toolbar rather than on top of it.
   - **Actuator / motor tools** (`L` / `M`, draw mode, one-shot): **Linear actuator** is a single click
     on a slider rail → calls `addLinearActuator` (snapped to the click point). **Motor** is two clicks
     — first joint becomes the pivot (tracked in `motorPivotDraft`, highlighted via `activeJoints`),
@@ -288,8 +318,12 @@ aborts the current placement.
 
 Select mode (default, no tool armed):
 - Click a body, joint, or slider rail to **select** it (highlighted); **left-drag** moves the
-  selected body or joint. A selected body shows **corner handles** — drag one to reshape it
-  (`moveBodyVertex`); **`[` / `]`** decrease / increase its corner radius (round/un-round).
+  selected body or joint. An attached joint **can't leave its body**: dragging it past the edge
+  clamps it to the outline (it slides along the edge). A joint sitting exactly on a control
+  node (as in a joint-built body) is **stuck to that node** — dragging either one moves both,
+  reshaping the body. A selected body shows **corner handles** — drag one to reshape it
+  (`moveBodyVertex`, carrying any joint stuck to that node); **`[` / `]`** decrease / increase
+  its corner radius (round/un-round).
   **Double-click** an edge of the selected body to add a control node there (`insertBodyVertex`,
   grid-snapped), or a node to remove it (`removeBodyVertex`, kept ≥ 3). Clicking on/near the
   selected body's control polygon keeps it selected (so an edge double-click isn't lost).
@@ -429,7 +463,12 @@ Persistence:
   **reflex corner rounds into the notch, not the material**; a **narrow-neck shape stays
   simple — no self-intersection — across radii up to 200**) and body editing (`setBodyRadius` /
   `moveBodyVertex` keep attached joints anchored; `insertBodyVertex` / `removeBodyVertex` change
-  the control-vertex count, keep joints anchored, and enforce the 3-vertex minimum).
+  the control-vertex count, keep joints anchored, and enforce the 3-vertex minimum). Also
+  **joint containment** (`moveJoint` inside the body lands where asked; a move past the edge /
+  diagonal escape clamps to the outline; the ground anchor follows the clamped position; free
+  joints stay unclamped) and the **node ↔ joint link** (moving a joint-built body's node carries
+  its joint while the others stay anchored; moving the joint carries the node; a grounded linked
+  joint keeps its anchor in step; a non-node joint moves without reshaping the body).
 - **edit-utils.ts** — `rotateBody` (90° about the centroid carries the joint + ground anchor; a
   pivot node stays fixed), `mirrorBody` (joint reflected, centroid + area preserved), and
   copy/paste (`extractBody`/`insertBody`: independent offset duplicate, joints/grounds/sliders
@@ -493,6 +532,15 @@ Persistence:
   `sliderAt` now uses `distToSegment`, so the pick matches the rendered segment. Tightens the
   hit-test for the Joint placement, Connect attach, Linear actuator drop, Select pick, and the
   body-from-joints rail click — all of which use this helper.
+- **A joint could be placed or dragged outside its body.** Select-mode drags had no containment
+  check, and the Joint tool hit-tests the raw click but places at the *snapped* point, which
+  near an edge could fall outside the clicked body. Fixed: `moveJoint` clamps an attached
+  joint to the nearest point on its body's outline (it slides along the edge), and placement
+  falls back to the unsnapped click point when snapping would exit the body.
+- **The "Assembly impossible" banner covered the toolbar.** It was absolutely positioned at the
+  top of `#app` (toolbar included) with a higher z-index than the toolbar. Fixed: the canvas +
+  banner now live in a `#canvas-wrap` positioning context, so the banner overlays the canvas
+  just below the toolbar at any toolbar height.
 - **Phase-A early-exit starved the mouse driver.** The first version of the early-exit broke out
   of Phase A whenever the structural residual was under tolerance — but the driver is step-limited
   to `DRIVER_MAX_STEP` per sweep, so dragging something weakly constrained (a lone free joint, an
@@ -502,9 +550,10 @@ Persistence:
   budget, as before.
 
 ## Backlog / next steps (not yet built)
-- Live-link joint-built bodies to their joints (move a joint → body re-rounds) — currently the
-  control polygon is a snapshot taken at build time.
 - More joint types as needed.
+- Joint containment covers placement + drags only (by choice): **reshaping** a body (corner
+  handles, radius shrink, vertex removal) can still strand an already-placed joint outside the
+  new outline. If that bites, clamp stranded joints back in `rebuildBody`.
 - **Actuator / motor follow-ups**: editing speed/profile while in sim (selection clears on mode
   change today, so the inline panel only appears in draw); copy/paste carrying actuators + motors
   in the `BodyClip` (today the body + its joints survive but the powered constraints don't).

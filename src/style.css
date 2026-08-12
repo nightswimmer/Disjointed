@@ -41,7 +41,15 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  position: relative; /* positioning context for the sim-error banner overlay */
+}
+
+/* Canvas area below the toolbar; positioning context for the sim-error banner overlay,
+   so the banner sits under the toolbar whatever the toolbar's height. */
+#canvas-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
 }
 
 #toolbar {
@@ -307,7 +315,8 @@ input[type="color"]#body-color::-webkit-color-swatch {
   border-radius: 3px;
 }
 
-/* "Assembly impossible" banner: overlaid on the canvas, top-center, in simulation mode. */
+/* "Assembly impossible" banner: overlaid on the canvas (just below the toolbar), top-center,
+   in simulation mode. Positioned relative to #canvas-wrap, not #app. */
 #sim-error {
   position: absolute;
   top: 12px;

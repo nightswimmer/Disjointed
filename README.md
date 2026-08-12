@@ -39,7 +39,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | Tool | Shortcut | Action |
 | --- | --- | --- |
 | **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
-| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **slider rail (or rail node)** and it's automatically attached to that slider as a rider. |
+| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **slider rail (or rail node)** and it's automatically attached to that slider as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
 | **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
@@ -48,9 +48,12 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
 
 **Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
-**Drag** the selection to move it. A selected body shows **corner handles** — drag one to reshape
-it, and press **`[` / `]`** to decrease / increase its corner radius (this is how you round a
-freehand polygon: draw it, select it, press `]`). With a body selected you can also edit its
+**Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
+the edge makes it slide along the outline instead. A joint sitting exactly on one of its body's
+corner nodes (as in a body **built from joints**) is **stuck to that node**: dragging either one
+moves both, reshaping the body around it. A selected body shows **corner handles** — drag one to
+reshape it, and press **`[` / `]`** to decrease / increase its corner radius (this is how you
+round a freehand polygon: draw it, select it, press `]`). With a body selected you can also edit its
 outline by **double-click**: double-click an **edge** to add a node there (snapped to the grid
 when Snap is on), or double-click a **node** to remove it (kept to a minimum of 3). Press
 **Delete** to remove the selection: a body takes its joints and constraints with it; a slider rail

@@ -83,6 +83,61 @@ for (const r of [16, 30, 60, 200]) {
   check(`narrow neck fillet stays simple at r=${r}`, finite(f) && selfIntersections(f) === 0, `${selfIntersections(f)} crossings`);
 }
 
+// --- moveJoint keeps an attached joint inside its body ---
+const m = new Scene();
+const mb = m.addBody([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }]);
+const mj = m.addJoint(mb.id, { x: 50, y: 50 });
+
+m.moveJoint(mj.id, { x: 30, y: 0 }); // stays well inside
+check("in-body joint move lands where asked", dist(m.jointWorld(mj), { x: 80, y: 50 }) < 1e-9);
+
+m.moveJoint(mj.id, { x: 500, y: 0 }); // way past the right edge → clamp to the outline
+const clamped = m.jointWorld(mj);
+check("joint move past the edge clamps to the outline", dist(clamped, { x: 100, y: 50 }) < 1e-6, `at (${clamped.x.toFixed(2)}, ${clamped.y.toFixed(2)})`);
+
+m.moveJoint(mj.id, { x: 200, y: -200 }); // diagonal escape → nearest boundary point
+const corner = m.jointWorld(mj);
+check("diagonal escape clamps to the nearest boundary point", m.pointInBody(mb, corner) || dist(corner, { x: 100, y: 0 }) < 1e-6, `at (${corner.x.toFixed(2)}, ${corner.y.toFixed(2)})`);
+
+const mg = m.addGround(mj.id, m.jointWorld(mj));
+m.moveJoint(mj.id, { x: 500, y: 500 });
+check("ground anchor follows the clamped position", dist(mg.anchor, m.jointWorld(mj)) < 1e-9);
+
+const freeJ = m.addFreeJoint({ x: 300, y: 300 });
+m.moveJoint(freeJ.id, { x: 500, y: 500 });
+check("free joint still moves without clamping", dist(m.jointWorld(freeJ), { x: 800, y: 800 }) < 1e-9);
+
+// --- node ↔ joint link: a joint coincident with a control vertex is stuck to it ---
+const lk = new Scene();
+const l1 = lk.addFreeJoint({ x: 0, y: 0 });
+const l2 = lk.addFreeJoint({ x: 100, y: 0 });
+const l3 = lk.addFreeJoint({ x: 50, y: 80 });
+const lb = lk.buildBodyFromJoints([l1.id, l2.id, l3.id], 20)!;
+check("joint-built body created", !!lb);
+
+// buildBodyFromJoints stores one control point per joint, in order → vertex 0 ↔ l1.
+lk.moveBodyVertex(lb.id, 0, { x: -10, y: -5 });
+check("moving a body node carries its joint", dist(lk.jointWorld(l1), { x: -10, y: -5 }) < 1e-6, `at (${lk.jointWorld(l1).x.toFixed(2)}, ${lk.jointWorld(l1).y.toFixed(2)})`);
+check("other joints stay anchored", dist(lk.jointWorld(l2), { x: 100, y: 0 }) < 1e-6 && dist(lk.jointWorld(l3), { x: 50, y: 80 }) < 1e-6);
+
+// The reverse: moving the joint drags its node, reshaping the body.
+lk.moveJoint(l2.id, { x: 15, y: 10 });
+check("joint landed where asked", dist(lk.jointWorld(l2), { x: 115, y: 10 }) < 1e-6);
+check("moving the joint carries its body node", lk.bodyControlWorld(lb).some((v) => dist(v, { x: 115, y: 10 }) < 1e-6));
+
+// A grounded linked joint keeps its anchor in step.
+const lg = lk.addGround(l3.id, lk.jointWorld(l3));
+lk.moveBodyVertex(lb.id, 2, { x: 0, y: 12 });
+check("ground anchor follows a linked node move", dist(lg.anchor, lk.jointWorld(l3)) < 1e-9 && dist(lg.anchor, { x: 50, y: 92 }) < 1e-6);
+
+// A joint *not* on a node still moves freely without reshaping the body.
+const inner = lk.addJoint(lb.id, { x: 50, y: 30 });
+const ctrlBefore = lk.bodyControlWorld(lb).map((v) => ({ x: v.x, y: v.y }));
+lk.moveJoint(inner.id, { x: 5, y: 5 });
+const ctrlAfter = lk.bodyControlWorld(lb);
+check("non-node joint move leaves the shape alone", ctrlBefore.every((v, i) => dist(v, ctrlAfter[i]) < 1e-9));
+check("non-node joint moved normally", dist(lk.jointWorld(inner), { x: 55, y: 35 }) < 1e-6);
+
 // --- add / remove control vertices ---
 const e = new Scene();
 const eb = e.addBody([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }]);

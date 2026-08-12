@@ -18,7 +18,15 @@ import {
   polygonArea,
   polygonInertiaAboutCentroid,
   pointInPolygon,
+  closestPointOnPolygon,
 } from "./geometry";
+
+/**
+ * A joint exactly coincident with a body control vertex is "stuck" to it — they move
+ * together (how joint-built bodies keep their joints and nodes linked). Coincidence is
+ * exact up to float error from frame transforms, so the tolerance can be tiny.
+ */
+const VERTEX_LINK_EPS = 1e-6;
 
 /** How a body's `radius` shapes it: round the corners in place, or offset the hull outward. */
 export type RoundMode = "fillet" | "offset";
@@ -221,12 +229,22 @@ export class Scene {
     });
   }
 
-  /** Move a control vertex of a body by a world-space delta, then rebuild its shape. */
+  /**
+   * Move a control vertex of a body by a world-space delta, then rebuild its shape.
+   * A joint of this body sitting exactly on the vertex is *stuck* to it and carried
+   * along (a body built from joints keeps its joints and control nodes together);
+   * all other attached joints stay anchored in world space as usual.
+   */
   moveBodyVertex(bodyId: number, index: number, delta: Vec2): void {
     const body = this.getBody(bodyId);
     if (!body || index < 0 || index >= body.controlLocal.length) return;
+    const vw = add(body.pos, rotate(body.controlLocal[index], body.angle));
+    const linked = this.joints.filter(
+      (j) => j.bodyId === bodyId && dist(this.jointWorld(j), vw) < VERTEX_LINK_EPS
+    );
     body.controlLocal[index] = add(body.controlLocal[index], rotate(delta, -body.angle));
-    this.rebuildBody(body);
+    this.rebuildBody(body); // keeps every joint anchored...
+    for (const j of linked) this.shiftJoint(j, delta); // ...then the stuck ones follow
   }
 
   /**
@@ -464,6 +482,16 @@ export class Scene {
     return body.controlLocal.map((p) => add(body.pos, rotate(p, body.angle)));
   }
 
+  /** Whether a world point lies inside a body's (rounded) polygon. */
+  pointInBody(body: Body, p: Vec2): boolean {
+    return pointInPolygon(p, this.bodyWorldVerts(body));
+  }
+
+  /** `p` if it lies inside the body; otherwise the nearest point on the body's outline. */
+  clampIntoBody(body: Body, p: Vec2): Vec2 {
+    return this.pointInBody(body, p) ? p : closestPointOnPolygon(p, this.bodyWorldVerts(body));
+  }
+
   /** Topmost body whose polygon contains the point, or undefined. */
   bodyAt(p: Vec2): Body | undefined {
     for (let i = this.bodies.length - 1; i >= 0; i--) {
@@ -536,21 +564,50 @@ export class Scene {
 
   /**
    * Reposition a joint by a world-space `delta`. A free joint's world point moves; a
-   * body joint's local offset shifts (the body stays put). Any ground anchor on the
-   * joint follows, so it stays grounded where it now sits.
+   * body joint's local offset shifts (the body stays put), clamped so the joint can
+   * never leave its body's outline. A body joint sitting exactly on one of its body's
+   * control vertices is *stuck* to it: the move is delegated to `moveBodyVertex`, which
+   * reshapes the body and carries the joint along. Any ground anchor on the joint
+   * follows, so it stays grounded where it now sits.
    */
   moveJoint(id: number, delta: Vec2): void {
     const j = this.getJoint(id);
     if (!j) return;
+    if (j.bodyId !== null) {
+      const body = this.getBody(j.bodyId)!;
+      const vi = this.coincidentVertexIndex(body, this.jointWorld(j));
+      if (vi >= 0) {
+        this.moveBodyVertex(body.id, vi, delta);
+        return;
+      }
+    }
+    this.shiftJoint(j, delta);
+  }
+
+  /** Index of the control vertex exactly coincident with world point `p`, or -1. */
+  private coincidentVertexIndex(body: Body, p: Vec2): number {
+    const ctrl = this.bodyControlWorld(body);
+    for (let i = 0; i < ctrl.length; i++) {
+      if (dist(ctrl[i], p) < VERTEX_LINK_EPS) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * Raw joint shift by a world delta (no vertex linking): body joints are clamped
+   * inside their body's outline; ground anchors follow the joint.
+   */
+  private shiftJoint(j: Joint, delta: Vec2): void {
     if (j.bodyId === null) {
       j.local = add(j.local, delta);
     } else {
       const body = this.getBody(j.bodyId)!;
-      j.local = add(j.local, rotate(delta, -body.angle));
+      const target = this.clampIntoBody(body, add(this.jointWorld(j), delta));
+      j.local = rotate(sub(target, body.pos), -body.angle);
     }
     const w = this.jointWorld(j);
     for (const c of this.constraints) {
-      if (c.kind === "ground" && c.joint === id) c.anchor = vec(w.x, w.y);
+      if (c.kind === "ground" && c.joint === j.id) c.anchor = vec(w.x, w.y);
     }
   }
 

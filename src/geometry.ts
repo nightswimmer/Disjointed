@@ -107,6 +107,26 @@ export function distToSegment(p: Vec2, a: Vec2, b: Vec2): number {
   return dist(p, add(a, scale(ab, t)));
 }
 
+/** Closest point to `p` on the boundary of a closed polygon. */
+export function closestPointOnPolygon(p: Vec2, pts: Vec2[]): Vec2 {
+  let best = clone(pts[0]);
+  let bestD = Infinity;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[j];
+    const b = pts[i];
+    const ab = sub(b, a);
+    const l2 = lenSq(ab);
+    const t = l2 > 1e-12 ? Math.max(0, Math.min(1, dot(sub(p, a), ab) / l2)) : 0;
+    const q = add(a, scale(ab, t));
+    const d = dist(p, q);
+    if (d < bestD) {
+      bestD = d;
+      best = q;
+    }
+  }
+  return best;
+}
+
 /** Convex hull of a point set (Andrew's monotone chain). Returns hull vertices in order. */
 export function convexHull(points: Vec2[]): Vec2[] {
   const pts = [...points].sort((a, b) => a.x - b.x || a.y - b.y);

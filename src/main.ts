@@ -597,7 +597,11 @@ function handleDrawClick(p: Vec2): void {
       // Inside bodies: a joint in each overlapping body, pinned together (a shared
       // revolute). On empty space: a free, body-less joint (a movable point).
       const bodies = scene.bodiesAt(p);
-      const at = snap(p); // place on the grid; hit-test against the raw click point
+      // Place on the grid; hit-test against the raw click point. If snapping would push
+      // the joint outside a body it's being attached to, fall back to the click point
+      // (inside every hit body by construction).
+      let at = snap(p);
+      if (bodies.length > 0 && !bodies.every((b) => scene.pointInBody(b, at))) at = p;
       let created: ReturnType<typeof scene.addFreeJoint>;
       if (bodies.length > 0) {
         const joints = bodies.map((b) => scene.addJoint(b.id, at));
@@ -899,8 +903,11 @@ function handleBodyClick(p: Vec2): void {
     // new body to use. On top of an existing body, the joint is added to that body and
     // the build later gives the new body a coincident pinned twin (joining them). On
     // empty space, a free joint that gets absorbed into the new body.
-    const at = snap(p);
     const under = scene.bodyAt(p);
+    // Snap to the grid — unless snapping would land outside the body being clicked,
+    // in which case the exact click point (inside by hit-test) is used instead.
+    let at = snap(p);
+    if (under && !scene.pointInBody(under, at)) at = p;
     const created = under ? scene.addJoint(under.id, at) : scene.addFreeJoint(at);
     jointDraftIds.push(created.id);
     jointDraftCreated.push(created.id);
