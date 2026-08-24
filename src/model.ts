@@ -11,6 +11,10 @@ import {
   clone,
   sub,
   dist,
+  scale,
+  dot,
+  cross,
+  len,
   distToSegment,
   filletPolygon,
   roundedConvexBody,
@@ -129,12 +133,74 @@ export type Constraint =
   | LinearActuatorConstraint
   | MotorConstraint;
 
+// --- measurements ---------------------------------------------------------
+
+/** Which mode a measurement belongs to — draw and sim each keep their own set. */
+export type MeasureMode = "draw" | "sim";
+
+/**
+ * For a point–point measurement, which distance the label placement selected:
+ * `"h"` horizontal (|Δx|), `"v"` vertical (|Δy|), `"direct"` straight-line.
+ */
+export type MeasureAxis = "direct" | "h" | "v";
+
+/**
+ * A measurement reference — a point or a line, anchored to scene *elements* (never to
+ * bare coordinates), so its world geometry is re-resolved every frame and the value
+ * tracks the mechanism as it moves in simulation.
+ */
+export type MeasureRef =
+  | { kind: "joint"; jointId: number } // point: a joint
+  | { kind: "vertex"; bodyId: number; index: number } // point: a body control vertex
+  | { kind: "bodyPoint"; bodyId: number; local: Vec2 } // point: fixed in a body's frame
+  | { kind: "rail"; sliderId: number } // line: a slider rail
+  | { kind: "edge"; bodyId: number; index: number }; // line: control edge index → index+1
+
+/**
+ * A dimension between two references. What it measures follows from the reference kinds:
+ * point+point → distance along `axis`; point+line → perpendicular distance to the
+ * infinite line; line+line → distance while (near-)parallel, angle otherwise — resolved
+ * dynamically each frame, so a line pair can flip between the two in simulation.
+ * `labelOffset` positions the value display relative to the references' midpoint, so
+ * the label travels with the geometry it measures.
+ */
+export interface Measurement {
+  id: number;
+  mode: MeasureMode;
+  refA: MeasureRef;
+  refB: MeasureRef;
+  labelOffset: Vec2;
+  axis: MeasureAxis;
+}
+
+/** A reference resolved to current world geometry. */
+export type ResolvedMeasureRef =
+  | { kind: "point"; p: Vec2 }
+  | { kind: "line"; a: Vec2; b: Vec2 };
+
+/** Everything needed to display a measurement this frame (value + drawing geometry). */
+export interface MeasureInfo {
+  id: number;
+  kind: "distance" | "angle";
+  /** World units for a distance; degrees for an angle. */
+  value: number;
+  labelPos: Vec2;
+  /** Arrowed dimension segment (distance only). */
+  dim?: { a: Vec2; b: Vec2 };
+  /** Dashed extension / leader segments. */
+  ext: { a: Vec2; b: Vec2 }[];
+  /** Angle arc (angle only): centre, radius, start angle, positive CCW sweep. */
+  arc?: { c: Vec2; r: number; a0: number; sweep: number };
+}
+
 /** Serializable snapshot of an entire scene (for save / load / autosave). */
 export interface SceneData {
   version: number;
   bodies: Body[];
   joints: Joint[];
   constraints: Constraint[];
+  /** Draw-mode and sim-mode measurements together (each carries its `mode`). Absent pre-v7. */
+  measurements?: Measurement[];
 }
 
 /**
@@ -157,7 +223,10 @@ export interface BodyClip {
   pins: { a: number; b: number }[];
 }
 
-const FORMAT_VERSION = 6;
+const FORMAT_VERSION = 7;
+
+/** Below this angle two measured lines count as parallel: show their distance, not the angle. */
+const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
 
 /** Default speeds for newly-created actuators. */
 const DEFAULT_LINEAR_ACTUATOR_SPEED = 0.5; // cycles per second (one back-and-forth every 2s)
@@ -177,6 +246,7 @@ export class Scene {
   bodies: Body[] = [];
   joints: Joint[] = [];
   constraints: Constraint[] = [];
+  measurements: Measurement[] = [];
   private nextId = 1;
 
   private id(): number {
@@ -257,6 +327,7 @@ export class Scene {
     if (!body) return;
     const clamped = Math.min(Math.max(index, 0), body.controlLocal.length);
     body.controlLocal.splice(clamped, 0, rotate(sub(worldPos, body.pos), -body.angle));
+    this.shiftMeasureIndices(bodyId, clamped, 1);
     this.rebuildBody(body);
   }
 
@@ -269,6 +340,7 @@ export class Scene {
     if (!body || body.controlLocal.length <= 3) return;
     if (index < 0 || index >= body.controlLocal.length) return;
     body.controlLocal.splice(index, 1);
+    this.shiftMeasureIndices(bodyId, index, -1);
     this.rebuildBody(body);
   }
 
@@ -455,6 +527,177 @@ export class Scene {
     };
     this.constraints.push(c);
     return c;
+  }
+
+  // --- measurements -------------------------------------------------------
+
+  /**
+   * Create a measurement between two references, with its value displayed at `labelPos`.
+   * For a point–point pair the label placement picks the axis (see
+   * `measureAxisForPlacement`); other pairs always measure "direct". Returns null if a
+   * reference doesn't resolve.
+   */
+  addMeasurement(
+    mode: MeasureMode,
+    refA: MeasureRef,
+    refB: MeasureRef,
+    labelPos: Vec2
+  ): Measurement | null {
+    const a = this.resolveMeasureRef(refA);
+    const b = this.resolveMeasureRef(refB);
+    if (!a || !b) return null;
+    const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
+    const axis =
+      a.kind === "point" && b.kind === "point"
+        ? measureAxisForPlacement(a.p, b.p, labelPos)
+        : "direct";
+    const m: Measurement = {
+      id: this.id(),
+      mode,
+      refA: cloneMeasureRef(refA),
+      refB: cloneMeasureRef(refB),
+      labelOffset: sub(labelPos, anchor),
+      axis,
+    };
+    this.measurements.push(m);
+    return m;
+  }
+
+  getMeasurement(id: number): Measurement | undefined {
+    return this.measurements.find((m) => m.id === id);
+  }
+
+  removeMeasurement(id: number): void {
+    this.measurements = this.measurements.filter((m) => m.id !== id);
+  }
+
+  /** Resolve a reference to its current world geometry, or null if its element is gone. */
+  resolveMeasureRef(ref: MeasureRef): ResolvedMeasureRef | null {
+    switch (ref.kind) {
+      case "joint": {
+        const j = this.getJoint(ref.jointId);
+        return j ? { kind: "point", p: this.jointWorld(j) } : null;
+      }
+      case "vertex": {
+        const b = this.getBody(ref.bodyId);
+        if (!b || ref.index < 0 || ref.index >= b.controlLocal.length) return null;
+        return { kind: "point", p: this.bodyControlWorld(b)[ref.index] };
+      }
+      case "bodyPoint": {
+        const b = this.getBody(ref.bodyId);
+        return b ? { kind: "point", p: add(b.pos, rotate(ref.local, b.angle)) } : null;
+      }
+      case "rail": {
+        const c = this.constraints.find(
+          (x) => x.id === ref.sliderId && x.kind === "slider"
+        ) as SliderConstraint | undefined;
+        if (!c) return null;
+        const ja = this.getJoint(c.railA);
+        const jb = this.getJoint(c.railB);
+        if (!ja || !jb) return null;
+        return { kind: "line", a: this.jointWorld(ja), b: this.jointWorld(jb) };
+      }
+      case "edge": {
+        const b = this.getBody(ref.bodyId);
+        if (!b || ref.index < 0 || ref.index >= b.controlLocal.length) return null;
+        const verts = this.bodyControlWorld(b);
+        return { kind: "line", a: verts[ref.index], b: verts[(ref.index + 1) % verts.length] };
+      }
+    }
+  }
+
+  /** Current world position of a measurement's value label, or null if a ref is gone. */
+  measurementLabelPos(m: Measurement): Vec2 | null {
+    const a = this.resolveMeasureRef(m.refA);
+    const b = this.resolveMeasureRef(m.refB);
+    if (!a || !b) return null;
+    return add(scale(add(refCenter(a), refCenter(b)), 0.5), m.labelOffset);
+  }
+
+  /**
+   * Move a measurement's label to a new world position. For a point–point measurement
+   * the new placement also re-derives the axis (h / v / direct), like at creation.
+   */
+  setMeasurementLabel(id: number, labelPos: Vec2): void {
+    const m = this.getMeasurement(id);
+    if (!m) return;
+    const a = this.resolveMeasureRef(m.refA);
+    const b = this.resolveMeasureRef(m.refB);
+    if (!a || !b) return;
+    const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
+    m.labelOffset = sub(labelPos, anchor);
+    if (a.kind === "point" && b.kind === "point") {
+      m.axis = measureAxisForPlacement(a.p, b.p, labelPos);
+    }
+  }
+
+  /**
+   * Compute a measurement's current value + drawing geometry. Returns null when a
+   * reference is gone or degenerate (e.g. a zero-length rail) — the measurement is
+   * simply not displayed that frame.
+   */
+  measureInfo(m: Measurement): MeasureInfo | null {
+    const a = this.resolveMeasureRef(m.refA);
+    const b = this.resolveMeasureRef(m.refB);
+    if (!a || !b) return null;
+    const labelPos = add(scale(add(refCenter(a), refCenter(b)), 0.5), m.labelOffset);
+    if (a.kind === "point" && b.kind === "point") {
+      return pointPointInfo(m.id, a.p, b.p, m.axis, labelPos);
+    }
+    if (a.kind === "line" && b.kind === "line") {
+      return lineLineInfo(m.id, a, b, labelPos);
+    }
+    const p = a.kind === "point" ? a.p : (b as { kind: "point"; p: Vec2 }).p;
+    const line = a.kind === "line" ? a : (b as { kind: "line"; a: Vec2; b: Vec2 });
+    return pointLineInfo(m.id, p, line, labelPos);
+  }
+
+  /** Like `measureInfo`, but for a not-yet-created measurement (live placement preview). */
+  measurePreview(refA: MeasureRef, refB: MeasureRef, labelPos: Vec2): MeasureInfo | null {
+    const a = this.resolveMeasureRef(refA);
+    const b = this.resolveMeasureRef(refB);
+    if (!a || !b) return null;
+    const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
+    const axis =
+      a.kind === "point" && b.kind === "point"
+        ? measureAxisForPlacement(a.p, b.p, labelPos)
+        : "direct";
+    return this.measureInfo({
+      id: -1,
+      mode: "draw",
+      refA,
+      refB,
+      labelOffset: sub(labelPos, anchor),
+      axis,
+    });
+  }
+
+  /** Drop measurements whose references no longer resolve (their element was removed). */
+  private pruneMeasurements(): void {
+    this.measurements = this.measurements.filter(
+      (m) => this.resolveMeasureRef(m.refA) && this.resolveMeasureRef(m.refB)
+    );
+  }
+
+  /**
+   * Keep vertex/edge measurement refs pointing at the same geometry across a control
+   * vertex insert (`delta = 1` at `at`) or removal (`delta = -1`): later indices shift;
+   * a ref *on* a removed vertex/edge loses its subject, so its measurement is dropped.
+   */
+  private shiftMeasureIndices(bodyId: number, at: number, delta: 1 | -1): void {
+    const gone = new Set<number>();
+    for (const m of this.measurements) {
+      for (const ref of [m.refA, m.refB]) {
+        if ((ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) continue;
+        if (delta === -1) {
+          if (ref.index === at) gone.add(m.id);
+          else if (ref.index > at) ref.index--;
+        } else if (ref.index >= at) {
+          ref.index++;
+        }
+      }
+    }
+    if (gone.size) this.measurements = this.measurements.filter((m) => !gone.has(m.id));
   }
 
   getBody(id: number): Body | undefined {
@@ -767,6 +1010,7 @@ export class Scene {
     this.constraints = trimmed.filter(
       (c) => c.kind !== "linearActuator" || sliderIds.has(c.sliderId)
     );
+    this.pruneMeasurements();
   }
 
   /**
@@ -782,12 +1026,14 @@ export class Scene {
         (x) => !(x.kind === "linearActuator" && x.sliderId === id)
       );
     }
+    this.pruneMeasurements();
   }
 
   clear(): void {
     this.bodies = [];
     this.joints = [];
     this.constraints = [];
+    this.measurements = [];
     this.nextId = 1;
   }
 
@@ -798,6 +1044,7 @@ export class Scene {
       bodies: this.bodies,
       joints: this.joints,
       constraints: this.constraints,
+      measurements: this.measurements,
     };
   }
 
@@ -834,10 +1081,20 @@ export class Scene {
           : [];
         return { kind: "slider", id: s.id, railA: s.railA, railB: s.railB, riders };
       });
+    // Measurements arrived in v7; older files simply have none.
+    this.measurements = Array.isArray(data.measurements)
+      ? data.measurements.map((m) => ({
+          ...m,
+          refA: cloneMeasureRef(m.refA),
+          refB: cloneMeasureRef(m.refB),
+          labelOffset: vec(m.labelOffset.x, m.labelOffset.y),
+        }))
+      : [];
     const ids = [
       ...this.bodies.map((b) => b.id),
       ...this.joints.map((j) => j.id),
       ...this.constraints.map((c) => c.id),
+      ...this.measurements.map((m) => m.id),
     ];
     this.nextId = (ids.length ? Math.max(...ids) : 0) + 1;
   }
@@ -878,4 +1135,163 @@ function pruneConstraint(c: Constraint, removed: Set<number>): Constraint | null
   if (removed.has(c.railA) || removed.has(c.railB)) return null;
   const riders = c.riders.filter((r) => !removed.has(r));
   return riders.length === c.riders.length ? c : { ...c, riders };
+}
+
+// --- measurement geometry --------------------------------------------------
+
+function cloneMeasureRef(r: MeasureRef): MeasureRef {
+  return r.kind === "bodyPoint" ? { ...r, local: clone(r.local) } : { ...r };
+}
+
+/** Representative centre of a resolved reference (the label anchors to the midpoint of the two). */
+function refCenter(r: ResolvedMeasureRef): Vec2 {
+  return r.kind === "point" ? r.p : scale(add(r.a, r.b), 0.5);
+}
+
+/**
+ * CAD-style axis pick for a point–point dimension from where the label was placed:
+ * within the pair's x-range but outside its y-range (above/below) → horizontal distance;
+ * within the y-range but outside the x-range (beside) → vertical; anywhere else
+ * (diagonal zones, or between the points) → direct.
+ */
+export function measureAxisForPlacement(p: Vec2, q: Vec2, label: Vec2): MeasureAxis {
+  const inX = label.x >= Math.min(p.x, q.x) && label.x <= Math.max(p.x, q.x);
+  const inY = label.y >= Math.min(p.y, q.y) && label.y <= Math.max(p.y, q.y);
+  if (inX && !inY) return "h";
+  if (inY && !inX) return "v";
+  return "direct";
+}
+
+/** Collect non-degenerate extension segments. */
+function pushExt(ext: { a: Vec2; b: Vec2 }[], a: Vec2, b: Vec2): void {
+  if (dist(a, b) > 1e-6) ext.push({ a, b });
+}
+
+function pointPointInfo(
+  id: number,
+  p: Vec2,
+  q: Vec2,
+  axis: MeasureAxis,
+  labelPos: Vec2
+): MeasureInfo {
+  const ext: { a: Vec2; b: Vec2 }[] = [];
+  if (axis === "h") {
+    // Horizontal distance: the dimension line runs at the label's height.
+    const d1 = vec(p.x, labelPos.y);
+    const d2 = vec(q.x, labelPos.y);
+    pushExt(ext, p, d1);
+    pushExt(ext, q, d2);
+    return { id, kind: "distance", value: Math.abs(q.x - p.x), labelPos, dim: { a: d1, b: d2 }, ext };
+  }
+  if (axis === "v") {
+    const d1 = vec(labelPos.x, p.y);
+    const d2 = vec(labelPos.x, q.y);
+    pushExt(ext, p, d1);
+    pushExt(ext, q, d2);
+    return { id, kind: "distance", value: Math.abs(q.y - p.y), labelPos, dim: { a: d1, b: d2 }, ext };
+  }
+  // Direct: the dimension line is parallel to p–q, offset sideways to pass by the label.
+  const d = sub(q, p);
+  const l = len(d);
+  let off = vec(0, 0);
+  if (l > 1e-9) {
+    const u = scale(d, 1 / l);
+    const w = sub(labelPos, p);
+    off = sub(w, scale(u, dot(w, u))); // component of the label offset perpendicular to p–q
+  }
+  const d1 = add(p, off);
+  const d2 = add(q, off);
+  pushExt(ext, p, d1);
+  pushExt(ext, q, d2);
+  return { id, kind: "distance", value: l, labelPos, dim: { a: d1, b: d2 }, ext };
+}
+
+function pointLineInfo(
+  id: number,
+  p: Vec2,
+  line: { a: Vec2; b: Vec2 },
+  labelPos: Vec2
+): MeasureInfo | null {
+  const d = sub(line.b, line.a);
+  const l = len(d);
+  if (l < 1e-9) return null; // degenerate line (e.g. a collapsed rail) — nothing to measure
+  const u = scale(d, 1 / l);
+  const t = dot(sub(p, line.a), u);
+  const foot = add(line.a, scale(u, t)); // perpendicular foot on the *infinite* line
+  const ext: { a: Vec2; b: Vec2 }[] = [];
+  if (t < 0) pushExt(ext, line.a, foot);
+  else if (t > l) pushExt(ext, line.b, foot);
+  return { id, kind: "distance", value: dist(p, foot), labelPos, dim: { a: p, b: foot }, ext };
+}
+
+function lineLineInfo(
+  id: number,
+  l1: { a: Vec2; b: Vec2 },
+  l2: { a: Vec2; b: Vec2 },
+  labelPos: Vec2
+): MeasureInfo | null {
+  const d1 = sub(l1.b, l1.a);
+  const d2 = sub(l2.b, l2.a);
+  const len1 = len(d1);
+  const len2 = len(d2);
+  if (len1 < 1e-9 || len2 < 1e-9) return null;
+  const u1 = scale(d1, 1 / len1);
+  const u2 = scale(d2, 1 / len2);
+  const lineAngle = Math.acos(Math.min(1, Math.abs(dot(u1, u2)))); // between *lines*: 0..π/2
+  if (lineAngle < MEASURE_PARALLEL_TOL) {
+    // (Near-)parallel: perpendicular distance, measured where the label sits so the
+    // dimension line stays local to it (and continuous as the pair moves in sim).
+    const t1 = dot(sub(labelPos, l1.a), u1);
+    const f1 = add(l1.a, scale(u1, t1));
+    const t2 = dot(sub(f1, l2.a), u2);
+    const f2 = add(l2.a, scale(u2, t2));
+    const ext: { a: Vec2; b: Vec2 }[] = [];
+    if (t1 < 0) pushExt(ext, l1.a, f1);
+    else if (t1 > len1) pushExt(ext, l1.b, f1);
+    if (t2 < 0) pushExt(ext, l2.a, f2);
+    else if (t2 > len2) pushExt(ext, l2.b, f2);
+    return { id, kind: "distance", value: dist(f1, f2), labelPos, dim: { a: f1, b: f2 }, ext };
+  }
+  // Not parallel: the angle of whichever sector the label sits in (of the four the two
+  // infinite lines cut the plane into), so placing/dragging the label picks θ vs 180−θ.
+  const denom = cross(u1, u2);
+  const t = cross(sub(l2.a, l1.a), u2) / denom;
+  const v = add(l1.a, scale(u1, t)); // intersection of the infinite lines
+  let w = sub(labelPos, v);
+  if (len(w) < 1e-9) w = add(u1, u2); // label exactly on the vertex — fall back to a bisector
+  const tau = 2 * Math.PI;
+  const norm = (a: number) => ((a % tau) + tau) % tau;
+  const wa = norm(Math.atan2(w.y, w.x));
+  const rays = [
+    norm(Math.atan2(u1.y, u1.x)),
+    norm(Math.atan2(u1.y, u1.x) + Math.PI),
+    norm(Math.atan2(u2.y, u2.x)),
+    norm(Math.atan2(u2.y, u2.x) + Math.PI),
+  ].sort((a, b) => a - b);
+  // Find the pair of adjacent rays (cyclically) that bound the label's direction.
+  let a0 = rays[3] - tau;
+  let a1 = rays[0];
+  for (let i = 0; i < 3; i++) {
+    if (wa >= rays[i] && wa < rays[i + 1]) {
+      a0 = rays[i];
+      a1 = rays[i + 1];
+    }
+  }
+  if (wa >= rays[3]) {
+    a0 = rays[3];
+    a1 = rays[0] + tau;
+  }
+  const sweep = a1 - a0;
+  const r = len(w);
+  const ext: { a: Vec2; b: Vec2 }[] = [];
+  pushExt(ext, v, add(v, vec(r * Math.cos(a0), r * Math.sin(a0))));
+  pushExt(ext, v, add(v, vec(r * Math.cos(a1), r * Math.sin(a1))));
+  return {
+    id,
+    kind: "angle",
+    value: (sweep * 180) / Math.PI,
+    labelPos,
+    arc: { c: v, r, a0, sweep },
+    ext,
+  };
 }

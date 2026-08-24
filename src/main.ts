@@ -1,14 +1,24 @@
 import "./style.css";
-import { Scene, SceneData, BodyClip, LinearActuatorConstraint, MotorConstraint } from "./model";
+import {
+  Scene,
+  SceneData,
+  BodyClip,
+  LinearActuatorConstraint,
+  MotorConstraint,
+  Measurement,
+  MeasureInfo,
+  MeasureRef,
+  ResolvedMeasureRef,
+} from "./model";
 import { solve, Driver, ConstraintBreak, SolveStats, solverConfig } from "./solver";
 import { render, DARK_THEME, LIGHT_THEME } from "./renderer";
-import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, roundedConvexBody } from "./geometry";
+import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, roundedConvexBody, distToSegment } from "./geometry";
 import { View, screenToWorld, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
-type Tool = "body" | "joint" | "connect" | "ground" | "slider" | "rotate" | "linearActuator" | "motor";
+type Tool = "body" | "joint" | "connect" | "ground" | "slider" | "rotate" | "linearActuator" | "motor" | "measure";
 /** An existing element picked in normal/select mode. */
-type Selection = { kind: "body" | "joint" | "slider"; id: number };
+type Selection = { kind: "body" | "joint" | "slider" | "measure"; id: number };
 
 /** Pick / close thresholds in screen (CSS) pixels — converted to world units via the view. */
 const PICK_RADIUS = 12;
@@ -137,6 +147,10 @@ type RotateDrag = {
 let rotateDrag: RotateDrag | null = null;
 /** Motor tool: first click picks the pivot joint, second the crank pin on the same body. */
 let motorPivotDraft: number | null = null;
+/** Measure tool: the references picked so far (0–2); the third click places the label. */
+let measurePicks: MeasureRef[] = [];
+/** How close (screen px) a click must land to a measurement's value label to pick it. */
+const LABEL_PICK_RADIUS = 16;
 
 // --- animation (actuators / motors) -------------------------------------
 /**
@@ -203,13 +217,17 @@ let pan: { lastScreen: Vec2 } | null = null;
 type LeftDrag =
   | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean }
   | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean }
-  | { kind: "vertex"; bodyId: number; index: number; grabOffset: Vec2; moved: boolean };
+  | { kind: "vertex"; bodyId: number; index: number; grabOffset: Vec2; moved: boolean }
+  | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean };
 let leftDrag: LeftDrag | null = null;
 
 /** Current world position of a drag's anchor (the point that snaps to the grid). */
 function dragAnchorWorld(d: LeftDrag): Vec2 {
   if (d.kind === "vertex") return scene.bodyControlWorld(scene.getBody(d.bodyId)!)[d.index];
   if (d.kind === "body") return add(scene.getBody(d.id)!.pos, d.anchorOffset);
+  if (d.kind === "measureLabel") {
+    return scene.measurementLabelPos(scene.getMeasurement(d.id)!) ?? vec(0, 0);
+  }
   return scene.jointWorld(scene.getJoint(d.id)!);
 }
 
@@ -249,6 +267,7 @@ function eventWorld(e: MouseEvent): Vec2 {
 const pickRadius = () => PICK_RADIUS / view.scale;
 
 function defaultCursor(): string {
+  if (tool === "measure") return "crosshair";
   return mode === "sim" ? "grab" : "crosshair";
 }
 
@@ -265,10 +284,12 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. Snaps to 45°.",
   linearActuator: "Click a slider rail to drop a self-driving rider — it travels back and forth when animation runs.",
   motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
+  measure: "Click two references — a joint, body corner, body edge, slider rail, or a point on a body — then click where the value should sit.",
 };
 
 function updateHint(): void {
-  if (mode === "sim") hintEl.textContent = HINTS.sim;
+  if (tool === "measure") hintEl.textContent = HINTS.measure;
+  else if (mode === "sim") hintEl.textContent = HINTS.sim;
   else hintEl.textContent = tool === null ? HINTS.select : HINTS[tool];
 }
 
@@ -459,6 +480,7 @@ function resetTransient(): void {
   selectedJoint = null;
   sliderDraftIds = [];
   motorPivotDraft = null;
+  measurePicks = [];
   selection = null;
   driver = null;
   rotateDrag = null;
@@ -721,13 +743,99 @@ function handleDrawClick(p: Vec2): void {
       motorPivotDraft = null;
       break;
     }
+    case "measure":
+      handleMeasureClick(p);
+      return; // manages its own dirty-marking and disarm
   }
   markDirty();
   if (placed) disarmTool();
 }
 
-/** Normal/select mode: pick a joint (preferred), then a slider rail, then a body. */
+// --- measure tool ----------------------------------------------------------
+/**
+ * The measure reference a click at `p` would pick, by priority: a joint, a body control
+ * vertex, a slider rail, a body control-polygon edge, and finally any point inside a
+ * body (fixed in that body's frame, grid-snapped when snapping keeps it inside). Empty
+ * space picks nothing — references live on existing geometry only.
+ */
+function measureRefAt(p: Vec2): MeasureRef | null {
+  const j = scene.jointAt(p, pickRadius());
+  if (j) return { kind: "joint", jointId: j.id };
+  for (let i = scene.bodies.length - 1; i >= 0; i--) {
+    const body = scene.bodies[i];
+    const verts = scene.bodyControlWorld(body);
+    for (let vi = 0; vi < verts.length; vi++) {
+      if (dist(verts[vi], p) <= pickRadius()) return { kind: "vertex", bodyId: body.id, index: vi };
+    }
+  }
+  const s = scene.sliderAt(p, pickRadius());
+  if (s) return { kind: "rail", sliderId: s.id };
+  for (let i = scene.bodies.length - 1; i >= 0; i--) {
+    const body = scene.bodies[i];
+    const verts = scene.bodyControlWorld(body);
+    for (let ei = 0; ei < verts.length; ei++) {
+      if (distToSegment(p, verts[ei], verts[(ei + 1) % verts.length]) <= pickRadius()) {
+        return { kind: "edge", bodyId: body.id, index: ei };
+      }
+    }
+  }
+  const body = scene.bodyAt(p);
+  if (body) {
+    const snapped = snap(p);
+    const at = scene.pointInBody(body, snapped) ? snapped : p;
+    return { kind: "bodyPoint", bodyId: body.id, local: rotate(sub(at, body.pos), -body.angle) };
+  }
+  return null;
+}
+
+/** Whether two references name the same element (bodyPoints are always distinct picks). */
+function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "joint") return a.jointId === (b as { jointId: number }).jointId;
+  if (a.kind === "rail") return a.sliderId === (b as { sliderId: number }).sliderId;
+  if (a.kind === "vertex" || a.kind === "edge") {
+    const bb = b as { bodyId: number; index: number };
+    return a.bodyId === bb.bodyId && a.index === bb.index;
+  }
+  return false;
+}
+
+/** Measure tool click: two reference picks, then a third click places the value label. */
+function handleMeasureClick(p: Vec2): void {
+  if (measurePicks.length < 2) {
+    const ref = measureRefAt(p);
+    if (!ref) return; // empty space — keep waiting for a reference
+    if (measurePicks.length === 1 && sameMeasureRef(measurePicks[0], ref)) return;
+    measurePicks.push(ref);
+    return;
+  }
+  const m = scene.addMeasurement(mode === "sim" ? "sim" : "draw", measurePicks[0], measurePicks[1], p);
+  disarmTool(); // clears the picks (and, via resetTransient, the selection)
+  if (m) {
+    selection = { kind: "measure", id: m.id };
+    markDirty();
+  }
+}
+
+/** The current mode's measurement whose value label sits under `p`, or null (topmost first). */
+function measurementLabelAt(p: Vec2): Measurement | null {
+  const mm = mode === "sim" ? "sim" : "draw";
+  for (let i = scene.measurements.length - 1; i >= 0; i--) {
+    const m = scene.measurements[i];
+    if (m.mode !== mm) continue;
+    const lp = scene.measurementLabelPos(m);
+    if (lp && dist(lp, p) <= LABEL_PICK_RADIUS / view.scale) return m;
+  }
+  return null;
+}
+
+/** Normal/select mode: pick a measurement label (topmost overlay), then a joint, a slider rail, a body. */
 function handleSelectClick(p: Vec2): void {
+  const ml = measurementLabelAt(p);
+  if (ml) {
+    selection = { kind: "measure", id: ml.id };
+    return;
+  }
   const j = scene.jointAt(p, pickRadius());
   if (j) {
     selection = { kind: "joint", id: j.id };
@@ -800,6 +908,7 @@ function deleteSelection(): void {
   if (!selection) return;
   if (selection.kind === "body") scene.removeBody(selection.id);
   else if (selection.kind === "joint") scene.removeJoint(selection.id);
+  else if (selection.kind === "measure") scene.removeMeasurement(selection.id);
   else scene.removeConstraint(selection.id); // slider: remove it, keep the joints
   selection = null;
   markDirty();
@@ -1004,7 +1113,12 @@ canvas.addEventListener("mousedown", (e) => {
       } else {
         // Otherwise select what's under the cursor; if it's movable, begin a drag of it.
         handleSelectClick(world);
-        if (selection?.kind === "body") {
+        if (selection?.kind === "measure") {
+          const m = scene.getMeasurement(selection.id)!;
+          const anchor = scene.measurementLabelPos(m) ?? world;
+          leftDrag = { kind: "measureLabel", id: m.id, grabOffset: sub(world, anchor), moved: false };
+          canvas.style.cursor = "move";
+        } else if (selection?.kind === "body") {
           const anchor = bodyDragAnchor(selection.id, world); // centroid or nearest corner
           leftDrag = {
             kind: "body",
@@ -1024,6 +1138,21 @@ canvas.addEventListener("mousedown", (e) => {
       handleDrawClick(world);
     }
   } else {
+    // Sim mode. The measure tool works here too (sim keeps its own measurement set).
+    if (tool === "measure") {
+      handleMeasureClick(world);
+      return;
+    }
+    // A measurement's value label is the topmost overlay: grab it to reposition,
+    // select it to delete — without disturbing the mechanism underneath.
+    const ml = measurementLabelAt(world);
+    if (ml) {
+      selection = { kind: "measure", id: ml.id };
+      const anchor = scene.measurementLabelPos(ml) ?? world;
+      leftDrag = { kind: "measureLabel", id: ml.id, grabOffset: sub(world, anchor), moved: false };
+      canvas.style.cursor = "move";
+      return;
+    }
     const j = scene.jointAt(world, pickRadius());
     if (j) {
       driver = { jointId: j.id, target: world };
@@ -1065,6 +1194,13 @@ canvas.addEventListener("mousemove", (e) => {
   }
 
   if (leftDrag) {
+    // A measurement label follows the cursor exactly (no grid snap — it's an annotation,
+    // and a new placement re-derives h/v/direct for a point–point measurement).
+    if (leftDrag.kind === "measureLabel") {
+      scene.setMeasurementLabel(leftDrag.id, sub(world, leftDrag.grabOffset));
+      leftDrag.moved = true;
+      return;
+    }
     // Snap the dragged anchor to the grid (in absolute terms), preserving where it was grabbed.
     const target = snap(sub(world, leftDrag.grabOffset));
     const delta = sub(target, dragAnchorWorld(leftDrag));
@@ -1081,9 +1217,13 @@ canvas.addEventListener("mousemove", (e) => {
     mode === "draw" && tool === null && hoverJoint === null
       ? scene.bodyAt(world)?.id ?? null
       : null;
-  // Hint that elements are grabbable: a move cursor over a joint/body/handle in select mode.
+  // Hint that elements are grabbable: a move cursor over a joint/body/handle/label in select mode.
   if (mode === "draw" && tool === null) {
-    const grabbable = selectedBodyVertexAt(world) >= 0 || hoverJoint !== null || hoverBody !== null;
+    const grabbable =
+      selectedBodyVertexAt(world) >= 0 ||
+      hoverJoint !== null ||
+      hoverBody !== null ||
+      measurementLabelAt(world) !== null;
     canvas.style.cursor = grabbable ? "move" : "crosshair";
   }
   // Rotate tool: a grab cursor over a node of the selected body or any body.
@@ -1093,6 +1233,8 @@ canvas.addEventListener("mousemove", (e) => {
   }
   if (mode === "sim") {
     if (driver) driver.target = world;
+    else if (tool === "measure") canvas.style.cursor = "crosshair";
+    else if (measurementLabelAt(world)) canvas.style.cursor = "move";
     else {
       // Hint that joints and bodies are both grabbable to drive the mechanism.
       const grabbable = hoverJoint !== null || scene.bodyAt(world) !== undefined;
@@ -1173,6 +1315,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   r: "rotate",
   l: "linearActuator",
   m: "motor",
+  d: "measure",
 };
 
 window.addEventListener("keydown", (e) => {
@@ -1207,13 +1350,18 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Escape") {
-    // Abort the current placement and return to normal/select mode.
-    if (mode === "draw") disarmTool();
-    else resetTransient();
+    // Abort the current placement / drag and return to the mode's normal state
+    // (in sim this also disarms the measure tool).
+    disarmTool();
     return;
   }
   if (e.key === "Enter" && mode === "draw" && tool === "body") {
     finishBody();
+    return;
+  }
+  // A selected measurement is deletable in either mode (sim keeps its own set).
+  if ((e.key === "Delete" || e.key === "Backspace") && selection?.kind === "measure") {
+    deleteSelection();
     return;
   }
   if (
@@ -1242,6 +1390,11 @@ window.addEventListener("keydown", (e) => {
       setTool(t);
       e.preventDefault();
     }
+  }
+  // Measure is the one tool that also works in sim mode.
+  if (mode === "sim" && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "d") {
+    setTool("measure");
+    e.preventDefault();
   }
 });
 
@@ -1527,6 +1680,41 @@ function editVerticesView(): Vec2[] | null {
   return body ? scene.bodyControlWorld(body) : null;
 }
 
+/** Resolved measurements of the current mode (a ref that can't resolve just isn't drawn). */
+function measurementsView(): MeasureInfo[] {
+  const mm = mode === "sim" ? "sim" : "draw";
+  const out: MeasureInfo[] = [];
+  for (const m of scene.measurements) {
+    if (m.mode !== mm) continue;
+    const info = scene.measureInfo(m);
+    if (info) out.push(info);
+  }
+  return out;
+}
+
+/** Measure-tool overlay: picked refs, the ref under the cursor, and the placement preview. */
+function measureDraftView(): {
+  refs: ResolvedMeasureRef[];
+  hover: ResolvedMeasureRef | null;
+  preview: MeasureInfo | null;
+} | null {
+  if (tool !== "measure") return null;
+  const refs = measurePicks
+    .map((r) => scene.resolveMeasureRef(r))
+    .filter((r): r is ResolvedMeasureRef => r !== null);
+  let hover: ResolvedMeasureRef | null = null;
+  let preview: MeasureInfo | null = null;
+  if (cursor) {
+    if (measurePicks.length < 2) {
+      const h = measureRefAt(cursor);
+      hover = h ? scene.resolveMeasureRef(h) : null;
+    } else {
+      preview = scene.measurePreview(measurePicks[0], measurePicks[1], cursor);
+    }
+  }
+  return { refs, hover, preview };
+}
+
 /** Body-from-joints overlay: the picked-joint outline, plus the expanded preview when sizing. */
 function bodyJointDraftView(): { outline: Vec2[]; preview: Vec2[] | null } | null {
   if (mode !== "draw" || tool !== "body" || jointDraftIds.length === 0) return null;
@@ -1567,7 +1755,8 @@ function frame(now?: number): void {
     hoverJoint,
     hoverBody: mode === "draw" && tool === null ? hoverBody : null,
     activeJoints: activeJoints(),
-    selection: mode === "draw" ? selection : null,
+    // In sim only a measurement selection is meaningful (labels stay editable there).
+    selection: mode === "draw" ? selection : selection?.kind === "measure" ? selection : null,
     editVertices: editVerticesView(),
     sliderDraft: sliderDraftView(),
     bodyJointDraft: bodyJointDraftView(),
@@ -1576,6 +1765,8 @@ function frame(now?: number): void {
     gridStep,
     gridVisible,
     breaks: mode === "sim" ? solveBreaks : [],
+    measurements: measurementsView(),
+    measureDraft: measureDraftView(),
     theme: theme === "light" ? LIGHT_THEME : DARK_THEME,
   });
   requestAnimationFrame(frame);

@@ -55,6 +55,20 @@ carries the joint, and dragging the joint moves the node, reshaping/re-rounding 
 (no stored mapping), so it survives save/load, copy/paste, mirror, and rotate.
 The "Assembly impossible" banner now overlays the **canvas area** (below the toolbar)
 instead of covering the toolbar.
+**Measurements** (`D`, works in **both modes** — each mode keeps its own set): pick two
+references, then place the value label. References anchor to **elements** (joints, body
+control vertices, slider rails, body control-polygon edges, or a point fixed in a body's
+frame), never to bare coordinates — so in sim the values update live every frame as the
+mechanism moves. Point+point measures h / v / direct distance (picked CAD-style from where
+the label is placed); point+line measures perpendicular distance to the **infinite** line;
+line+line measures the distance while (near-)parallel (< 0.5°) and the **angle** otherwise —
+resolved dynamically per frame, so a line pair can flip between the two mid-simulation, with
+the label's sector picking θ vs 180−θ. Labels are constant-size pills (cyan accent),
+click-to-select, draggable (re-derives h/v/direct), Delete to remove — all in both modes.
+Serialized (v7), cascade-removed with their elements, vertex/edge refs remapped across
+control-node insert/remove. **Next up**: CAD-style sketch constraints in draw mode
+(driving dimensions, coincident/parallel/H/V/perpendicular/equal) — design + open questions
+in **HANDOFF.md**.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -142,11 +156,30 @@ instead of covering the toolbar.
     belong to the body (and aren't the same joint) before storing the motor constraint.
     Cascade removal: dropping a slider removes any actuators on it (the rider survives as a
     free joint); removing a body's joints prunes any motor that referenced them.
+  - **Measurements** (`measurements: Measurement[]` on the scene): a `Measurement` =
+    `{ id, mode: "draw"|"sim", refA, refB, labelOffset, axis }`. A `MeasureRef` is a **point**
+    (`joint` id / body `vertex` index / `bodyPoint` = a local offset fixed in a body's frame)
+    or a **line** (slider `rail` id / body control-polygon `edge` index). `resolveMeasureRef`
+    re-resolves a ref to world geometry every frame; `measureInfo(m)` computes the display —
+    kind (`distance`/`angle`), value (world units / degrees), label position, arrowed
+    dimension segment or arc, and dashed extension segments (`MeasureInfo`). Point+point uses
+    the stored `axis` (`h`/`v`/`direct`, derived from label placement by
+    `measureAxisForPlacement`, re-derived on label move); point+line is perpendicular distance
+    to the infinite line; line+line is distance when within `MEASURE_PARALLEL_TOL` (0.5°) of
+    parallel, else the angle of the sector the label sits in (of the four the two infinite
+    lines make). `addMeasurement` / `removeMeasurement` / `setMeasurementLabel` /
+    `measurementLabelPos` / `measurePreview` (placement preview without creating).
+    `pruneMeasurements` drops measurements whose refs no longer resolve (called from the
+    constraint-prune paths, so element deletion cascades); `shiftMeasureIndices` keeps
+    vertex/edge refs pointing at the same geometry across `insertBodyVertex` /
+    `removeBodyVertex` (a ref *on* a removed vertex/edge drops its measurement). Known
+    limitations: `mirrorBody` doesn't remap vertex/edge/bodyPoint refs; copy/paste doesn't
+    carry measurements.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 6`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 7`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
-    actuator/motor constraints, which load fine as-is).
+    actuator/motor constraints and pre-v7 files no measurements, which load fine as-is).
 - **solver.ts** — `solve(scene, driver, iterations, relax, anchors?, stats?): ConstraintBreak[]` (each
   `ConstraintBreak` carries `a`/`b`/`error` plus a `joints: number[]` list naming the joints
   involved — pin endpoints, the grounded joint, an unreachable slider rider, or the anchor's joint
@@ -203,6 +236,14 @@ instead of covering the toolbar.
   (highlights/draft/handle fill), `surface` (joint rings, pin centres, handle outline), `grid`, and
   `jointFill` flip between light/dark — the semantic accents (pin blue, slider/rail green,
   ground/rotate yellow, error red) and per-body colours stay fixed.
+  **Measurements** are drawn last (annotations on top of everything): dashed extension lines,
+  an arrowed dimension line or an angle arc (cyan accent `#46c2cb`; selected → theme ink),
+  and the value as a constant-size pill + text rendered in **screen space** (via a transform
+  reset per label, so text stays legible at any zoom; distances 1-decimal, angles with `°`).
+  The measure-tool overlay highlights picked references (ring around a point, soft thick
+  stroke over a line; hover ref dashed/lighter) and draws the placement preview as a dashed
+  measurement. Inputs: `measurements: MeasureInfo[]` (already resolved by main),
+  `measureDraft: { refs, hover, preview }`, and `selection` now includes kind `"measure"`.
 - **main.ts** — canvas/DPI setup, toolbar wiring (the toolbar is **icon buttons** — SVG glyphs with
   tooltips; wiring is by id/`data-*`/class, never button text), mode/tool state (tools are one-shot +
   have keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
@@ -226,6 +267,19 @@ instead of covering the toolbar.
     second joint on the **same body** becomes the crank pin (mismatched second click restarts the
     draft at the new joint). Both tools select the resulting element so the inline properties panel
     appears right away.
+  - **Measure tool** (`D`, one-shot, the only tool that also works in **sim mode** — its
+    toolbar group never hides): two reference picks then a label-placement click →
+    `handleMeasureClick` / `measurePicks`. `measureRefAt(p)` picks by priority: joint →
+    body control vertex → slider rail → body control-polygon edge → point inside a body
+    (grid-snapped when snapping keeps it inside; empty space picks nothing). The draft view
+    passes picked/hover refs + a live `measurePreview` to the renderer. Labels:
+    `measurementLabelAt` hit-tests value pills (16 px radius, topmost overlay — checked
+    *before* joints/bodies in select mode and in sim mousedown); click selects
+    (`selection.kind === "measure"`, the one selection kind that stays live in sim), drag
+    repositions via `leftDrag.kind === "measureLabel"` (unsnapped;
+    `setMeasurementLabel` re-derives h/v/direct), Delete removes (works in both modes).
+    Esc now calls `disarmTool()` in both modes. Adding/moving/deleting measurements marks
+    dirty (persisted + undoable; `canonicalData` keeps sim poses out as always).
   - **Animation** (`#run-btn`, sim-mode only; Space toggles): `setAnimating(on)` flips a `running`
     flag and, on **play**, calls `fitPhases()` so each actuator/motor's `phaseAccum` matches the
     current pose — pressing play resumes from whatever the user (or the previous run) left in sim.
@@ -315,6 +369,11 @@ aborts the current placement.
 - **Motor** (`M`) — click a joint to set the **pivot** (must be on a body), then another joint on
   the *same body* for the **crank pin** (a cross-body second click restarts the draft at that
   joint). Creates a `motor` constraint that spins the body during animation. Default speed 0.25 Hz.
+- **Measure** (`D`, also available in sim mode — sim keeps its own set) — click two references
+  (joint, body corner, slider rail, body edge, or a point on a body), then click where the value
+  should sit. Point+point: the label spot picks horizontal / vertical / direct. Point+line:
+  perpendicular distance to the infinite line. Line+line: distance while parallel, angle
+  otherwise (dynamic; the label's sector picks θ vs 180−θ). Values update live in sim.
 
 Select mode (default, no tool armed):
 - Click a body, joint, or slider rail to **select** it (highlighted); **left-drag** moves the
@@ -328,7 +387,11 @@ Select mode (default, no tool armed):
   grid-snapped), or a node to remove it (`removeBodyVertex`, kept ≥ 3). Clicking on/near the
   selected body's control polygon keeps it selected (so an edge double-click isn't lost).
 - `Delete` removes the selection: a body takes its joints/constraints with it; a slider keeps
-  its joints; a joint detaches from any rail and any constraints referencing it go.
+  its joints; a joint detaches from any rail and any constraints referencing it go; a
+  measurement just disappears (measurements are also cascade-removed with their elements).
+- A **measurement's value label** is the topmost pick: click to select it, drag to reposition
+  (a point–point measurement re-derives h/v/direct from the new spot), Delete to remove —
+  this works in **sim mode** too, without disturbing the mechanism underneath.
 - **Edit utilities** (act on a selected body): **Copy/Paste** (`Ctrl/Cmd+C`/`V`, **keyboard-only**
   now — no toolbar buttons) duplicates a body with its joints + own constraints, **keeping its
   colour**; the copy lands at the cursor (grid-snapped) and is selected. **Mirror H/V** (toolbar,
@@ -481,6 +544,14 @@ Persistence:
   constant radius, downstream pin propagates the rotation). Serialize/load round-trips both
   constraint kinds intact; removing a slider drops its actuator (rider survives as a free joint);
   removing a motor's body drops the motor (via joint-pruning).
+- **measurements.ts** — axis selection from label placement (h / v / direct zones);
+  point-point values + dimension-line geometry + preview parity; label move re-deriving the
+  axis; values and label positions tracking moving geometry; point-line using the infinite
+  line (foot beyond the rail end + extension line); line-line parallel distance, the dynamic
+  flip to angle when a rail tilts, and the label sector picking the obtuse angle; vertex/edge
+  index remapping across `insertBodyVertex`/`removeBodyVertex`; a bodyPoint ref riding its
+  body's frame; cascade removal (joint / slider / body); serialize/load round-trip (modes,
+  values, deep copy, `nextId`) and pre-v7 files loading with no measurements.
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
@@ -550,6 +621,13 @@ Persistence:
   budget, as before.
 
 ## Backlog / next steps (not yet built)
+- **CAD-style sketch constraints in draw mode** — the agreed next feature: driving vs driven
+  dimensions, a constraint set (coincident / parallel / horizontal / vertical / perpendicular /
+  equal), a sketch solver over body nodes + free joints, scale-on-first-dimension,
+  auto-constraints while drawing. **The full proposed design, phasing, and open questions
+  live in HANDOFF.md** — read it (and get the questions answered) before starting.
+- Measurement follow-ups: `mirrorBody` doesn't remap vertex/edge/bodyPoint measurement refs;
+  copy/paste doesn't carry measurements (consistent with actuators/motors).
 - More joint types as needed.
 - Joint containment covers placement + drags only (by choice): **reshaping** a body (corner
   handles, radius shrink, vertex removal) can still strand an already-placed joint outside the

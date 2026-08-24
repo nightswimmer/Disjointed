@@ -1,6 +1,6 @@
 /** Canvas rendering of the scene plus transient editor/sim overlays. */
-import { Scene } from "./model";
-import { Vec2, sub, distToSegment } from "./geometry";
+import { Scene, MeasureInfo, ResolvedMeasureRef } from "./model";
+import { Vec2, sub, distToSegment, normalize, scale } from "./geometry";
 import { View } from "./view";
 import { ConstraintBreak } from "./solver";
 
@@ -16,7 +16,18 @@ export interface RenderInput {
   /** Joints highlighted as in-progress tool picks (connect's first pick, slider rail picks). */
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
-  selection: { kind: "body" | "joint" | "slider"; id: number } | null;
+  selection: { kind: "body" | "joint" | "slider" | "measure"; id: number } | null;
+  /** Resolved measurements of the current mode (values update live in sim). */
+  measurements: MeasureInfo[];
+  /**
+   * Measure-tool state: references picked so far (highlighted), the reference the
+   * cursor would pick next, and the live preview once both references are chosen.
+   */
+  measureDraft: {
+    refs: ResolvedMeasureRef[];
+    hover: ResolvedMeasureRef | null;
+    preview: MeasureInfo | null;
+  } | null;
   /** Control-vertex handles to draw for the selected body (draggable to reshape it). */
   editVertices: Vec2[] | null;
   /**
@@ -423,6 +434,144 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       ctx.stroke();
     }
   }
+
+  // Measurements (drawn last: dimension annotations sit on top of everything).
+  const selectedMeasure = input.selection?.kind === "measure" ? input.selection.id : null;
+  for (const info of input.measurements) {
+    drawMeasurement(ctx, info, view, dpr, theme, info.id === selectedMeasure, false);
+  }
+  if (input.measureDraft) {
+    const { refs, hover, preview } = input.measureDraft;
+    if (hover) drawMeasureRefHighlight(ctx, hover, px, true);
+    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false);
+    if (preview) drawMeasurement(ctx, preview, view, dpr, theme, false, true);
+  }
+}
+
+/** Accent colour for measurements (fixed across themes, like the other semantic accents). */
+const MEASURE_COLOR = "#46c2cb";
+
+/** Compact value text: one decimal, trailing zero dropped; degrees get a ° suffix. */
+function measureText(info: MeasureInfo): string {
+  const v = Math.round(info.value * 10) / 10;
+  return info.kind === "angle" ? `${v}°` : `${v}`;
+}
+
+/** Highlight a measure reference: a ring around a point, a soft thick stroke over a line. */
+function drawMeasureRefHighlight(
+  ctx: CanvasRenderingContext2D,
+  ref: ResolvedMeasureRef,
+  px: (n: number) => number,
+  isHover: boolean
+): void {
+  ctx.strokeStyle = MEASURE_COLOR;
+  if (ref.kind === "point") {
+    ctx.lineWidth = px(2);
+    if (isHover) ctx.setLineDash([px(3), px(3)]);
+    ctx.beginPath();
+    ctx.arc(ref.p.x, ref.p.y, px(10), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  } else {
+    ctx.save();
+    ctx.globalAlpha = isHover ? 0.4 : 0.7;
+    ctx.lineWidth = px(5);
+    ctx.beginPath();
+    ctx.moveTo(ref.a.x, ref.a.y);
+    ctx.lineTo(ref.b.x, ref.b.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+/** A small dimension arrowhead: tip at `tip`, wings sweeping back against `dir`. */
+function drawArrowHead(
+  ctx: CanvasRenderingContext2D,
+  tip: Vec2,
+  dir: Vec2,
+  size: number
+): void {
+  ctx.beginPath();
+  ctx.moveTo(tip.x, tip.y);
+  ctx.lineTo(tip.x - dir.x * size - dir.y * size * 0.45, tip.y - dir.y * size + dir.x * size * 0.45);
+  ctx.moveTo(tip.x, tip.y);
+  ctx.lineTo(tip.x - dir.x * size + dir.y * size * 0.45, tip.y - dir.y * size - dir.x * size * 0.45);
+  ctx.stroke();
+}
+
+/**
+ * Draw one measurement: dashed extension lines, an arrowed dimension line (distance) or
+ * an arc (angle), and the value label — rendered in screen space at a constant size.
+ */
+function drawMeasurement(
+  ctx: CanvasRenderingContext2D,
+  info: MeasureInfo,
+  view: View,
+  dpr: number,
+  theme: Theme,
+  selected: boolean,
+  draft: boolean
+): void {
+  const s = view.scale;
+  const px = (n: number) => n / s;
+  const color = selected ? theme.ink : MEASURE_COLOR;
+  ctx.strokeStyle = color;
+
+  // Extension / leader lines: thin and dashed.
+  ctx.lineWidth = px(1);
+  ctx.setLineDash([px(4), px(3)]);
+  for (const e of info.ext) {
+    ctx.beginPath();
+    ctx.moveTo(e.a.x, e.a.y);
+    ctx.lineTo(e.b.x, e.b.y);
+    ctx.stroke();
+  }
+  ctx.setLineDash(draft ? [px(5), px(4)] : []);
+  ctx.lineWidth = px(1.5);
+
+  if (info.dim) {
+    const { a, b } = info.dim;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const u = normalize(sub(a, b));
+    if ((u.x !== 0 || u.y !== 0) && Math.hypot(b.x - a.x, b.y - a.y) > px(4)) {
+      drawArrowHead(ctx, a, u, px(7));
+      drawArrowHead(ctx, b, scale(u, -1), px(7));
+    }
+  }
+  if (info.arc) {
+    const { c, r, a0, sweep } = info.arc;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, r, a0, a0 + sweep);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Value label: a pill + text drawn in screen space so it stays legible at any zoom.
+  const text = measureText(info);
+  const sx = info.labelPos.x * s + view.tx;
+  const sy = info.labelPos.y * s + view.ty;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+  const tw = ctx.measureText(text).width;
+  const pw = tw + 12;
+  const ph = 18;
+  ctx.beginPath();
+  ctx.roundRect(sx - pw / 2, sy - ph / 2, pw, ph, 5);
+  ctx.fillStyle = theme.surface + (draft ? "cc" : "e6");
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = selected ? 1.6 : 1;
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, sx, sy + 0.5);
+  ctx.restore();
 }
 
 function drawGrid(

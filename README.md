@@ -46,6 +46,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `L` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
+| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node, or any point inside a body) or a **line** (a slider rail or a body edge). Works in **both modes** — see *Measurements* below. |
 
 **Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
@@ -66,6 +67,22 @@ leaves its joints; a joint detaches from any rail.
   the selection. Cross-body pins aren't reproduced.
 - **Mirror H / V** — reflect the selected body (and its joints) left↔right or top↔bottom, in place
   about its centroid. Grouped in the toolbar next to **Rotate**.
+
+**Measurements.** The Measure tool (`D`) works in **both modes**, and each mode keeps its own
+set of measurements. What gets measured follows from the two references you pick:
+
+- **Two points** — where you place the value picks the dimension, CAD-style: above/below the
+  pair → **horizontal** distance, beside it → **vertical**, in the diagonal zones → **direct**.
+- **A point and a line** — the perpendicular distance to the (infinite) line.
+- **Two lines** — the **distance** while they're parallel, the **angle** otherwise. This is
+  re-evaluated live, so a line pair can flip between distance and angle mid-simulation, and
+  the side you place the label on picks θ vs 180°−θ.
+
+References anchor to the elements themselves, so in **Simulate mode the values update live**
+as the mechanism moves — measure a stroke length by dimensioning two joints, or a transmission
+angle by dimensioning two rails. Click a value pill to select it, drag it to reposition
+(a point–point dimension re-derives h/v/direct), press **Delete** to remove it — all of this
+works in both modes. Measurements are saved with the mechanism.
 
 **Body colour.** A colour swatch in the toolbar sets the active colour: with **nothing selected**
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
@@ -141,7 +158,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements
 ```
 
 ## How it works
@@ -168,6 +185,9 @@ two corners so neighbouring fillets never overlap or fold — even on thin shape
 actuator/motor computes a world target for its joint(s) from its phase + speed, and the solver
 takes those targets as additional "moving grounds" — sacred just like a normal ground, so
 pins/sliders propagate the imposed motion through the whole assembly.
+**Measurements** store references to elements (a joint, a body node or edge, a rail — never raw
+coordinates) and re-resolve them to world geometry every frame, which is why their values track
+the running simulation for free.
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),
 `renderer.ts`, `main.ts`, plus `analyzer.ts` — a standalone topology diagnostic (kinematic
