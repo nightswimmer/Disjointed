@@ -16,7 +16,7 @@ import { solve, Driver, ConstraintBreak, SolveStats, solverConfig } from "./solv
 import { solveSketch, applyDrivingDimension, tryAddConstraint, autoConstrainBody, SketchBreak } from "./sketch";
 import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, normalize, roundedConvexBody, distToSegment } from "./geometry";
-import { View, screenToWorld, worldToScreen, zoomAt } from "./view";
+import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
 type Tool =
@@ -308,6 +308,39 @@ function resize(): void {
 }
 window.addEventListener("resize", resize);
 
+/**
+ * Fit the whole mechanism (body outlines, joints, ground anchors) in the canvas with a
+ * screen-pixel margin, centered. An empty scene just recenters the world origin at scale 1.
+ */
+function fitView(): void {
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const include = (p: Vec2) => {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  };
+  for (const b of scene.bodies) scene.bodyWorldVerts(b).forEach(include);
+  for (const j of scene.joints) include(scene.jointWorld(j));
+  for (const c of scene.constraints) if (c.kind === "ground") include(c.anchor);
+  if (!Number.isFinite(minX)) {
+    view.scale = 1;
+    view.tx = w / 2;
+    view.ty = h / 2;
+    return;
+  }
+  const MARGIN = 60; // screen px kept clear around the mechanism
+  const fit = Math.min(
+    Math.max(w - 2 * MARGIN, 40) / Math.max(maxX - minX, 1e-6),
+    Math.max(h - 2 * MARGIN, 40) / Math.max(maxY - minY, 1e-6)
+  );
+  view.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, fit));
+  view.tx = w / 2 - ((minX + maxX) / 2) * view.scale;
+  view.ty = h / 2 - ((minY + maxY) / 2) * view.scale;
+}
+
 function eventScreen(e: MouseEvent): Vec2 {
   const rect = canvas.getBoundingClientRect();
   return vec(e.clientX - rect.left, e.clientY - rect.top);
@@ -366,6 +399,7 @@ document.getElementById("clear-btn")!.addEventListener("click", () => {
   resetTransient();
   markDirty();
 });
+document.getElementById("fit-btn")!.addEventListener("click", fitView);
 document.getElementById("save-btn")!.addEventListener("click", saveToFile);
 document.getElementById("load-btn")!.addEventListener("click", () => fileInput.click());
 // Copy/paste are keyboard-only (Ctrl/Cmd+C / V); no toolbar buttons.
@@ -1621,6 +1655,18 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "Space" && mode === "sim" && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     setAnimating(!animating);
+    return;
+  }
+  // Tab toggles between draw and simulate mode (kept away from the browser's focus cycle).
+  if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    setMode(mode === "draw" ? "sim" : "draw");
+    return;
+  }
+  // F fits the mechanism to the screen (both modes).
+  if (e.key.toLowerCase() === "f" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    fitView();
     return;
   }
   // Undo / redo: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y.

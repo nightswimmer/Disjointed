@@ -26,12 +26,16 @@ crank pin orbits the pivot at a configurable angular speed in animation), with a
 **Run animation** toggle (▶/⏸ button or Space) that drives them all and **phase-fit on play** so
 toggling pause/play resumes smoothly from the current pose;
 a configurable, toggle-able grid with snap-to-grid for placement and dragging;
-editing utilities (copy/paste a body+its joints/constraints, mirror H/V in place, and a rotate
+editing utilities (copy/paste a body + its joints/constraints — including its fully-internal
+sketch constraints and driving dimensions — mirror H/V in place, and a rotate
 tool that turns a body about its centroid or a node and snaps to 45°);
 and a converge-to-tolerance solver with **impossible-assembly handling** (grounds are sacred;
 unreachable pins/sliders are isolated, the rest still solves, and the breaks are drawn as red
 dotted lines plus an on-canvas error banner). The solver and shape/edit logic are verified
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
+**View navigation**: zoom range 0.05×–20×; a **fit-to-screen** button + `F` shortcut frames the
+whole mechanism (bodies, joints, ground anchors) centered with a margin; **Tab** toggles
+draw ↔ simulate mode.
 **UI polish**: the toolbar is icon buttons with tooltips; a dark/light **theme toggle** (persisted)
 themes both the chrome and the canvas; a **body-colour swatch** sets the new-body default or
 recolours the selected body (paste keeps the source colour); an **inline speed/profile panel**
@@ -159,9 +163,13 @@ lands exactly there and gets a coincident.
     move). Copy/paste: `extractBody(id)` snapshots a `BodyClip` (control polygon + its joints +
     the constraints referencing *only* those joints — grounds, fully-internal sliders, intra-body
     pins; cross-body pins are dropped), stored in world coords relative to the original centroid;
-    the clip also carries the body's **`color`**; `insertBody(clip, at)` translates the whole
-    fragment so the centroid lands at `at`, recreates everything with fresh ids, and restores the
-    colour.
+    the clip also carries the body's **`color`**, plus its **fully-internal sketch constraints
+    and driving dimensions** (both refs on the body's own vertices/edges/frame, its joints, or a
+    copied internal rail — anything referencing an outside element is dropped, like cross-body
+    pins; driven reference dimensions are annotations and aren't copied). `insertBody(clip, at)`
+    translates the whole fragment so the centroid lands at `at`, recreates everything with fresh
+    ids (joint + slider ids remapped into the constraint/dimension refs), and restores the
+    colour. No re-solve is needed on paste: everything carried is translation-invariant.
   - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
     (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
     `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
@@ -265,7 +273,7 @@ lands exactly there and gets a coincident.
   (must be solved together) vs propagatable tree branches, with articulation bodies joining
   blocks. Labels are `#id`-based (bodies have no user-facing name).
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
-  `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.2..5).
+  `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.05..20).
 - **renderer.ts** — joints involved in any `ConstraintBreak.joints` are painted red (fill +
   stroke + slight size bump) so the stuck points stand out alongside the existing red dotted
   break lines. Draws under the camera transform in world space: world-locked grid
@@ -506,7 +514,8 @@ Select mode (default, no tool armed):
   (a point–point measurement re-derives h/v/direct from the new spot), Delete to remove —
   this works in **sim mode** too, without disturbing the mechanism underneath.
 - **Edit utilities** (act on a selected body): **Copy/Paste** (`Ctrl/Cmd+C`/`V`, **keyboard-only**
-  now — no toolbar buttons) duplicates a body with its joints + own constraints, **keeping its
+  now — no toolbar buttons) duplicates a body with its joints + own constraints — including its
+  fully-internal sketch constraints and driving dimensions — **keeping its
   colour**; the copy lands at the cursor (grid-snapped) and is selected. **Mirror H/V** (toolbar,
   grouped with **Rotate**) reflects the body + joints in place about its centroid.
 
@@ -536,9 +545,14 @@ Simulate mode:
   actuators before they push past a physically unreachable configuration.
 
 Navigation (both modes):
-- **Mouse wheel** zooms toward the cursor.
+- **Mouse wheel** zooms toward the cursor (0.05×–20×).
 - **Right-drag always pans** the view (anywhere). Moving elements is left-drag in select mode
   (above); there is no right-drag-to-move.
+- **Fit to screen** (`F`, or the toolbar button next to Save): frames the whole mechanism
+  (body outlines, joints, ground anchors) centered with a 60 px margin (`fitView` in main.ts);
+  an empty scene recenters the world origin at 1×.
+- **Tab** toggles draw ↔ simulate mode (preventDefault'd away from the browser's focus cycle;
+  like every shortcut it's inert while an input field has focus).
 
 Grid (toolbar grid group):
 - **Grid** button toggles grid visibility; **Snap** button toggles snap-to-grid; a number field
@@ -648,7 +662,11 @@ Persistence:
 - **edit-utils.ts** — `rotateBody` (90° about the centroid carries the joint + ground anchor; a
   pivot node stays fixed), `mirrorBody` (joint reflected, centroid + area preserved), and
   copy/paste (`extractBody`/`insertBody`: independent offset duplicate, joints/grounds/sliders
-  duplicated with fresh ids, cross-body pins dropped, **source colour preserved**).
+  duplicated with fresh ids, cross-body pins dropped, **source colour preserved**; internal
+  **sketch constraints** — H/V edges, joint↔vertex coincident, H on an internal rail — captured
+  and recreated on the new elements with resolvable refs, cross-body constraints excluded;
+  the internal **driving dimension** copied with its target + translated label while a driven
+  reference dimension is left behind and the original stays untouched).
 - **actuators.ts** — the two new powered constraints end-to-end: `addLinearActuator` places its
   rider on the rail and registers it with the slider; `addMotor` rejects pivot==crank, free-joint
   pivots, and cross-body cranks. The solver's `anchors` parameter drives an actuator rider to
@@ -751,10 +769,11 @@ Persistence:
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);
   an auto-constraint on/off toggle in the toolbar; auto-coincident while *dragging* (today
   it's inferred only while drawing); constraint badges could use hover feedback; sketch
-  constraints aren't carried by copy/paste or remapped by `mirrorBody` (same as
-  measurements).
+  constraints aren't remapped by `mirrorBody` (same as measurements) — copy/paste **does**
+  carry the fully-internal ones (+ driving dimensions) since format-v8 follow-up work.
 - Measurement follow-ups: `mirrorBody` doesn't remap vertex/edge/bodyPoint measurement refs;
-  copy/paste doesn't carry measurements (consistent with actuators/motors).
+  copy/paste doesn't carry *driven* (reference) measurements (consistent with
+  actuators/motors; driving dimensions are carried, as constraints).
 - More joint types as needed.
 - Joint containment covers placement + drags only (by choice): **reshaping** a body (corner
   handles, radius shrink, vertex removal) can still strand an already-placed joint outside the

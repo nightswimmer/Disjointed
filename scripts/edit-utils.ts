@@ -94,5 +94,80 @@ const near = (a: Vec2, b: Vec2, tol = 1e-6) => dist(a, b) < tol;
   check("paste adds no new pins", pinsAfter === pinsBefore, `${pinsBefore} -> ${pinsAfter}`);
 }
 
+// --- 6) copy/paste carries fully-internal sketch constraints + driving dimensions. ---
+{
+  const s = new Scene();
+  const body = s.addBody([{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 40 }, { x: 0, y: 40 }]);
+  const other = s.addBody([{ x: 100, y: 0 }, { x: 140, y: 0 }, { x: 140, y: 40 }, { x: 100, y: 40 }]);
+  // Internal constraints: H + V edges, a joint↔vertex coincident, H on an internal rail.
+  s.addSketchConstraint("horizontal", { kind: "edge", bodyId: body.id, index: 0 });
+  s.addSketchConstraint("vertical", { kind: "edge", bodyId: body.id, index: 1 });
+  const j1 = s.addJoint(body.id, { x: 0, y: 0 });
+  s.addSketchConstraint(
+    "coincident",
+    { kind: "joint", jointId: j1.id },
+    { kind: "vertex", bodyId: body.id, index: 0 }
+  );
+  const ja = s.addJoint(body.id, { x: 10, y: 20 });
+  const jb = s.addJoint(body.id, { x: 30, y: 20 });
+  const rail = s.addSlider(ja.id, jb.id);
+  s.addSketchConstraint("horizontal", { kind: "rail", sliderId: rail.id });
+  // A cross-body constraint must NOT travel with the clip.
+  s.addSketchConstraint(
+    "parallel",
+    { kind: "edge", bodyId: body.id, index: 0 },
+    { kind: "edge", bodyId: other.id, index: 0 }
+  );
+  // One driving dimension (copied) and one driven reference dimension (not copied).
+  const dim = s.addMeasurement(
+    "draw",
+    { kind: "vertex", bodyId: body.id, index: 0 },
+    { kind: "vertex", bodyId: body.id, index: 1 },
+    { x: 20, y: -10 }
+  )!;
+  s.setMeasurementDriving(dim.id, 40);
+  s.addMeasurement(
+    "draw",
+    { kind: "vertex", bodyId: body.id, index: 1 },
+    { kind: "vertex", bodyId: body.id, index: 2 },
+    { x: 50, y: 20 }
+  );
+
+  const clip = s.extractBody(body.id)!;
+  check("clip captures the 4 internal sketch constraints", clip.sketch.length === 4, `${clip.sketch.length}`);
+  check("cross-body constraint left out of the clip", clip.sketch.every((c) => c.kind !== "parallel"));
+  check("clip captures only the driving dimension", clip.dims.length === 1 && clip.dims[0].target === 40, `${clip.dims.length}`);
+
+  const sketchBefore = s.sketch.length;
+  const measuresBefore = s.measurements.length;
+  const labelBefore = s.measurementLabelPos(dim)!;
+  const newId = s.insertBody(clip, { x: 20, y: 120 })!; // centroid (20,20) → translate by (0,100)
+
+  const added = s.sketch.slice(sketchBefore);
+  check("paste recreates the 4 sketch constraints", added.length === 4, `${added.length}`);
+  const newJointIds = new Set(s.joints.filter((j) => j.bodyId === newId).map((j) => j.id));
+  const onNewElements = added.every((c) =>
+    [c.refA, c.refB].every((r) => {
+      if (!r) return true;
+      if (r.kind === "joint") return newJointIds.has(r.jointId);
+      if (r.kind === "rail") return r.sliderId !== rail.id;
+      return r.bodyId === newId;
+    })
+  );
+  check("pasted constraints reference only the new elements", onNewElements);
+  check("pasted constraint refs all resolve", added.every(
+    (c) => s.resolveMeasureRef(c.refA) && (!c.refB || s.resolveMeasureRef(c.refB))
+  ));
+
+  const newDims = s.measurements.slice(measuresBefore);
+  check("paste adds exactly the driving dimension", newDims.length === 1 && measuresBefore === 2, `${newDims.length}`);
+  const nd = newDims[0];
+  check("pasted dimension is driving at the same target", nd.driving === true && nd.target === 40);
+  check("pasted dimension sits on the new body", nd.refA.kind === "vertex" && nd.refA.bodyId === newId);
+  const label = s.measurementLabelPos(nd)!;
+  check("pasted dimension label translated with the body", near(label, { x: labelBefore.x, y: labelBefore.y + 100 }, 1e-6), `${label.x.toFixed(2)},${label.y.toFixed(2)}`);
+  check("original driving dimension untouched", s.getMeasurement(dim.id)?.driving === true && s.getMeasurement(dim.id)?.target === 40);
+}
+
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

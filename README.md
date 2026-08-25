@@ -28,7 +28,8 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
 
 ## Usage
 
-There are two modes, switched from the toolbar. The toolbar uses **icon buttons** — hover any of
+There are two modes, switched from the toolbar or by pressing **Tab**. The toolbar uses
+**icon buttons** — hover any of
 them for a tooltip naming the tool and its shortcut. A **theme toggle** (sun / moon) at the right
 switches between **dark and light** themes; your choice is remembered across sessions.
 
@@ -65,9 +66,11 @@ leaves its joints; a joint detaches from any rail.
 
 **Editing utilities** (on a selected body):
 - **Copy / Paste** (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`, keyboard only) — duplicate a body together with
-  its joints and the constraints that belong only to it (grounds, fully-internal sliders). The copy
+  its joints and the constraints that belong only to it: grounds, fully-internal sliders, and its
+  **sketch constraints and driving dimensions** (the ones referencing only the body's own corners,
+  edges, joints, and internal rails). The copy
   **keeps the original's colour**, lands at the cursor (grid-snapped when Snap is on) and becomes
-  the selection. Cross-body pins aren't reproduced.
+  the selection. Cross-body pins and cross-body constraints aren't reproduced.
 - **Mirror H / V** — reflect the selected body (and its joints) left↔right or top↔bottom, in place
   about its centroid. Grouped in the toolbar next to **Rotate**.
 
@@ -166,8 +169,10 @@ snaps whichever is nearest the grab point — the body's centroid or one of its 
 and snapping are independent (you can snap to a hidden grid).
 
 ### Navigate
-- **Mouse wheel** — zoom toward the cursor.
+- **Mouse wheel** — zoom toward the cursor (0.05× to 20×).
 - **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode).
+- **Fit to screen** (`F`, or the toolbar button) — frame the whole mechanism centered in the canvas.
+- **Tab** — switch between Draw and Simulate mode.
 
 ### Save & load
 - **Save** downloads your mechanism as a `.json` file; **Load** opens one back up.

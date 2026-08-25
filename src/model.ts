@@ -252,8 +252,10 @@ export interface SceneData {
  * attached to it, and the constraints that reference *only* those joints (grounds,
  * fully-internal sliders, intra-body pins). Everything is stored in world coordinates
  * relative to the original centroid; pasting translates the whole fragment so the
- * centroid lands at the drop point. `tmp` ids are the original joint ids, remapped to
- * fresh joints on paste. Cross-body pins can't be reproduced and are dropped.
+ * centroid lands at the drop point. `tmp` ids are the original joint / slider ids,
+ * remapped to fresh elements on paste. Cross-body pins can't be reproduced and are
+ * dropped, and so is any sketch constraint / driving dimension that references an
+ * element outside the body (its own vertices/edges, its joints, its internal rails).
  */
 export interface BodyClip {
   controlWorld: Vec2[];
@@ -263,8 +265,12 @@ export interface BodyClip {
   centroid: Vec2;
   joints: { tmp: number; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
-  sliders: { railA: number; railB: number; riders: number[] }[];
+  sliders: { tmp: number; railA: number; railB: number; riders: number[] }[];
   pins: { a: number; b: number }[];
+  /** Fully-internal sketch constraints; refs carry the original ids, remapped on paste. */
+  sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null }[];
+  /** Fully-internal draw-mode driving dimensions; refs carry the original ids. */
+  dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target: number }[];
 }
 
 const FORMAT_VERSION = 8;
@@ -1083,12 +1089,57 @@ export class Scene {
         grounds.push({ joint: c.joint, anchor: clone(c.anchor) });
       } else if (c.kind === "slider" && owned.has(c.railA) && owned.has(c.railB)) {
         sliders.push({
+          tmp: c.id,
           railA: c.railA,
           railB: c.railB,
           riders: c.riders.filter((r) => owned.has(r)),
         });
       } else if (c.kind === "pin" && owned.has(c.jointA) && owned.has(c.jointB)) {
         pins.push({ a: c.jointA, b: c.jointB });
+      }
+    }
+    // A ref is internal when its element travels with the clip: a copied joint, this
+    // body's vertices/edges/frame, or the rail of a copied (fully-internal) slider.
+    const clippedSliders = new Set(sliders.map((s) => s.tmp));
+    const internal = (r: MeasureRef | null): boolean => {
+      if (!r) return true;
+      switch (r.kind) {
+        case "joint":
+          return owned.has(r.jointId);
+        case "vertex":
+        case "edge":
+        case "bodyPoint":
+          return r.bodyId === bodyId;
+        case "rail":
+          return clippedSliders.has(r.sliderId);
+      }
+    };
+    const sketch: BodyClip["sketch"] = [];
+    for (const c of this.sketch) {
+      if (internal(c.refA) && internal(c.refB)) {
+        sketch.push({
+          kind: c.kind,
+          refA: cloneMeasureRef(c.refA),
+          refB: c.refB ? cloneMeasureRef(c.refB) : null,
+        });
+      }
+    }
+    const dims: BodyClip["dims"] = [];
+    for (const m of this.measurements) {
+      if (
+        m.mode === "draw" &&
+        m.driving &&
+        m.target !== undefined &&
+        internal(m.refA) &&
+        internal(m.refB)
+      ) {
+        dims.push({
+          refA: cloneMeasureRef(m.refA),
+          refB: cloneMeasureRef(m.refB),
+          labelOffset: clone(m.labelOffset),
+          axis: m.axis,
+          target: m.target,
+        });
       }
     }
     return {
@@ -1101,6 +1152,8 @@ export class Scene {
       grounds,
       sliders,
       pins,
+      sketch,
+      dims,
     };
   }
 
@@ -1126,11 +1179,13 @@ export class Scene {
       const id = idMap.get(g.joint);
       if (id !== undefined) this.addGround(id, add(g.anchor, offset));
     }
+    const sliderIdMap = new Map<number, number>(); // tmp slider id → new slider id
     for (const s of clip.sliders) {
       const a = idMap.get(s.railA);
       const b = idMap.get(s.railB);
       if (a === undefined || b === undefined) continue;
       const sl = this.addSlider(a, b);
+      sliderIdMap.set(s.tmp, sl.id);
       for (const r of s.riders) {
         const nr = idMap.get(r);
         if (nr !== undefined) this.attachSliderRider(sl.id, nr);
@@ -1140,6 +1195,49 @@ export class Scene {
       const a = idMap.get(p.a);
       const b = idMap.get(p.b);
       if (a !== undefined && b !== undefined) this.addPin(a, b);
+    }
+    // Recreate the clipped sketch constraints / driving dimensions on the new elements.
+    // Everything they express is translation-invariant, so the pasted geometry already
+    // satisfies them — no solve needed. Vertex/edge indices carry over unchanged
+    // (addBody keeps the control polygon's order).
+    const remapRef = (r: MeasureRef): MeasureRef | null => {
+      switch (r.kind) {
+        case "joint": {
+          const id = idMap.get(r.jointId);
+          return id === undefined ? null : { kind: "joint", jointId: id };
+        }
+        case "vertex":
+          return { kind: "vertex", bodyId: body.id, index: r.index };
+        case "edge":
+          return { kind: "edge", bodyId: body.id, index: r.index };
+        case "bodyPoint":
+          return { kind: "bodyPoint", bodyId: body.id, local: clone(r.local) };
+        case "rail": {
+          const id = sliderIdMap.get(r.sliderId);
+          return id === undefined ? null : { kind: "rail", sliderId: id };
+        }
+      }
+    };
+    for (const c of clip.sketch) {
+      const ra = remapRef(c.refA);
+      const rb = c.refB ? remapRef(c.refB) : null;
+      if (!ra || (c.refB && !rb)) continue;
+      this.addSketchConstraint(c.kind, ra, rb ?? undefined);
+    }
+    for (const d of clip.dims) {
+      const ra = remapRef(d.refA);
+      const rb = remapRef(d.refB);
+      if (!ra || !rb || !this.resolveMeasureRef(ra) || !this.resolveMeasureRef(rb)) continue;
+      this.measurements.push({
+        id: this.id(),
+        mode: "draw",
+        refA: ra,
+        refB: rb,
+        labelOffset: clone(d.labelOffset),
+        axis: d.axis,
+        driving: true,
+        target: d.target,
+      });
     }
     return body.id;
   }

@@ -11,8 +11,8 @@ export interface View {
   ty: number;
 }
 
-export const MIN_SCALE = 0.2;
-export const MAX_SCALE = 5;
+export const MIN_SCALE = 0.05;
+export const MAX_SCALE = 20;
 
 export function screenToWorld(view: View, s: Vec2): Vec2 {
   return { x: (s.x - view.tx) / view.scale, y: (s.y - view.ty) / view.scale };
