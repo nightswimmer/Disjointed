@@ -185,10 +185,30 @@ select#grid-size-presets {
 #edit-group.hidden,
 #color-group.hidden,
 #actuator-group.hidden,
+#sketch-group.hidden,
 #actuator-props.hidden,
 #motor-props.hidden,
 #run-btn.hidden,
 #autopause-btn.hidden {
+  display: none;
+}
+
+/* Inline dimension value editor: a small floating input over the double-clicked label. */
+#dim-edit {
+  position: absolute;
+  width: 76px;
+  padding: 4px 8px;
+  transform: translate(-50%, -50%);
+  border: 1.5px solid #46c2cb;
+  border-radius: 9px;
+  background: var(--control);
+  color: var(--text);
+  font-size: 12px;
+  text-align: center;
+  outline: none;
+  z-index: 5;
+}
+#dim-edit.hidden {
   display: none;
 }
 

@@ -47,6 +47,9 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Linear actuator** | `L` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
 | **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node, or any point inside a body) or a **line** (a slider rail or a body edge). Works in **both modes** — see *Measurements* below. |
+| **Coincident** | `O` | Click **two points** (joints or body corners) to make them share a position. |
+| **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge or slider rail** (one click), or **two points**, to make it horizontal / vertical. |
+| **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges or slider rails) to constrain their directions — or, for Equal, their lengths. |
 
 **Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
@@ -83,6 +86,28 @@ as the mechanism moves — measure a stroke length by dimensioning two joints, o
 angle by dimensioning two rails. Click a value pill to select it, drag it to reposition
 (a point–point dimension re-derives h/v/direct), press **Delete** to remove it — all of this
 works in both modes. Measurements are saved with the mechanism.
+
+**Sketch constraints & driving dimensions** (draw mode). Draw mode works like a CAD sketch:
+
+- The six **constraint tools** (table above) relate points and lines — the geometry moves to
+  satisfy a constraint the moment you place it, and a constraint that *can't* be satisfied is
+  rejected (the conflicting items flash red, nothing moves). Each constraint shows a small
+  violet **badge** (◎ H V ∥ ⊥ =) beside its element — faded until you **hover the element**
+  (or the badge): click to select, **Delete** to remove. A toolbar toggle next to the
+  constraint tools **shows/hides all badges** (constraints keep working while hidden), and a
+  matching toggle next to Measure shows/hides **all measurements** — in both modes.
+- **Driving dimensions**: **double-click** a dimension's value, type a number, press Enter.
+  The **first** driving dimension on an otherwise-unconstrained body **scales the whole body
+  uniformly** (same shape, new size); further dimensions move **only the involved nodes**
+  while every constraint and driving dimension holds. A **driven** (reference) dimension
+  shows its value **in parentheses**; a driving one shows it plain. Clear the field to turn a
+  driving dimension back into a reference. Impossible targets are rejected with a red flash.
+- **Sketch-aware dragging**: with constraints or driving dimensions present, dragging a node,
+  joint, or body (and rotating) **re-solves the sketch live** — what you drag follows the
+  cursor as far as the constraints allow, and everything constrained to it comes along.
+- **Auto-constraints while drawing**: a freehand edge drawn within ~5° of horizontal /
+  vertical snaps straight and gets the H/V constraint; a vertex clicked **on an existing
+  joint or corner** lands exactly there and gets a coincident constraint.
 
 **Body colour.** A colour swatch in the toolbar sets the active colour: with **nothing selected**
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
@@ -158,7 +183,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints
 ```
 
 ## How it works
@@ -188,8 +213,13 @@ pins/sliders propagate the imposed motion through the whole assembly.
 **Measurements** store references to elements (a joint, a body node or edge, a rail — never raw
 coordinates) and re-resolve them to world geometry every frame, which is why their values track
 the running simulation for free.
+**Sketch constraints** get their own solver (`sketch.ts`): the same Gauss-Seidel projection
+idea, but over *shape* — the world positions of body corner nodes and joints — rather than
+rigid poses. After a converged solve, bodies rebuild from their new control polygons; an
+unsatisfiable solve never touches the scene (edits are rejected, not approximated).
 
-Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `view.ts` (camera),
+Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `sketch.ts`,
+`view.ts` (camera),
 `renderer.ts`, `main.ts`, plus `analyzer.ts` — a standalone topology diagnostic (kinematic
 islands, degrees of freedom, loop / block decomposition) groundwork for future solver
 optimizations. Tests live in [`scripts/`](scripts/).

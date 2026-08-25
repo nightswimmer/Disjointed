@@ -83,6 +83,32 @@
           <button data-tool="measure" class="tool-btn icon-btn" title="Measure — click two references (points or lines), then place the value (D)" aria-label="Measure tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="7.5" width="15" height="5.5" rx="1"/><line x1="6" y1="7.5" x2="6" y2="10.2"/><line x1="9.5" y1="7.5" x2="9.5" y2="10.2"/><line x1="13" y1="7.5" x2="13" y2="10.2"/></svg>
           </button>
+          <button id="measure-vis-btn" class="active icon-btn" title="Show or hide all measurements (toggle)" aria-label="Toggle measurement visibility">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="5" x2="3" y2="15"/><line x1="17" y1="5" x2="17" y2="15"/><line x1="3" y1="10" x2="17" y2="10"/><path d="M6.5 8L3 10l3.5 2"/><path d="M13.5 8L17 10l-3.5 2"/></svg>
+          </button>
+        </div>
+        <div class="group" id="sketch-group">
+          <button data-tool="coincident" class="tool-btn icon-btn" title="Coincident — click two points to make them share a position (O)" aria-label="Coincident constraint tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5.5"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button data-tool="horizontal" class="tool-btn icon-btn" title="Horizontal — click an edge or rail, or two points (H)" aria-label="Horizontal constraint tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="10" x2="16" y2="10"/><circle cx="4" cy="10" r="1.6" fill="currentColor" stroke="none"/><circle cx="16" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button data-tool="vertical" class="tool-btn icon-btn" title="Vertical — click an edge or rail, or two points (V)" aria-label="Vertical constraint tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="4" x2="10" y2="16"/><circle cx="10" cy="4" r="1.6" fill="currentColor" stroke="none"/><circle cx="10" cy="16" r="1.6" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button data-tool="parallel" class="tool-btn icon-btn" title="Parallel — click two lines (edges or rails) (P)" aria-label="Parallel constraint tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="6" y1="16" x2="11" y2="4"/><line x1="10.5" y1="16" x2="15.5" y2="4"/></svg>
+          </button>
+          <button data-tool="perpendicular" class="tool-btn icon-btn" title="Perpendicular — click two lines (edges or rails) (T)" aria-label="Perpendicular constraint tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="15" x2="16" y2="15"/><line x1="10" y1="15" x2="10" y2="4"/></svg>
+          </button>
+          <button data-tool="equal" class="tool-btn icon-btn" title="Equal length — click two lines (edges or rails) (E)" aria-label="Equal constraint tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="8" x2="15" y2="8"/><line x1="5" y1="12" x2="15" y2="12"/></svg>
+          </button>
+          <button id="sketch-vis-btn" class="active icon-btn" title="Show or hide all constraint badges (toggle)" aria-label="Toggle constraint badge visibility">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="13" rx="3"/><line x1="6.5" y1="13" x2="13.5" y2="13"/><line x1="10" y1="13" x2="10" y2="7"/></svg>
+          </button>
         </div>
         <div class="group hidden" id="actuator-props">
           <label class="select-label" id="actuator-speed-label" title="Cycles per second (one back-and-forth per cycle)">
@@ -155,6 +181,10 @@
       <div id="canvas-wrap">
         <canvas id="scene"></canvas>
         <div id="sim-error" class="hidden" role="alert"></div>
+        <!-- Inline value editor for a draw-mode dimension (double-click its label).
+             Enter commits (drives the dimension); empty commits back to driven; Esc cancels. -->
+        <input id="dim-edit" class="hidden" type="text" inputmode="decimal" autocomplete="off"
+          aria-label="Dimension value" />
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

@@ -9,16 +9,27 @@ import {
   MeasureInfo,
   MeasureRef,
   ResolvedMeasureRef,
+  SketchConstraintKind,
+  sameMeasureRef,
 } from "./model";
 import { solve, Driver, ConstraintBreak, SolveStats, solverConfig } from "./solver";
-import { render, DARK_THEME, LIGHT_THEME } from "./renderer";
-import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, roundedConvexBody, distToSegment } from "./geometry";
-import { View, screenToWorld, zoomAt } from "./view";
+import { solveSketch, applyDrivingDimension, tryAddConstraint, autoConstrainBody, SketchBreak } from "./sketch";
+import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
+import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, normalize, roundedConvexBody, distToSegment } from "./geometry";
+import { View, screenToWorld, worldToScreen, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
-type Tool = "body" | "joint" | "connect" | "ground" | "slider" | "rotate" | "linearActuator" | "motor" | "measure";
+type Tool =
+  | "body" | "joint" | "connect" | "ground" | "slider" | "rotate"
+  | "linearActuator" | "motor" | "measure"
+  | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
 /** An existing element picked in normal/select mode. */
-type Selection = { kind: "body" | "joint" | "slider" | "measure"; id: number };
+type Selection = { kind: "body" | "joint" | "slider" | "measure" | "sketch"; id: number };
+
+/** The tools that place a sketch constraint (tool name = constraint kind). */
+const CONSTRAINT_TOOLS = new Set<Tool>([
+  "coincident", "horizontal", "vertical", "parallel", "perpendicular", "equal",
+]);
 
 /** Pick / close thresholds in screen (CSS) pixels — converted to world units via the view. */
 const PICK_RADIUS = 12;
@@ -61,6 +72,10 @@ const structTolCtrl = document.getElementById("struct-tol-ctrl")!;
 const structTolInput = document.getElementById("struct-tol") as HTMLInputElement;
 const breakTolCtrl = document.getElementById("break-tol-ctrl")!;
 const breakTolInput = document.getElementById("break-tol") as HTMLInputElement;
+const sketchGroup = document.getElementById("sketch-group")!;
+const dimEditInput = document.getElementById("dim-edit") as HTMLInputElement;
+const sketchVisBtn = document.getElementById("sketch-vis-btn") as HTMLButtonElement;
+const measureVisBtn = document.getElementById("measure-vis-btn") as HTMLButtonElement;
 
 const scene = new Scene();
 
@@ -113,6 +128,12 @@ let mode: Mode = "draw";
 /** Armed draw tool, or null for normal/select mode. Tools disarm after one use. */
 let tool: Tool | null = null;
 let draftBody: Vec2[] = []; // freehand polygon vertices (body tool, empty-space start)
+/**
+ * Per freehand draft vertex: the existing point (joint / body corner) the click landed
+ * on, or null. On finish, each recorded pick becomes a coincident auto-constraint
+ * between the new body's corner and that point (the vertex is placed exactly on it).
+ */
+let draftBodySnaps: (MeasureRef | null)[] = [];
 let jointDraftIds: number[] = []; // joints picked to build a body (body tool, joint start)
 let jointDraftCreated: number[] = []; // joints made on slider rails during that draft (removed if aborted)
 let jointDraftExpanding = false; // body-from-joints: sizing the outward margin
@@ -151,6 +172,39 @@ let motorPivotDraft: number | null = null;
 let measurePicks: MeasureRef[] = [];
 /** How close (screen px) a click must land to a measurement's value label to pick it. */
 const LABEL_PICK_RADIUS = 16;
+/** Constraint tools: the reference(s) picked so far (0–1; the finishing pick commits). */
+let constraintPicks: MeasureRef[] = [];
+/** Rejected sketch edit: the conflicting item ids flash red until `until` (ms clock). */
+let sketchFlash: { ids: Set<number>; until: number } | null = null;
+const SKETCH_FLASH_MS = 1200;
+/** Last frame's computed constraint badges (world positions) — reused for hit-testing. */
+let sketchGlyphCache: SketchGlyphView[] = [];
+/** How close (screen px) a click must land to a constraint badge to pick it. */
+const GLYPH_PICK_RADIUS = 10;
+/** Measurement being edited in the inline dimension-value input, or null. */
+let dimEditId: number | null = null;
+/**
+ * Visibility toggles (session-only, like the grid): hiding is purely visual — hidden
+ * constraints still solve, hidden measurements still exist — but the hidden layer isn't
+ * hit-testable, so it can't be clicked, dragged, or edited until shown again.
+ */
+let sketchVisible = true;
+let measureVisible = true;
+
+function setSketchVisible(on: boolean): void {
+  sketchVisible = on;
+  sketchVisBtn.classList.toggle("active", on);
+  if (!on && selection?.kind === "sketch") selection = null;
+}
+
+function setMeasureVisible(on: boolean): void {
+  measureVisible = on;
+  measureVisBtn.classList.toggle("active", on);
+  if (!on) {
+    closeDimEditor();
+    if (selection?.kind === "measure") selection = null;
+  }
+}
 
 // --- animation (actuators / motors) -------------------------------------
 /**
@@ -275,7 +329,7 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · [ and ] round corners · Delete to remove.",
+  select: "Click to select · drag to move · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · [ and ] round corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
@@ -285,6 +339,12 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   linearActuator: "Click a slider rail to drop a self-driving rider — it travels back and forth when animation runs.",
   motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
   measure: "Click two references — a joint, body corner, body edge, slider rail, or a point on a body — then click where the value should sit.",
+  coincident: "Click two points (joints or body corners) to make them share a position.",
+  horizontal: "Click a body edge or slider rail — or two points — to make it horizontal.",
+  vertical: "Click a body edge or slider rail — or two points — to make it vertical.",
+  parallel: "Click two lines (body edges or slider rails) to make them parallel.",
+  perpendicular: "Click two lines (body edges or slider rails) to make them perpendicular.",
+  equal: "Click two lines (body edges or slider rails) to make their lengths equal.",
 };
 
 function updateHint(): void {
@@ -382,6 +442,8 @@ snapBtn.addEventListener("click", () => {
   snapEnabled = !snapEnabled;
   snapBtn.classList.toggle("active", snapEnabled);
 });
+sketchVisBtn.addEventListener("click", () => setSketchVisible(!sketchVisible));
+measureVisBtn.addEventListener("click", () => setMeasureVisible(!measureVisible));
 const GRID_MIN = 1;
 const GRID_MAX = 200;
 /** Read the grid-size field, clamped to [GRID_MIN, GRID_MAX]; null while it's empty/invalid. */
@@ -434,6 +496,7 @@ function setMode(next: Mode): void {
   editGroup.classList.toggle("hidden", mode === "sim");
   colorGroup.classList.toggle("hidden", mode === "sim");
   actuatorGroup.classList.toggle("hidden", mode === "sim");
+  sketchGroup.classList.toggle("hidden", mode === "sim");
   runBtn.classList.toggle("hidden", mode === "draw");
   autopauseBtn.classList.toggle("hidden", mode === "draw");
   animIterCtrl.classList.toggle("hidden", mode === "draw");
@@ -470,7 +533,10 @@ function disarmTool(): void {
 }
 
 function resetTransient(): void {
+  closeDimEditor();
   draftBody = [];
+  draftBodySnaps = [];
+  constraintPicks = [];
   // Discard any slider-rail joints made for an unfinished body-from-joints draft (a finished
   // build clears this list first, so its absorbed joints survive).
   for (const id of jointDraftCreated) scene.removeJoint(id);
@@ -746,10 +812,188 @@ function handleDrawClick(p: Vec2): void {
     case "measure":
       handleMeasureClick(p);
       return; // manages its own dirty-marking and disarm
+    case "coincident":
+    case "horizontal":
+    case "vertical":
+    case "parallel":
+    case "perpendicular":
+    case "equal":
+      handleConstraintClick(p);
+      return; // manages its own dirty-marking and disarm
   }
   markDirty();
   if (placed) disarmTool();
 }
+
+// --- sketch-constraint tools -------------------------------------------------
+/** The point reference a constraint click would pick: a joint, then a body control vertex. */
+function constraintPointRefAt(p: Vec2): MeasureRef | null {
+  const j = scene.jointAt(p, pickRadius());
+  if (j) return { kind: "joint", jointId: j.id };
+  for (let i = scene.bodies.length - 1; i >= 0; i--) {
+    const body = scene.bodies[i];
+    const verts = scene.bodyControlWorld(body);
+    for (let vi = 0; vi < verts.length; vi++) {
+      if (dist(verts[vi], p) <= pickRadius()) return { kind: "vertex", bodyId: body.id, index: vi };
+    }
+  }
+  return null;
+}
+
+/** The line reference a constraint click would pick: a slider rail, then a body control edge. */
+function constraintLineRefAt(p: Vec2): MeasureRef | null {
+  const s = scene.sliderAt(p, pickRadius());
+  if (s) return { kind: "rail", sliderId: s.id };
+  for (let i = scene.bodies.length - 1; i >= 0; i--) {
+    const body = scene.bodies[i];
+    const verts = scene.bodyControlWorld(body);
+    for (let ei = 0; ei < verts.length; ei++) {
+      if (distToSegment(p, verts[ei], verts[(ei + 1) % verts.length]) <= pickRadius()) {
+        return { kind: "edge", bodyId: body.id, index: ei };
+      }
+    }
+  }
+  return null;
+}
+
+/** The reference the armed constraint tool would pick at `p` (for hover + clicks). */
+function constraintRefAt(p: Vec2): MeasureRef | null {
+  const kind = tool as SketchConstraintKind;
+  if (kind === "parallel" || kind === "perpendicular" || kind === "equal") {
+    return constraintLineRefAt(p);
+  }
+  if (kind === "coincident") return constraintPointRefAt(p);
+  // Horizontal / vertical: the first pick prefers a point but also takes a line (which
+  // commits immediately); the second pick must be the pair's other point.
+  if (constraintPicks.length === 0) return constraintPointRefAt(p) ?? constraintLineRefAt(p);
+  return constraintPointRefAt(p);
+}
+
+/**
+ * Constraint tool click. Line-pair and point-pair kinds take two picks; horizontal /
+ * vertical on a line commits on the first. The commit adds the constraint and runs a
+ * sketch solve — geometry moves to satisfy it, or (unsatisfiable) the constraint is
+ * removed again and the conflicting items flash red (reject semantics).
+ */
+function handleConstraintClick(p: Vec2): void {
+  const kind = tool as SketchConstraintKind;
+  const ref = constraintRefAt(p);
+  if (!ref) return; // empty space — keep waiting for a reference
+  const isLine = ref.kind === "rail" || ref.kind === "edge";
+  if (constraintPicks.length === 0) {
+    if ((kind === "horizontal" || kind === "vertical") && isLine) {
+      commitConstraint(kind, ref);
+      return;
+    }
+    constraintPicks = [ref];
+    return;
+  }
+  if (sameMeasureRef(constraintPicks[0], ref)) return;
+  commitConstraint(kind, constraintPicks[0], ref);
+}
+
+/** Add + solve a sketch constraint; on an unsatisfiable solve it's removed again and flashes. */
+function commitConstraint(kind: SketchConstraintKind, refA: MeasureRef, refB?: MeasureRef): void {
+  const { constraint, breaks } = tryAddConstraint(scene, kind, refA, refB);
+  disarmTool(); // clears the picks (and, via resetTransient, the selection)
+  if (!constraint) {
+    if (breaks.length) flashSketchItems(breaks);
+    return;
+  }
+  setSketchVisible(true); // placing a constraint while hidden would be invisible
+  selection = { kind: "sketch", id: constraint.id };
+  markDirty();
+}
+
+/** Flash the items a rejected sketch edit couldn't satisfy (painted red on the canvas). */
+function flashSketchItems(breaks: SketchBreak[]): void {
+  // The flash is the only feedback a rejected edit gives — reveal any hidden layer it
+  // needs, so the conflicting items are actually visible.
+  if (breaks.some((b) => b.kind === "constraint")) setSketchVisible(true);
+  if (breaks.some((b) => b.kind === "dimension")) setMeasureVisible(true);
+  sketchFlash = {
+    ids: new Set(breaks.map((b) => b.id)),
+    until: performance.now() + SKETCH_FLASH_MS,
+  };
+}
+
+/** Whether the sketch has anything to solve (constraints or driving dimensions). */
+function sketchActive(): boolean {
+  return (
+    scene.sketch.length > 0 ||
+    scene.measurements.some((m) => m.mode === "draw" && m.driving === true)
+  );
+}
+
+/**
+ * Live-solve the sketch during a draw-mode edit (drags, rotates): the moved geometry
+ * stays where the user put it as far as the constraints allow, and everything
+ * constrained to it follows — CAD-style sketch dragging. A solve that can't converge
+ * mid-drag is simply skipped (the next successful one re-tightens the sketch).
+ */
+function solveSketchLive(): void {
+  if (mode === "draw" && sketchActive()) solveSketch(scene);
+}
+
+// --- inline dimension-value editing ------------------------------------------
+/**
+ * Open the floating value input over a draw-mode dimension's label (double-click).
+ * Enter commits: a number drives the dimension to that value (sketch solve; rejected
+ * edits flash red); an empty value turns a driving dimension back into a reference.
+ */
+function openDimEditor(m: Measurement): void {
+  const info = scene.measureInfo(m);
+  const lp = scene.measurementLabelPos(m);
+  if (!info || !lp || info.kind !== "distance") return; // angle dimensions can't drive (v1)
+  dimEditId = m.id;
+  const sp = worldToScreen(view, lp);
+  dimEditInput.style.left = `${sp.x}px`;
+  dimEditInput.style.top = `${sp.y}px`;
+  dimEditInput.value = String(Math.round(info.value * 10) / 10);
+  dimEditInput.classList.remove("hidden");
+  dimEditInput.focus();
+  dimEditInput.select();
+}
+
+function closeDimEditor(): void {
+  dimEditId = null;
+  dimEditInput.classList.add("hidden");
+  dimEditInput.blur();
+}
+
+function commitDimEditor(): void {
+  const id = dimEditId;
+  const raw = dimEditInput.value.trim();
+  closeDimEditor(); // nulls dimEditId first, so the blur listener doesn't re-commit
+  if (id === null) return;
+  const m = scene.getMeasurement(id);
+  if (!m) return;
+  if (raw === "") {
+    // Cleared value: back to a driven (reference) dimension.
+    if (m.driving) {
+      scene.clearMeasurementDriving(id);
+      markDirty();
+    }
+    return;
+  }
+  const target = Number(raw);
+  if (!Number.isFinite(target) || target <= 0) {
+    flashSketchItems([{ id, kind: "dimension", error: Infinity }]);
+    return;
+  }
+  const breaks = applyDrivingDimension(scene, id, target);
+  if (breaks.length) flashSketchItems(breaks);
+  else markDirty();
+}
+
+dimEditInput.addEventListener("keydown", (e) => {
+  e.stopPropagation(); // keep canvas shortcuts (tools, Delete…) out of the text field
+  if (e.key === "Enter") commitDimEditor();
+  else if (e.key === "Escape") closeDimEditor();
+});
+dimEditInput.addEventListener("blur", () => {
+  if (dimEditId !== null) commitDimEditor();
+});
 
 // --- measure tool ----------------------------------------------------------
 /**
@@ -788,18 +1032,6 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   return null;
 }
 
-/** Whether two references name the same element (bodyPoints are always distinct picks). */
-function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === "joint") return a.jointId === (b as { jointId: number }).jointId;
-  if (a.kind === "rail") return a.sliderId === (b as { sliderId: number }).sliderId;
-  if (a.kind === "vertex" || a.kind === "edge") {
-    const bb = b as { bodyId: number; index: number };
-    return a.bodyId === bb.bodyId && a.index === bb.index;
-  }
-  return false;
-}
-
 /** Measure tool click: two reference picks, then a third click places the value label. */
 function handleMeasureClick(p: Vec2): void {
   if (measurePicks.length < 2) {
@@ -812,6 +1044,7 @@ function handleMeasureClick(p: Vec2): void {
   const m = scene.addMeasurement(mode === "sim" ? "sim" : "draw", measurePicks[0], measurePicks[1], p);
   disarmTool(); // clears the picks (and, via resetTransient, the selection)
   if (m) {
+    setMeasureVisible(true); // placing a measurement while hidden would be invisible
     selection = { kind: "measure", id: m.id };
     markDirty();
   }
@@ -819,6 +1052,7 @@ function handleMeasureClick(p: Vec2): void {
 
 /** The current mode's measurement whose value label sits under `p`, or null (topmost first). */
 function measurementLabelAt(p: Vec2): Measurement | null {
+  if (!measureVisible) return null; // hidden measurements aren't clickable
   const mm = mode === "sim" ? "sim" : "draw";
   for (let i = scene.measurements.length - 1; i >= 0; i--) {
     const m = scene.measurements[i];
@@ -829,11 +1063,27 @@ function measurementLabelAt(p: Vec2): Measurement | null {
   return null;
 }
 
+/** The sketch constraint whose badge sits under `p` (using last frame's badge layout), or null. */
+function sketchGlyphAt(p: Vec2): number | null {
+  const r = GLYPH_PICK_RADIUS / view.scale;
+  for (let i = sketchGlyphCache.length - 1; i >= 0; i--) {
+    for (const b of sketchGlyphCache[i].badges) {
+      if (dist(b, p) <= r) return sketchGlyphCache[i].id;
+    }
+  }
+  return null;
+}
+
 /** Normal/select mode: pick a measurement label (topmost overlay), then a joint, a slider rail, a body. */
 function handleSelectClick(p: Vec2): void {
   const ml = measurementLabelAt(p);
   if (ml) {
     selection = { kind: "measure", id: ml.id };
+    return;
+  }
+  const sg = sketchGlyphAt(p);
+  if (sg !== null) {
+    selection = { kind: "sketch", id: sg };
     return;
   }
   const j = scene.jointAt(p, pickRadius());
@@ -909,6 +1159,7 @@ function deleteSelection(): void {
   if (selection.kind === "body") scene.removeBody(selection.id);
   else if (selection.kind === "joint") scene.removeJoint(selection.id);
   else if (selection.kind === "measure") scene.removeMeasurement(selection.id);
+  else if (selection.kind === "sketch") scene.removeSketchConstraint(selection.id);
   else scene.removeConstraint(selection.id); // slider: remove it, keep the joints
   selection = null;
   markDirty();
@@ -1068,22 +1319,41 @@ function addBodyPoint(p: Vec2): void {
     finishBody();
     return;
   }
-  const at = snap(p); // freehand vertices land on the grid when snap is on
+  // A click on an existing point (a joint or another body's corner) lands the vertex
+  // exactly there and records the pick — finishing the draft turns it into a coincident
+  // auto-constraint. Otherwise freehand vertices land on the grid when snap is on.
+  const pick = constraintPointRefAt(p);
+  const picked = pick ? scene.resolveMeasureRef(pick) : null;
+  const at = picked && picked.kind === "point" ? picked.p : snap(p);
   // Ignore near-duplicate points (also de-dupes the 2nd click of a double-click).
   const last = draftBody[draftBody.length - 1];
   if (last && dist(at, last) < 4 / view.scale) return;
   draftBody.push(at);
+  draftBodySnaps.push(picked && picked.kind === "point" ? pick : null);
 }
 
 function finishBody(): void {
   if (draftBody.length >= 3) {
-    scene.addBody(draftBody).color = defaultBodyColor;
+    const body = scene.addBody(draftBody);
+    body.color = defaultBodyColor;
+    // Auto-constraints: clicked-on existing points become coincident; near-horizontal /
+    // near-vertical edges get H/V (each solved in as it's added; unsatisfiable ones are
+    // skipped). Control-vertex order matches the draft order, so indices line up.
+    for (let i = 0; i < draftBodySnaps.length; i++) {
+      const ref = draftBodySnaps[i];
+      if (ref) {
+        tryAddConstraint(scene, "coincident", { kind: "vertex", bodyId: body.id, index: i }, ref);
+      }
+    }
+    autoConstrainBody(scene, body.id);
     draftBody = [];
+    draftBodySnaps = [];
     markDirty();
     disarmTool();
     return;
   }
   draftBody = [];
+  draftBodySnaps = [];
 }
 
 // --- pointer events ------------------------------------------------------
@@ -1190,6 +1460,7 @@ canvas.addEventListener("mousemove", (e) => {
     scene.rotateBody(rotateDrag.bodyId, rotateDrag.pivot, total - rotateDrag.lastTotal);
     rotateDrag.lastTotal = total;
     rotateDrag.moved = true;
+    solveSketchLive(); // constraints (e.g. an H edge) pull back against the rotation
     return;
   }
 
@@ -1208,6 +1479,7 @@ canvas.addEventListener("mousemove", (e) => {
     else if (leftDrag.kind === "body") scene.moveBody(leftDrag.id, delta);
     else scene.moveJoint(leftDrag.id, delta);
     leftDrag.moved = true;
+    solveSketchLive(); // sketch dragging: constraints hold while the geometry follows
     return;
   }
 
@@ -1287,6 +1559,16 @@ canvas.addEventListener("dblclick", (e) => {
     finishBody();
     return;
   }
+  // Select mode: double-click a draw-mode dimension label to edit its value inline
+  // (typing a number makes it a driving dimension; clearing it makes it driven again).
+  if (mode === "draw" && tool === null) {
+    const ml = measurementLabelAt(eventWorld(e));
+    if (ml) {
+      leftDrag = null; // the double-click's mousedowns started a label drag — cancel it
+      openDimEditor(ml);
+      return;
+    }
+  }
   // Select mode, body selected: double-click edits the control polygon. On a vertex →
   // remove it (kept ≥ 3); on an edge → add a node at the click point (grid-snapped).
   if (mode === "draw" && tool === null && selection?.kind === "body") {
@@ -1316,9 +1598,25 @@ const TOOL_KEYS: Record<string, Tool> = {
   l: "linearActuator",
   m: "motor",
   d: "measure",
+  o: "coincident",
+  h: "horizontal",
+  v: "vertical",
+  p: "parallel",
+  t: "perpendicular",
+  e: "equal",
 };
 
 window.addEventListener("keydown", (e) => {
+  // Keys typed into a toolbar field (or the inline dimension editor) belong to that
+  // field — not to canvas shortcuts like Delete or the tool letters.
+  const t = e.target;
+  if (
+    t instanceof HTMLInputElement ||
+    t instanceof HTMLSelectElement ||
+    t instanceof HTMLTextAreaElement
+  ) {
+    return;
+  }
   // Space toggles the actuator animation (sim mode only).
   if (e.code === "Space" && mode === "sim" && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
@@ -1682,6 +1980,7 @@ function editVerticesView(): Vec2[] | null {
 
 /** Resolved measurements of the current mode (a ref that can't resolve just isn't drawn). */
 function measurementsView(): MeasureInfo[] {
+  if (!measureVisible) return [];
   const mm = mode === "sim" ? "sim" : "draw";
   const out: MeasureInfo[] = [];
   for (const m of scene.measurements) {
@@ -1715,6 +2014,93 @@ function measureDraftView(): {
   return { refs, hover, preview };
 }
 
+/** Stable stacking key for a constraint reference (badges on one element stack sideways). */
+function sketchRefKey(ref: MeasureRef): string {
+  switch (ref.kind) {
+    case "joint": return `j:${ref.jointId}`;
+    case "vertex": return `v:${ref.bodyId}:${ref.index}`;
+    case "edge": return `e:${ref.bodyId}:${ref.index}`;
+    case "rail": return `r:${ref.sliderId}`;
+    default: return "?";
+  }
+}
+
+/**
+ * Whether the cursor is over the element a constraint reference names — a joint or a
+ * body corner within pick range; for a vertex/edge, anywhere on the owning body counts
+ * too (the whole body is the "parent" whose hover reveals its constraints); a rail's
+ * segment within pick range.
+ */
+function refHovered(ref: MeasureRef, p: Vec2): boolean {
+  const r = pickRadius();
+  const res = scene.resolveMeasureRef(ref);
+  if (!res) return false;
+  if (res.kind === "point" && dist(res.p, p) <= r) return true;
+  if (res.kind === "line" && distToSegment(p, res.a, res.b) <= r) return true;
+  if (ref.kind === "vertex" || ref.kind === "edge") return scene.bodyAt(p)?.id === ref.bodyId;
+  return false;
+}
+
+/**
+ * On-canvas badges for every sketch constraint (draw mode only): one badge per referenced
+ * element, offset from it in screen terms so it stays put at any zoom — beside a point,
+ * off the midpoint of a line. Multiple badges on one element stack sideways. Coincident
+ * gets a single badge (its two points share a position). Badges render faded unless the
+ * cursor is over one of the constraint's elements (or a badge itself). The result is
+ * cached for click hit-testing (`sketchGlyphAt`).
+ */
+function sketchGlyphsView(): SketchGlyphView[] {
+  if (mode !== "draw" || !sketchVisible) {
+    sketchGlyphCache = []; // hidden badges aren't hit-testable either
+    return [];
+  }
+  const px = (n: number) => n / view.scale;
+  const stack = new Map<string, number>();
+  const out: SketchGlyphView[] = [];
+  for (const c of scene.sketch) {
+    const allRefs = c.refB ? [c.refA, c.refB] : [c.refA];
+    const badgeRefs = c.kind === "coincident" ? [c.refA] : allRefs;
+    const badges: Vec2[] = [];
+    for (const ref of badgeRefs) {
+      const r = scene.resolveMeasureRef(ref);
+      if (!r) continue;
+      const key = sketchRefKey(ref);
+      const i = stack.get(key) ?? 0;
+      stack.set(key, i + 1);
+      if (r.kind === "point") {
+        badges.push(add(r.p, vec(px(14 + i * 20), -px(14))));
+      } else {
+        const mid = scale(add(r.a, r.b), 0.5);
+        const d = normalize(sub(r.b, r.a));
+        const n = vec(-d.y, d.x);
+        badges.push(add(add(mid, scale(n, px(14))), scale(d, px(i * 20))));
+      }
+    }
+    if (!badges.length) continue;
+    const hot =
+      cursor !== null &&
+      (allRefs.some((ref) => refHovered(ref, cursor!)) ||
+        badges.some((b) => dist(b, cursor!) <= GLYPH_PICK_RADIUS / view.scale));
+    out.push({ id: c.id, kind: c.kind, badges, faded: !hot });
+  }
+  sketchGlyphCache = out;
+  return out;
+}
+
+/** Constraint-tool overlay: the picked reference(s) and the one under the cursor. */
+function sketchDraftView(): { refs: ResolvedMeasureRef[]; hover: ResolvedMeasureRef | null } | null {
+  if (tool === null || !CONSTRAINT_TOOLS.has(tool)) return null;
+  const refs = constraintPicks
+    .map((r) => scene.resolveMeasureRef(r))
+    .filter((r): r is ResolvedMeasureRef => r !== null);
+  let hover: ResolvedMeasureRef | null = null;
+  if (cursor) {
+    const h = constraintRefAt(cursor);
+    hover = h ? scene.resolveMeasureRef(h) : null;
+  }
+  return { refs, hover };
+}
+
 /** Body-from-joints overlay: the picked-joint outline, plus the expanded preview when sizing. */
 function bodyJointDraftView(): { outline: Vec2[]; preview: Vec2[] | null } | null {
   if (mode !== "draw" || tool !== "body" || jointDraftIds.length === 0) return null;
@@ -1746,6 +2132,7 @@ function frame(now?: number): void {
   }
   syncColorPicker();
   syncPropsPanel();
+  if (sketchFlash && performance.now() >= sketchFlash.until) sketchFlash = null;
   render(ctx, {
     scene,
     view,
@@ -1767,6 +2154,9 @@ function frame(now?: number): void {
     breaks: mode === "sim" ? solveBreaks : [],
     measurements: measurementsView(),
     measureDraft: measureDraftView(),
+    sketchGlyphs: sketchGlyphsView(),
+    sketchDraft: sketchDraftView(),
+    flash: sketchFlash?.ids ?? null,
     theme: theme === "light" ? LIGHT_THEME : DARK_THEME,
   });
   requestAnimationFrame(frame);

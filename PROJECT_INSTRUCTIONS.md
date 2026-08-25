@@ -66,9 +66,25 @@ resolved dynamically per frame, so a line pair can flip between the two mid-simu
 the label's sector picking θ vs 180−θ. Labels are constant-size pills (cyan accent),
 click-to-select, draggable (re-derives h/v/direct), Delete to remove — all in both modes.
 Serialized (v7), cascade-removed with their elements, vertex/edge refs remapped across
-control-node insert/remove. **Next up**: CAD-style sketch constraints in draw mode
-(driving dimensions, coincident/parallel/H/V/perpendicular/equal) — design + open questions
-in **HANDOFF.md**.
+control-node insert/remove.
+**CAD-style sketch constraints** (draw mode, serialization v8): a constraint set —
+**coincident** (point–point), **horizontal / vertical** (a line, or a point pair),
+**parallel / perpendicular / equal-length** (line–line) — over joints, body control
+vertices, body edges and slider rails (reusing the `MeasureRef` system, so constraints
+remap/prune like measurements). A new **sketch solver** (`src/sketch.ts`, Gauss-Seidel
+projection over *shape*: world positions of control vertices + joints) applies them.
+Draw-mode distance dimensions can be **driving** (double-click the label → inline value
+input): the *first* driving dimension on an otherwise-unconstrained body **scales it
+uniformly about its centroid** (same form factor — internal constraints are
+scale-invariant so they may exist); later dimensions move only the involved nodes while
+holding every constraint + driving dimension. Driven (reference) dimensions render **in
+parentheses** (CAD convention), driving ones plain/bold. Unsatisfiable edits are
+**rejected**: the scene is left untouched and the conflicting items flash red.
+Constraint badges (violet pills: ◎ H V ∥ ⊥ =) sit by their elements — click to select,
+Delete to remove. **Sketch-aware dragging**: draw-mode drags (nodes, joints, bodies) and
+rotates live-solve the sketch, CAD-style. **Auto-constraints** while drawing freehand: a
+near-H/V edge (±5°) gets the H/V constraint; a vertex clicked on an existing joint/corner
+lands exactly there and gets a coincident.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -175,11 +191,26 @@ in **HANDOFF.md**.
     `removeBodyVertex` (a ref *on* a removed vertex/edge drops its measurement). Known
     limitations: `mirrorBody` doesn't remap vertex/edge/bodyPoint refs; copy/paste doesn't
     carry measurements.
+  - **Sketch constraints** (`sketch: SketchConstraint[]` on the scene): a
+    `SketchConstraint` = `{ kind, id, refA, refB }` where kind ∈ coincident / horizontal /
+    vertical / parallel / perpendicular / equal and the refs are `MeasureRef`s (`refB` is
+    null for H/V on a single line ref). `addSketchConstraint` validates ref kinds per
+    constraint kind (points = joint/vertex — `bodyPoint` is measurement-only; lines =
+    rail/edge), rejects duplicates of the same element and unresolvable refs.
+    `removeSketchConstraint` / `getSketchConstraint`; `pruneSketch` runs alongside
+    `pruneMeasurements` (element deletion cascades) and `shiftMeasureIndices` also remaps
+    sketch vertex/edge refs. `sameMeasureRef` (exported) compares refs by element.
+    **Driving dimensions**: draw-mode `Measurement`s gain optional `driving` + `target`;
+    `setMeasurementDriving` / `clearMeasurementDriving`; `measureInfo` passes `driving`
+    through to `MeasureInfo` for display. **`scaleBody(id, factor)`** scales a body
+    uniformly about its centroid — control polygon, corner radius, attached joints, their
+    ground anchors, and `bodyPoint` measurement refs all together.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 7`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 8`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
-    actuator/motor constraints and pre-v7 files no measurements, which load fine as-is).
+    actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
+    constraints or driving flags — all load fine as-is).
 - **solver.ts** — `solve(scene, driver, iterations, relax, anchors?, stats?): ConstraintBreak[]` (each
   `ConstraintBreak` carries `a`/`b`/`error` plus a `joints: number[]` list naming the joints
   involved — pin endpoints, the grounded joint, an unreachable slider rider, or the anchor's joint
@@ -202,6 +233,27 @@ in **HANDOFF.md**.
   step-limited (`DRIVER_MAX_STEP` per sweep), so a weakly-constrained grab keeps residual ≈ 0
   and an unconditional early-exit would starve the drag to one pull per solve. See "Solver
   notes" below.
+- **sketch.ts** — the **sketch solver** (draw-mode only; the sim solver is untouched).
+  Gauss-Seidel projection like solver.ts, but the variables are *shape*: the world
+  positions of body **control vertices** (`v:body:index`) and **joints** (`j:id`) — a
+  joint coincident with one of its body's control vertices maps onto the vertex variable
+  (the node↔joint link), so constraints on it reshape the body. Each constraint /
+  driving dimension becomes a projection item (coincident → midpoint; H/V → average the
+  coordinate; parallel/perpendicular → rotate both lines half-way about their midpoints;
+  equal → scale both lines to the mean length; distance dims → symmetric point/line
+  moves along the axis/normal — a driving line–line distance also keeps the pair
+  parallel). Sweeps run until every residual < `sketchConfig.tol` (mirrors
+  `solverConfig`), then the solved positions are applied through `moveBodyVertex` /
+  `moveJoint` (bodies rebuild, containment clamps apply) and **verified** against the
+  actual scene; a failed verify reverts via a serialize snapshot. **Reject semantics
+  throughout**: an unconverged solve never touches the scene and returns `SketchBreak[]`
+  (ids of the unsatisfiable items). Public API: `solveSketch(scene)` (re-solve + apply),
+  `applyDrivingDimension(scene, id, target)` (validates: draw-mode distance dims only,
+  target > 0; picks **uniform scale** — both refs owned by one body, no other driving dim
+  touches it, every sketch constraint touching it is fully internal — else the node
+  solve; commits the driving flag only on success), `tryAddConstraint` (add + solve,
+  remove again on conflict), `autoConstrainBody` (H/V inference within `AUTO_HV_TOL` =
+  5°, each constraint solved in as it's added).
 - **analyzer.ts** — read-only **topology diagnostic** (Stage 1 of the propagation-solver
   exploration; not yet imported by the app — call `formatReport(analyzeScene(scene), scene)`
   from a console/debug hook). Builds a constraint graph (bodies + free joints as nodes; pins +
@@ -244,6 +296,18 @@ in **HANDOFF.md**.
   stroke over a line; hover ref dashed/lighter) and draws the placement preview as a dashed
   measurement. Inputs: `measurements: MeasureInfo[]` (already resolved by main),
   `measureDraft: { refs, hover, preview }`, and `selection` now includes kind `"measure"`.
+  **Sketch constraints**: violet (`#b48cff`) constant-size badge pills (screen-space, like
+  measurement labels) with a symbol per kind (◎ H V ∥ ⊥ =), drawn from
+  `sketchGlyphs: SketchGlyphView[]` (positions computed by main so hit-testing matches);
+  badges render **faded** (alpha 0.2) unless `faded: false` — main sets it when the cursor
+  is over one of the constraint's elements or a badge — with selection / reject-flash
+  always at full strength;
+  `sketchDraft` highlights constraint-tool picks in violet (reusing
+  `drawMeasureRefHighlight`, which took a colour param). In draw mode a **driven**
+  dimension's value renders **in parentheses** and a **driving** one plain with a bolder
+  pill border (`measureText(info, paren)`); `flash: Set<number>` paints the constraints /
+  dimensions a rejected sketch edit named in the error red for a moment. Selection kind
+  `"sketch"` highlights a badge in ink.
 - **main.ts** — canvas/DPI setup, toolbar wiring (the toolbar is **icon buttons** — SVG glyphs with
   tooltips; wiring is by id/`data-*`/class, never button text), mode/tool state (tools are one-shot +
   have keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
@@ -280,6 +344,41 @@ in **HANDOFF.md**.
     `setMeasurementLabel` re-derives h/v/direct), Delete removes (works in both modes).
     Esc now calls `disarmTool()` in both modes. Adding/moving/deleting measurements marks
     dirty (persisted + undoable; `canonicalData` keeps sim poses out as always).
+  - **Sketch-constraint tools** (`O`/`H`/`V`/`P`/`T`/`E`, draw mode, one-shot; tool name =
+    constraint kind): pick the reference(s) — points via `constraintPointRefAt`
+    (joint → body corner), lines via `constraintLineRefAt` (rail → body edge); H/V on a
+    line commits on the first click, everything else on the second. `commitConstraint` →
+    `tryAddConstraint`: the geometry solves to satisfy the new constraint immediately, or
+    the add is rejected and the conflicting items **flash red** (`sketchFlash`, 1.2 s).
+    Badge positions come from `sketchGlyphsView()` (one badge per referenced element,
+    screen-offset beside a point / off a line midpoint, stacking sideways when an element
+    has several; coincident gets a single badge), cached for `sketchGlyphAt` hit-testing;
+    click selects (`selection.kind === "sketch"`), Delete removes. Badges are **faded by
+    default** and shown full-strength only while the cursor hovers the constrained element
+    (`refHovered`: the joint / corner / rail within pick range — or anywhere on the owning
+    body for vertex/edge refs) or a badge itself.
+  - **Visibility toggles** (session-only, like the grid): `#sketch-vis-btn` (sketch group)
+    shows/hides all constraint badges; `#measure-vis-btn` (measure group, works in sim
+    too) shows/hides all measurements. Hiding is purely visual — constraints still solve —
+    but the hidden layer isn't hit-testable (no clicks, drags, or label edits), and a
+    matching selection is cleared. Placing a new constraint/measurement or a reject-flash
+    that names an item in a hidden layer **auto-reveals** that layer.
+  - **Inline dimension editing**: double-click a draw-mode dimension label →
+    `openDimEditor` positions the floating `#dim-edit` input over it (screen-space, inside
+    `#canvas-wrap`). Enter (or blur) commits: a number → `applyDrivingDimension` (rejected
+    edits flash red, nothing moves); an **empty value** → back to a driven reference
+    (`clearMeasurementDriving`). Esc cancels. A global keydown guard ignores canvas
+    shortcuts while any input/select has focus (so Delete/tool letters don't fire while
+    typing — this also fixed a latent bug with the actuator speed fields).
+  - **Sketch-aware dragging** (`solveSketchLive`): draw-mode select drags (vertex / body /
+    joint) and rotate-tool drags re-solve the sketch after every move when any constraint
+    or driving dimension exists — constraints hold while the dragged geometry follows,
+    CAD-style. A solve that can't converge mid-drag is skipped (the next one re-tightens).
+  - **Auto-constraints while drawing** (freehand body tool): a click that lands on an
+    existing joint / body corner places the vertex **exactly there** and records the pick
+    (`draftBodySnaps`); `finishBody` turns the picks into **coincident** constraints and
+    runs `autoConstrainBody` (near-H/V edges → H/V), each solved in and skipped if
+    unsatisfiable. Joint-built bodies are untouched (their shape comes from joints).
   - **Animation** (`#run-btn`, sim-mode only; Space toggles): `setAnimating(on)` flips a `running`
     flag and, on **play**, calls `fitPhases()` so each actuator/motor's `phaseAccum` matches the
     current pose — pressing play resumes from whatever the user (or the previous run) left in sim.
@@ -374,8 +473,22 @@ aborts the current placement.
   should sit. Point+point: the label spot picks horizontal / vertical / direct. Point+line:
   perpendicular distance to the infinite line. Line+line: distance while parallel, angle
   otherwise (dynamic; the label's sector picks θ vs 180−θ). Values update live in sim.
+- **Sketch constraints** (draw mode only): **Coincident** (`O`) — two points. **Horizontal**
+  (`H`) / **Vertical** (`V`) — one edge/rail, or two points. **Parallel** (`P`) /
+  **Perpendicular** (`T`) / **Equal length** (`E`) — two edges/rails. The geometry solves to
+  satisfy the constraint the moment it's placed; an unsatisfiable one is rejected (conflicting
+  items flash red). Badges are click-to-select, Delete to remove.
+- **Driving dimensions** (draw mode): double-click a dimension's value → type a number →
+  Enter. The first driving dimension on an otherwise-unconstrained body scales it uniformly;
+  further ones move only the involved nodes while every constraint and driving dimension
+  holds. Driven values show in parentheses; clear the field to make a driving dimension a
+  reference again. Unsatisfiable targets are rejected (revert + red flash).
 
 Select mode (default, no tool armed):
+- **Sketch-aware dragging**: with any sketch constraints / driving dimensions present, every
+  draw-mode drag (node, joint, body) and rotate re-solves the sketch live — the dragged
+  geometry follows the cursor as far as the constraints allow and everything constrained to
+  it comes along.
 - Click a body, joint, or slider rail to **select** it (highlighted); **left-drag** moves the
   selected body or joint. An attached joint **can't leave its body**: dragging it past the edge
   clamps it to the outline (it slides along the edge). A joint sitting exactly on a control
@@ -544,6 +657,20 @@ Persistence:
   constant radius, downstream pin propagates the rotation). Serialize/load round-trips both
   constraint kinds intact; removing a slider drops its actuator (rider survives as a free joint);
   removing a motor's body drops the motor (via joint-pruning).
+- **sketch.ts (scripts)** — sketch constraints + driving dimensions end-to-end:
+  `addSketchConstraint` validation (kind/ref mismatches, bodyPoint, same-element,
+  unresolvable); H/V/coincident solving on free joints, on a body edge (reshapes the body,
+  other joints anchored), and through the node↔joint link (a constraint on a linked joint
+  drives the vertex); parallel / perpendicular / equal (lengths + midpoints preserved);
+  driving dimensions on the node path (direct + h-axis; midpoint preserved, uninvolved
+  nodes untouched); **scale-on-first-dimension** (centroid fixed, vertices/joints/ground
+  anchors/radius/bodyPoint refs all scaled; a second dimension takes the node path and the
+  first still holds; an external coincident disables the scale path); the parametric
+  rectangle (H/V constraints + width scale + height node-solve); point-line and line-line
+  driving; rejects (conflicting dims leave the scene byte-identical, angle dims and
+  sim-mode dims can't drive, non-positive targets); `tryAddConstraint` rollback;
+  `autoConstrainBody` H/V inference (diagonals left alone); cascade removal + vertex/edge
+  index remapping; serialize/load v8 round-trip + pre-v8 files.
 - **measurements.ts** — axis selection from label placement (h / v / direct zones);
   point-point values + dimension-line geometry + preview parity; label move re-deriving the
   axis; values and label positions tracking moving geometry; point-line using the infinite
@@ -621,11 +748,11 @@ Persistence:
   budget, as before.
 
 ## Backlog / next steps (not yet built)
-- **CAD-style sketch constraints in draw mode** — the agreed next feature: driving vs driven
-  dimensions, a constraint set (coincident / parallel / horizontal / vertical / perpendicular /
-  equal), a sketch solver over body nodes + free joints, scale-on-first-dimension,
-  auto-constraints while drawing. **The full proposed design, phasing, and open questions
-  live in HANDOFF.md** — read it (and get the questions answered) before starting.
+- **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);
+  an auto-constraint on/off toggle in the toolbar; auto-coincident while *dragging* (today
+  it's inferred only while drawing); constraint badges could use hover feedback; sketch
+  constraints aren't carried by copy/paste or remapped by `mirrorBody` (same as
+  measurements).
 - Measurement follow-ups: `mirrorBody` doesn't remap vertex/edge/bodyPoint measurement refs;
   copy/paste doesn't carry measurements (consistent with actuators/motors).
 - More joint types as needed.

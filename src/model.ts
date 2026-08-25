@@ -30,7 +30,7 @@ import {
  * together (how joint-built bodies keep their joints and nodes linked). Coincidence is
  * exact up to float error from frame transforms, so the tolerance can be tiny.
  */
-const VERTEX_LINK_EPS = 1e-6;
+export const VERTEX_LINK_EPS = 1e-6;
 
 /** How a body's `radius` shapes it: round the corners in place, or offset the hull outward. */
 export type RoundMode = "fillet" | "offset";
@@ -163,6 +163,11 @@ export type MeasureRef =
  * dynamically each frame, so a line pair can flip between the two in simulation.
  * `labelOffset` positions the value display relative to the references' midpoint, so
  * the label travels with the geometry it measures.
+ *
+ * A **draw-mode** dimension can be *driving* (`driving: true` + a `target` value): it acts
+ * as a sketch constraint — the sketch solver moves geometry so the measured value equals
+ * `target`. A driven dimension (the default) is a read-only reference. Sim-mode
+ * measurements are always driven.
  */
 export interface Measurement {
   id: number;
@@ -171,6 +176,41 @@ export interface Measurement {
   refB: MeasureRef;
   labelOffset: Vec2;
   axis: MeasureAxis;
+  /** Absent/false = driven (read-only). Only draw-mode distance dimensions can drive. */
+  driving?: boolean;
+  /** The value a driving dimension holds the geometry to (world units). */
+  target?: number;
+}
+
+// --- sketch constraints -----------------------------------------------------
+
+/**
+ * Kinds of CAD-style sketch constraints (draw mode only):
+ * `coincident` — two points share a position; `horizontal`/`vertical` — a line (or a
+ * point pair) is axis-aligned; `parallel`/`perpendicular` — two lines' directions;
+ * `equal` — two lines have equal length.
+ */
+export type SketchConstraintKind =
+  | "coincident"
+  | "horizontal"
+  | "vertical"
+  | "parallel"
+  | "perpendicular"
+  | "equal";
+
+/**
+ * A sketch constraint between one or two references (reusing the measurement reference
+ * system, so constraints track their elements the same way measurements do — including
+ * index remapping across control-vertex edits and prune-on-delete). `refB` is null only
+ * for horizontal/vertical applied to a single line reference. Solvable point refs are
+ * joints and body control vertices (`bodyPoint` refs are measurement-only); line refs
+ * are slider rails and body control edges.
+ */
+export interface SketchConstraint {
+  kind: SketchConstraintKind;
+  id: number;
+  refA: MeasureRef;
+  refB: MeasureRef | null;
 }
 
 /** A reference resolved to current world geometry. */
@@ -184,6 +224,8 @@ export interface MeasureInfo {
   kind: "distance" | "angle";
   /** World units for a distance; degrees for an angle. */
   value: number;
+  /** True when the source dimension is driving (drawn without the CAD parentheses). */
+  driving?: boolean;
   labelPos: Vec2;
   /** Arrowed dimension segment (distance only). */
   dim?: { a: Vec2; b: Vec2 };
@@ -201,6 +243,8 @@ export interface SceneData {
   constraints: Constraint[];
   /** Draw-mode and sim-mode measurements together (each carries its `mode`). Absent pre-v7. */
   measurements?: Measurement[];
+  /** Draw-mode sketch constraints. Absent pre-v8. */
+  sketch?: SketchConstraint[];
 }
 
 /**
@@ -223,7 +267,7 @@ export interface BodyClip {
   pins: { a: number; b: number }[];
 }
 
-const FORMAT_VERSION = 7;
+const FORMAT_VERSION = 8;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -247,6 +291,7 @@ export class Scene {
   joints: Joint[] = [];
   constraints: Constraint[] = [];
   measurements: Measurement[] = [];
+  sketch: SketchConstraint[] = [];
   private nextId = 1;
 
   private id(): number {
@@ -641,15 +686,18 @@ export class Scene {
     const b = this.resolveMeasureRef(m.refB);
     if (!a || !b) return null;
     const labelPos = add(scale(add(refCenter(a), refCenter(b)), 0.5), m.labelOffset);
+    let info: MeasureInfo | null;
     if (a.kind === "point" && b.kind === "point") {
-      return pointPointInfo(m.id, a.p, b.p, m.axis, labelPos);
+      info = pointPointInfo(m.id, a.p, b.p, m.axis, labelPos);
+    } else if (a.kind === "line" && b.kind === "line") {
+      info = lineLineInfo(m.id, a, b, labelPos);
+    } else {
+      const p = a.kind === "point" ? a.p : (b as { kind: "point"; p: Vec2 }).p;
+      const line = a.kind === "line" ? a : (b as { kind: "line"; a: Vec2; b: Vec2 });
+      info = pointLineInfo(m.id, p, line, labelPos);
     }
-    if (a.kind === "line" && b.kind === "line") {
-      return lineLineInfo(m.id, a, b, labelPos);
-    }
-    const p = a.kind === "point" ? a.p : (b as { kind: "point"; p: Vec2 }).p;
-    const line = a.kind === "line" ? a : (b as { kind: "line"; a: Vec2; b: Vec2 });
-    return pointLineInfo(m.id, p, line, labelPos);
+    if (info && m.driving) info.driving = true;
+    return info;
   }
 
   /** Like `measureInfo`, but for a not-yet-created measurement (live placement preview). */
@@ -698,6 +746,121 @@ export class Scene {
       }
     }
     if (gone.size) this.measurements = this.measurements.filter((m) => !gone.has(m.id));
+    const cGone = new Set<number>();
+    for (const c of this.sketch) {
+      for (const ref of [c.refA, c.refB]) {
+        if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) continue;
+        if (delta === -1) {
+          if (ref.index === at) cGone.add(c.id);
+          else if (ref.index > at) ref.index--;
+        } else if (ref.index >= at) {
+          ref.index++;
+        }
+      }
+    }
+    if (cGone.size) this.sketch = this.sketch.filter((c) => !cGone.has(c.id));
+  }
+
+  // --- sketch constraints ---------------------------------------------------
+
+  /**
+   * Create a sketch constraint. Reference kinds are validated per constraint kind:
+   * `coincident` takes two point refs; `horizontal`/`vertical` take one line ref (refB
+   * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs.
+   * Point refs must be joints or body control vertices (`bodyPoint` refs are
+   * measurement-only — the sketch solver can't move them independently). Returns null
+   * on a kind mismatch, an unresolvable ref, or two refs naming the same element.
+   */
+  addSketchConstraint(
+    kind: SketchConstraintKind,
+    refA: MeasureRef,
+    refB?: MeasureRef
+  ): SketchConstraint | null {
+    const isPoint = (r: MeasureRef) => r.kind === "joint" || r.kind === "vertex";
+    const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge";
+    const b = refB ?? null;
+    if (kind === "coincident") {
+      if (!b || !isPoint(refA) || !isPoint(b)) return null;
+    } else if (kind === "horizontal" || kind === "vertical") {
+      if (b ? !(isPoint(refA) && isPoint(b)) : !isLine(refA)) return null;
+    } else {
+      if (!b || !isLine(refA) || !isLine(b)) return null;
+    }
+    if (!this.resolveMeasureRef(refA) || (b && !this.resolveMeasureRef(b))) return null;
+    if (b && sameMeasureRef(refA, b)) return null;
+    const c: SketchConstraint = {
+      kind,
+      id: this.id(),
+      refA: cloneMeasureRef(refA),
+      refB: b ? cloneMeasureRef(b) : null,
+    };
+    this.sketch.push(c);
+    return c;
+  }
+
+  getSketchConstraint(id: number): SketchConstraint | undefined {
+    return this.sketch.find((c) => c.id === id);
+  }
+
+  removeSketchConstraint(id: number): void {
+    this.sketch = this.sketch.filter((c) => c.id !== id);
+  }
+
+  /** Drop sketch constraints whose references no longer resolve (their element was removed). */
+  private pruneSketch(): void {
+    this.sketch = this.sketch.filter(
+      (c) => this.resolveMeasureRef(c.refA) && (!c.refB || this.resolveMeasureRef(c.refB))
+    );
+  }
+
+  /**
+   * Make a draw-mode distance dimension driving at `target` (world units, > 0). The
+   * caller is expected to have run the sketch solve first (see `applyDrivingDimension`
+   * in sketch.ts, which validates + solves + commits via this). Returns false for a
+   * missing / sim-mode measurement or a non-positive target.
+   */
+  setMeasurementDriving(id: number, target: number): boolean {
+    const m = this.getMeasurement(id);
+    if (!m || m.mode !== "draw" || !(target > 0)) return false;
+    m.driving = true;
+    m.target = target;
+    return true;
+  }
+
+  /** Turn a driving dimension back into a driven (read-only) one. */
+  clearMeasurementDriving(id: number): void {
+    const m = this.getMeasurement(id);
+    if (!m) return;
+    delete m.driving;
+    delete m.target;
+  }
+
+  /**
+   * Uniformly scale a body by `factor` about its centroid — control polygon, corner
+   * radius, attached joints, their ground anchors, and `bodyPoint` measurement refs all
+   * scale together, so the body keeps its form factor (used when the first driving
+   * dimension on an otherwise unconstrained body is set). The centroid stays put.
+   */
+  scaleBody(bodyId: number, factor: number): void {
+    const body = this.getBody(bodyId);
+    if (!body || !(factor > 0) || factor === 1) return;
+    body.controlLocal = body.controlLocal.map((p) => scale(p, factor));
+    body.radius *= factor;
+    const attached = this.joints.filter((j) => j.bodyId === bodyId);
+    for (const j of attached) j.local = scale(j.local, factor);
+    this.rebuildBody(body); // re-anchors joints at their (already scaled) world positions
+    const owned = new Set(attached.map((j) => j.id));
+    for (const c of this.constraints) {
+      if (c.kind === "ground" && owned.has(c.joint)) {
+        const j = this.getJoint(c.joint);
+        if (j) c.anchor = this.jointWorld(j);
+      }
+    }
+    for (const m of this.measurements) {
+      for (const ref of [m.refA, m.refB]) {
+        if (ref.kind === "bodyPoint" && ref.bodyId === bodyId) ref.local = scale(ref.local, factor);
+      }
+    }
   }
 
   getBody(id: number): Body | undefined {
@@ -1011,6 +1174,7 @@ export class Scene {
       (c) => c.kind !== "linearActuator" || sliderIds.has(c.sliderId)
     );
     this.pruneMeasurements();
+    this.pruneSketch();
   }
 
   /**
@@ -1027,6 +1191,7 @@ export class Scene {
       );
     }
     this.pruneMeasurements();
+    this.pruneSketch();
   }
 
   clear(): void {
@@ -1034,6 +1199,7 @@ export class Scene {
     this.joints = [];
     this.constraints = [];
     this.measurements = [];
+    this.sketch = [];
     this.nextId = 1;
   }
 
@@ -1045,6 +1211,7 @@ export class Scene {
       joints: this.joints,
       constraints: this.constraints,
       measurements: this.measurements,
+      sketch: this.sketch,
     };
   }
 
@@ -1090,11 +1257,20 @@ export class Scene {
           labelOffset: vec(m.labelOffset.x, m.labelOffset.y),
         }))
       : [];
+    // Sketch constraints arrived in v8; older files simply have none.
+    this.sketch = Array.isArray(data.sketch)
+      ? data.sketch.map((c) => ({
+          ...c,
+          refA: cloneMeasureRef(c.refA),
+          refB: c.refB ? cloneMeasureRef(c.refB) : null,
+        }))
+      : [];
     const ids = [
       ...this.bodies.map((b) => b.id),
       ...this.joints.map((j) => j.id),
       ...this.constraints.map((c) => c.id),
       ...this.measurements.map((m) => m.id),
+      ...this.sketch.map((c) => c.id),
     ];
     this.nextId = (ids.length ? Math.max(...ids) : 0) + 1;
   }
@@ -1141,6 +1317,25 @@ function pruneConstraint(c: Constraint, removed: Set<number>): Constraint | null
 
 function cloneMeasureRef(r: MeasureRef): MeasureRef {
   return r.kind === "bodyPoint" ? { ...r, local: clone(r.local) } : { ...r };
+}
+
+/** Whether two references name the same element (bodyPoint refs never match). */
+export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
+  if (a.kind !== b.kind) return false;
+  switch (a.kind) {
+    case "joint":
+      return a.jointId === (b as { jointId: number }).jointId;
+    case "vertex":
+    case "edge":
+      return (
+        a.bodyId === (b as { bodyId: number }).bodyId &&
+        a.index === (b as { index: number }).index
+      );
+    case "rail":
+      return a.sliderId === (b as { sliderId: number }).sliderId;
+    default:
+      return false;
+  }
 }
 
 /** Representative centre of a resolved reference (the label anchors to the midpoint of the two). */

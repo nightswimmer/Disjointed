@@ -1,5 +1,5 @@
 /** Canvas rendering of the scene plus transient editor/sim overlays. */
-import { Scene, MeasureInfo, ResolvedMeasureRef } from "./model";
+import { Scene, MeasureInfo, ResolvedMeasureRef, SketchConstraintKind } from "./model";
 import { Vec2, sub, distToSegment, normalize, scale } from "./geometry";
 import { View } from "./view";
 import { ConstraintBreak } from "./solver";
@@ -16,7 +16,7 @@ export interface RenderInput {
   /** Joints highlighted as in-progress tool picks (connect's first pick, slider rail picks). */
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
-  selection: { kind: "body" | "joint" | "slider" | "measure"; id: number } | null;
+  selection: { kind: "body" | "joint" | "slider" | "measure" | "sketch"; id: number } | null;
   /** Resolved measurements of the current mode (values update live in sim). */
   measurements: MeasureInfo[];
   /**
@@ -28,6 +28,12 @@ export interface RenderInput {
     hover: ResolvedMeasureRef | null;
     preview: MeasureInfo | null;
   } | null;
+  /** Sketch-constraint badges to draw (draw mode only; positions resolved by main). */
+  sketchGlyphs: SketchGlyphView[];
+  /** Constraint-tool state: references picked so far and the one under the cursor. */
+  sketchDraft: { refs: ResolvedMeasureRef[]; hover: ResolvedMeasureRef | null } | null;
+  /** Ids of sketch constraints / dimensions flashing red after a rejected edit. */
+  flash: Set<number> | null;
   /** Control-vertex handles to draw for the selected body (draggable to reshape it). */
   editVertices: Vec2[] | null;
   /**
@@ -83,6 +89,18 @@ export const LIGHT_THEME: Theme = {
   grid: "#d9dce2",
   jointFill: "#3a3d46",
 };
+
+/** One sketch constraint's on-canvas badges (world positions, computed by main). */
+export interface SketchGlyphView {
+  id: number;
+  kind: SketchConstraintKind;
+  badges: Vec2[];
+  /**
+   * Badges are faded by default and fully visible only while the cursor is over one of
+   * the constraint's referenced elements (or a badge itself) — computed by main.
+   */
+  faded: boolean;
+}
 
 /** On-screen joint radius in CSS pixels (kept constant regardless of zoom). */
 const JOINT_R = 6;
@@ -435,26 +453,99 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     }
   }
 
+  // Sketch-constraint badges (draw mode; annotations, so they sit over the geometry).
+  const selectedSketch = input.selection?.kind === "sketch" ? input.selection.id : null;
+  for (const g of input.sketchGlyphs) {
+    drawSketchGlyph(ctx, g, view, dpr, theme, g.id === selectedSketch, !!input.flash?.has(g.id));
+  }
+  if (input.sketchDraft) {
+    const { refs, hover } = input.sketchDraft;
+    if (hover) drawMeasureRefHighlight(ctx, hover, px, true, SKETCH_COLOR);
+    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false, SKETCH_COLOR);
+  }
+
   // Measurements (drawn last: dimension annotations sit on top of everything).
   const selectedMeasure = input.selection?.kind === "measure" ? input.selection.id : null;
   for (const info of input.measurements) {
-    drawMeasurement(ctx, info, view, dpr, theme, info.id === selectedMeasure, false);
+    // CAD convention in draw mode: a driven (reference) dimension shows in parentheses,
+    // a driving one plain. Sim-mode values are always plain read-outs.
+    const paren = input.mode === "draw" && !info.driving;
+    drawMeasurement(
+      ctx, info, view, dpr, theme,
+      info.id === selectedMeasure, false, paren, !!input.flash?.has(info.id)
+    );
   }
   if (input.measureDraft) {
     const { refs, hover, preview } = input.measureDraft;
     if (hover) drawMeasureRefHighlight(ctx, hover, px, true);
     for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false);
-    if (preview) drawMeasurement(ctx, preview, view, dpr, theme, false, true);
+    if (preview) drawMeasurement(ctx, preview, view, dpr, theme, false, true, false, false);
   }
 }
 
 /** Accent colour for measurements (fixed across themes, like the other semantic accents). */
 const MEASURE_COLOR = "#46c2cb";
+/** Accent colour for sketch constraints (violet, distinct from every other accent). */
+const SKETCH_COLOR = "#b48cff";
+/** Rejected sketch edits flash the conflicting items in the error red. */
+const FLASH_COLOR = "#ff4d4d";
 
-/** Compact value text: one decimal, trailing zero dropped; degrees get a ° suffix. */
-function measureText(info: MeasureInfo): string {
+/** Badge symbol per sketch-constraint kind (drawn in the glyph pill). */
+const SKETCH_SYMBOL: Record<SketchConstraintKind, string> = {
+  coincident: "◎",
+  horizontal: "H",
+  vertical: "V",
+  parallel: "∥",
+  perpendicular: "⊥",
+  equal: "=",
+};
+
+/**
+ * Compact value text: one decimal, trailing zero dropped; degrees get a ° suffix.
+ * `paren` wraps the value in parentheses (a driven/reference dimension in draw mode).
+ */
+function measureText(info: MeasureInfo, paren: boolean): string {
   const v = Math.round(info.value * 10) / 10;
-  return info.kind === "angle" ? `${v}°` : `${v}`;
+  const t = info.kind === "angle" ? `${v}°` : `${v}`;
+  return paren ? `(${t})` : t;
+}
+
+/** Draw one sketch constraint's badges: constant-size pills with the kind's symbol. */
+function drawSketchGlyph(
+  ctx: CanvasRenderingContext2D,
+  g: SketchGlyphView,
+  view: View,
+  dpr: number,
+  theme: Theme,
+  selected: boolean,
+  flashed: boolean
+): void {
+  const s = view.scale;
+  const color = flashed ? FLASH_COLOR : selected ? theme.ink : SKETCH_COLOR;
+  // Faded unless the cursor is on the constrained element — selection / a reject flash
+  // always shows at full strength.
+  const alpha = g.faded && !selected && !flashed ? 0.2 : 1;
+  for (const b of g.badges) {
+    const sx = b.x * s + view.tx;
+    const sy = b.y * s + view.ty;
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalAlpha = alpha;
+    ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+    const half = 8;
+    ctx.beginPath();
+    ctx.roundRect(sx - half, sy - half, 2 * half, 2 * half, 4);
+    ctx.fillStyle = theme.surface + "e6";
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = selected || flashed ? 1.6 : 1;
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(SKETCH_SYMBOL[g.kind], sx, sy + 0.5);
+    ctx.restore();
+  }
 }
 
 /** Highlight a measure reference: a ring around a point, a soft thick stroke over a line. */
@@ -462,9 +553,10 @@ function drawMeasureRefHighlight(
   ctx: CanvasRenderingContext2D,
   ref: ResolvedMeasureRef,
   px: (n: number) => number,
-  isHover: boolean
+  isHover: boolean,
+  color: string = MEASURE_COLOR
 ): void {
-  ctx.strokeStyle = MEASURE_COLOR;
+  ctx.strokeStyle = color;
   if (ref.kind === "point") {
     ctx.lineWidth = px(2);
     if (isHover) ctx.setLineDash([px(3), px(3)]);
@@ -510,11 +602,13 @@ function drawMeasurement(
   dpr: number,
   theme: Theme,
   selected: boolean,
-  draft: boolean
+  draft: boolean,
+  paren: boolean,
+  flashed: boolean
 ): void {
   const s = view.scale;
   const px = (n: number) => n / s;
-  const color = selected ? theme.ink : MEASURE_COLOR;
+  const color = flashed ? FLASH_COLOR : selected ? theme.ink : MEASURE_COLOR;
   ctx.strokeStyle = color;
 
   // Extension / leader lines: thin and dashed.
@@ -551,7 +645,7 @@ function drawMeasurement(
   }
 
   // Value label: a pill + text drawn in screen space so it stays legible at any zoom.
-  const text = measureText(info);
+  const text = measureText(info, paren);
   const sx = info.labelPos.x * s + view.tx;
   const sy = info.labelPos.y * s + view.ty;
   ctx.save();
@@ -565,7 +659,7 @@ function drawMeasurement(
   ctx.fillStyle = theme.surface + (draft ? "cc" : "e6");
   ctx.fill();
   ctx.strokeStyle = color;
-  ctx.lineWidth = selected ? 1.6 : 1;
+  ctx.lineWidth = selected || info.driving ? 1.6 : 1; // a driving dimension reads bolder
   ctx.stroke();
   ctx.fillStyle = color;
   ctx.textAlign = "center";
