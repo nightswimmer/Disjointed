@@ -9,7 +9,7 @@
  * Looping over all constraints several times converges the whole mechanism.
  */
 import { Body, Joint, Scene } from "./model";
-import { Vec2, add, rotate, cross, perp, scale, sub, len, dot } from "./geometry";
+import { Vec2, add, rotate, cross, perp, scale, sub, len, lenSq, dot } from "./geometry";
 
 /**
  * The mouse driver: pull a point toward `target`. The point is either an existing joint
@@ -98,6 +98,103 @@ function bodyImpulse(body: Body, point: Vec2, imp: Vec2): void {
   body.angle += body.invInertia * cross(r, imp);
 }
 
+// --- permanent body groups (rigid composites) ------------------------------
+/**
+ * Per-solve view of the scene's permanent groups: every grouped body maps to its group's
+ * (shared) member list and group id. Grouped bodies act as a **single rigid body**: any
+ * impulse on a member is applied to the whole group about the combined centroid, so the
+ * members never move relative to each other. Rebuilt at the top of each `solve` call
+ * (module-level because it threads through every host helper; solve is not reentrant).
+ */
+interface GroupCtx {
+  members: Map<number, Body[]>; // body id → the group's member bodies (shared array)
+  groupIdOf: Map<number, number>; // body id → group id
+}
+let groupCtx: GroupCtx = { members: new Map(), groupIdOf: new Map() };
+
+function buildGroupCtx(scene: Scene): GroupCtx {
+  const ctx: GroupCtx = { members: new Map(), groupIdOf: new Map() };
+  for (const g of scene.groups) {
+    const bodies = g.bodyIds
+      .map((id) => scene.getBody(id))
+      .filter((b): b is Body => b !== undefined);
+    if (bodies.length < 2) continue;
+    for (const b of bodies) {
+      ctx.members.set(b.id, bodies);
+      ctx.groupIdOf.set(b.id, g.id);
+    }
+  }
+  return ctx;
+}
+
+/** Whether two bodies are rigid to each other: the same body, or members of one group. */
+function sameRigid(aBodyId: number | null, bBodyId: number | null): boolean {
+  if (aBodyId === null || bBodyId === null) return false;
+  if (aBodyId === bBodyId) return true;
+  const ga = groupCtx.groupIdOf.get(aBodyId);
+  return ga !== undefined && ga === groupCtx.groupIdOf.get(bBodyId);
+}
+
+/** Combined mass properties of a group, from the members' current poses. */
+function groupProps(members: Body[]): { c: Vec2; invMass: number; invInertia: number } {
+  let mass = 0;
+  let cx = 0;
+  let cy = 0;
+  for (const b of members) {
+    const m = 1 / b.invMass;
+    mass += m;
+    cx += m * b.pos.x;
+    cy += m * b.pos.y;
+  }
+  const c = { x: cx / mass, y: cy / mass };
+  let inertia = 0;
+  for (const b of members) {
+    // Parallel-axis: each member's inertia about its own centroid plus m·d² to the combined one.
+    inertia += 1 / b.invInertia + (1 / b.invMass) * lenSq(sub(b.pos, c));
+  }
+  return { c, invMass: 1 / mass, invInertia: 1 / inertia };
+}
+
+/**
+ * Apply impulse `imp` at world `point` to a whole group: translate all members together and
+ * rotate them rigidly about the combined centroid (the group-rigid analogue of `bodyImpulse`).
+ */
+function groupImpulse(members: Body[], point: Vec2, imp: Vec2): void {
+  const { c, invMass, invInertia } = groupProps(members);
+  const dpos = scale(imp, invMass);
+  const dang = invInertia * cross(sub(point, c), imp);
+  for (const b of members) {
+    b.pos = add(add(c, dpos), rotate(sub(b.pos, c), dang));
+    b.angle += dang;
+  }
+}
+
+/** Host acting at `point` on a body — or, when the body is grouped, on its whole group. */
+function bodyHostAt(body: Body, point: Vec2): Host {
+  const members = groupCtx.members.get(body.id);
+  if (members) {
+    const { c, invMass, invInertia } = groupProps(members);
+    return {
+      point,
+      pos: c,
+      invMass,
+      invInertia,
+      apply(imp) {
+        groupImpulse(members, point, imp);
+      },
+    };
+  }
+  return {
+    point,
+    pos: body.pos,
+    invMass: body.invMass,
+    invInertia: body.invInertia,
+    apply(imp) {
+      bodyImpulse(body, point, imp);
+    },
+  };
+}
+
 /**
  * Resolve a joint to its solver host **for its own ground constraint**: a body-attached
  * point, or a free point. A grounded *free* joint is an immovable anchor; a grounded *body*
@@ -124,15 +221,7 @@ function hostFor(scene: Scene, joint: Joint, grounded: Set<number>): Host {
   }
   const body = scene.getBody(joint.bodyId)!;
   const point = add(body.pos, rotate(joint.local, body.angle));
-  return {
-    point,
-    pos: body.pos,
-    invMass: body.invMass,
-    invInertia: body.invInertia,
-    apply(imp) {
-      bodyImpulse(body, point, imp);
-    },
-  };
+  return bodyHostAt(body, point); // a grouped body moves as its whole group
 }
 
 /** An immovable world point (a ground anchor or the mouse target). */
@@ -167,15 +256,7 @@ function driverHost(scene: Scene, driver: Driver, grounded: Set<number>): Host |
     const body = scene.getBody(driver.bodyId);
     if (!body) return null;
     const point = add(body.pos, rotate(driver.local, body.angle));
-    return {
-      point,
-      pos: body.pos,
-      invMass: body.invMass,
-      invInertia: body.invInertia,
-      apply(imp) {
-        bodyImpulse(body, point, imp);
-      },
-    };
+    return bodyHostAt(body, point); // grabbing a grouped body drags the whole group
   }
   return null;
 }
@@ -273,6 +354,17 @@ function railKind(ja: Joint, jb: Joint, grounded: Set<number>): "body" | "fixed"
 /** Build the rail's reaction host for one solve: a moving body, or an immovable world line. */
 function railHostFor(railBody: Body | null, fixedPos: Vec2): RailHost {
   if (railBody) {
+    const members = groupCtx.members.get(railBody.id);
+    if (members) {
+      // A grouped rail body reacts as its whole group (rigid composite).
+      const { c, invMass, invInertia } = groupProps(members);
+      return {
+        pos: c,
+        invMass,
+        invInertia,
+        applyAt: (pt, imp) => groupImpulse(members, pt, imp),
+      };
+    }
     return {
       pos: railBody.pos,
       invMass: railBody.invMass,
@@ -308,6 +400,9 @@ function sweepStructural(
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
+      // A pin between two bodies of one group is inert: the group is rigid, so the pin
+      // can't change their relative pose (it would only fight the rigidity).
+      if (sameRigid(ja.bodyId, jb.bodyId)) continue;
       solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
@@ -325,7 +420,7 @@ function sweepStructural(
         if (skip.has(riderId)) continue;
         const jq = scene.getJoint(riderId);
         if (!jq) continue;
-        if (railBody && jq.bodyId === railBody.id) continue; // rider rigid to the rail: nothing to do
+        if (railBody && sameRigid(jq.bodyId, railBody.id)) continue; // rider rigid to the rail: nothing to do
         // Recompute the rail each rider, since a rider's reaction can move the rail body.
         solveSliderRail(
           pinHostFor(scene, jq, grounded),
@@ -364,7 +459,9 @@ function sweepStructural(
  * (two anchors on one body) settles to the pose that satisfies both.
  */
 function projectGrounds(scene: Scene, anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS): void {
-  const perBody = new Map<number, { sum: Vec2; n: number }>();
+  // Corrections are pooled per rigid unit: a lone body under its own key, a grouped body
+  // under its group's key (the whole group translates together, keeping it rigid).
+  const perUnit = new Map<string, { sum: Vec2; n: number; bodies: Body[] }>();
   const visit = (joint: Joint, anchor: Vec2): void => {
     if (joint.bodyId === null) {
       joint.local = { x: anchor.x, y: anchor.y };
@@ -374,8 +471,12 @@ function projectGrounds(scene: Scene, anchors: ReadonlyMap<number, Vec2> = NO_AN
     if (!body) return;
     const world = add(body.pos, rotate(joint.local, body.angle));
     const corr = sub(anchor, world);
-    const e = perBody.get(body.id) ?? { sum: { x: 0, y: 0 }, n: 0 };
-    perBody.set(body.id, { sum: add(e.sum, corr), n: e.n + 1 });
+    const groupId = groupCtx.groupIdOf.get(body.id);
+    const key = groupId !== undefined ? `g${groupId}` : `b${body.id}`;
+    const e =
+      perUnit.get(key) ??
+      { sum: { x: 0, y: 0 }, n: 0, bodies: groupCtx.members.get(body.id) ?? [body] };
+    perUnit.set(key, { sum: add(e.sum, corr), n: e.n + 1, bodies: e.bodies });
   };
   for (const con of scene.constraints) {
     if (con.kind !== "ground") continue;
@@ -386,9 +487,9 @@ function projectGrounds(scene: Scene, anchors: ReadonlyMap<number, Vec2> = NO_AN
     const j = scene.getJoint(jointId);
     if (j) visit(j, target);
   }
-  for (const [id, e] of perBody) {
-    const body = scene.getBody(id)!;
-    body.pos = add(body.pos, scale(e.sum, 1 / e.n));
+  for (const e of perUnit.values()) {
+    const corr = scale(e.sum, 1 / e.n);
+    for (const body of e.bodies) body.pos = add(body.pos, corr);
   }
 }
 
@@ -459,6 +560,7 @@ function eachUnit(
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
+      if (sameRigid(ja.bodyId, jb.bodyId)) continue; // intra-group pin: inert, never an error
       const a = scene.jointWorld(ja);
       const b = scene.jointWorld(jb);
       visit({ id: con.id, a, b, error: len(sub(a, b)), ground: false, joints: [con.jointA, con.jointB] });
@@ -479,6 +581,7 @@ function eachUnit(
       for (const riderId of con.riders) {
         const jq = scene.getJoint(riderId);
         if (!jq) continue;
+        if (sameRigid(jq.bodyId, ja.bodyId)) continue; // rider rigid to its rail: inert
         const q = scene.jointWorld(jq);
         const s = Math.max(0, Math.min(dl, dot(sub(q, a0), dir))); // nearest point on the rail segment
         const closest = add(a0, scale(dir, s));
@@ -565,7 +668,7 @@ function applyBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<nu
       for (const riderId of con.riders) {
         if (!broken.has(riderId)) continue;
         const jq = scene.getJoint(riderId);
-        if (!jq || (railBody && jq.bodyId === railBody.id)) continue;
+        if (!jq || (railBody && sameRigid(jq.bodyId, railBody.id))) continue;
         solveSliderRail(
           pinHostFor(scene, jq, grounded),
           scene.jointWorld(ja),
@@ -658,6 +761,7 @@ export function solve(
   anchors: ReadonlyMap<number, Vec2> = NO_ANCHORS,
   stats?: SolveStats
 ): ConstraintBreak[] {
+  groupCtx = buildGroupCtx(scene); // permanent groups act as rigid composites this solve
   const grounded = groundedJoints(scene, anchors);
   // Initialise stats: callers that pass `stats` see these zeroed even on early return.
   if (stats) {

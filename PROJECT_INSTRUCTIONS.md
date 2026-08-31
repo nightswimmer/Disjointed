@@ -89,6 +89,21 @@ Delete to remove. **Sketch-aware dragging**: draw-mode drags (nodes, joints, bod
 rotates live-solve the sketch, CAD-style. **Auto-constraints** while drawing freehand: a
 near-H/V edge (±5°) gets the H/V constraint; a vertex clicked on an existing joint/corner
 lands exactly there and gets a coincident.
+**Multi-selection & permanent groups** (draw mode, serialization v9): **Ctrl/Cmd+click**
+toggles bodies (and free joints) in a multi-selection; **box select** (left-drag on empty
+space) selects bodies fully inside the marquee plus free joints inside it (Ctrl+drag adds).
+A multi-selection **moves together** (drag any member), deletes together, copies together.
+**G** with 2+ bodies selected makes a **permanent group** (Ctrl+G ungroups; overlapping
+groups merge). Groups are **selection-atomic** (clicking any member selects — and drags /
+rotates / mirrors / copies — the whole group) and behave as a **single rigid body in
+simulation**: the solver treats a group as one composite (combined mass/centroid/inertia;
+every impulse moves the whole group; intra-group pins/riders are inert). A group shows a
+faint dashed convex hull **only while selected**. Copy/paste is generalized to whole
+selections (`SelectionClip`): pins **between** copied bodies, group membership, free
+joints, grounds, internal sliders, and internal sketch constraints / driving dimensions
+all travel. Mirror reflects a multi-selection about its combined bbox centre; Rotate turns
+it rigidly about that centre — and `mirrorBody` now **remaps vertex/edge/bodyPoint refs**
+(the control-polygon reversal used to leave constraints pointing at the wrong corners).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -156,20 +171,38 @@ lands exactly there and gets a coincident.
     pin shows as a dotted connector until sim closes it), and rounding a freehand body's
     corner after linking dissolves that link on the next drag (the control corner leaves the
     rounded outline, where a joint may not go).
+  - **Permanent groups** (`groups: BodyGroup[]`, a `BodyGroup` = `{ id, bodyIds }`): a body
+    belongs to at most one group; groups need ≥ 2 members. `groupOf(bodyId)`;
+    `addGroup(bodyIds)` (absorbs/merges any group touching the ids); `ungroup(bodyIds)`
+    (dissolves every group touched); `pruneGroups()` (drops removed bodies, dissolves
+    < 2-member groups — called from `removeBody` and `load`). Groups make their members
+    move together in draw mode (main.ts) and act as one rigid body in sim (solver.ts).
   - Edit utilities: `rotateBody(id, pivot, delta)` rigidly turns a body about a fixed world
     point (joints follow; ground anchors rotate too; no rebuild needed). `mirrorBody(id, "h"|"v")`
     reflects the control polygon + attached joints + their ground anchors across a centroid axis,
     reversing winding so the fillet/offset stays valid (centroid is fixed, so the body doesn't
-    move). Copy/paste: `extractBody(id)` snapshots a `BodyClip` (control polygon + its joints +
-    the constraints referencing *only* those joints — grounds, fully-internal sliders, intra-body
-    pins; cross-body pins are dropped), stored in world coords relative to the original centroid;
-    the clip also carries the body's **`color`**, plus its **fully-internal sketch constraints
-    and driving dimensions** (both refs on the body's own vertices/edges/frame, its joints, or a
-    copied internal rail — anything referencing an outside element is dropped, like cross-body
-    pins; driven reference dimensions are annotations and aren't copied). `insertBody(clip, at)`
-    translates the whole fragment so the centroid lands at `at`, recreates everything with fresh
-    ids (joint + slider ids remapped into the constraint/dimension refs), and restores the
-    colour. No re-solve is needed on paste: everything carried is translation-invariant.
+    move) — and **remaps every vertex/edge sketch-constraint & measurement ref** to track the
+    renumbered corners (vertex `i → n−1−i`, edge `i → n−2−i` wrapping), re-baking `bodyPoint`
+    refs onto the reflected material, so constraints stay on the right elements (reflection
+    preserves every constraint kind: H stays H, V stays V, the rest are reflection-invariant).
+    `mirrorBodies(bodyIds, freeJointIds, axis)` mirrors a whole selection about the centre of
+    its **combined bounding box**: each body mirrors in place + its centroid reflects across
+    the shared axis, free joints reflect their position — cross-body pins stay coincident.
+    Copy/paste: `extractSelection(bodyIds, freeJointIds?)` snapshots a **`SelectionClip`** —
+    one or more bodies (control polygon, radius/round, **colour**), their joints, selected
+    free joints, and every constraint whose joints all travel with the clip: grounds, internal
+    sliders, and pins **including pins between copied bodies** (anything reaching outside the
+    selection is dropped), plus **group membership** among the copied bodies and the
+    fully-internal sketch constraints / driving dimensions (driven reference dimensions are
+    annotations and aren't copied). `clip.center` is the mass-weighted centre of the copied
+    bodies (= the centroid for a single body; the joints' average for a body-less clip).
+    `insertSelection(clip, at)` translates the whole fragment so `center` lands at `at`,
+    recreates everything with fresh ids (body + joint + slider ids remapped into the
+    constraint/dimension refs; grounds created **before** sliders so `addSlider`'s
+    auto-grounding doesn't double-ground a copied fixed track; groups recreated) and returns
+    `{ bodyIds, freeJointIds }` for re-selection. No re-solve is needed on paste: everything
+    carried is translation-invariant. `extractBody(id)` / `insertBody(clip, at)` remain as
+    single-body convenience wrappers.
   - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
     (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
     `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
@@ -214,11 +247,12 @@ lands exactly there and gets a coincident.
     uniformly about its centroid — control polygon, corner radius, attached joints, their
     ground anchors, and `bodyPoint` measurement refs all together.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 8`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 9`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
-    constraints or driving flags — all load fine as-is).
+    constraints or driving flags, pre-v9 files no groups — all load fine as-is; loaded
+    groups are pruned against the loaded bodies).
 - **solver.ts** — `solve(scene, driver, iterations, relax, anchors?, stats?): ConstraintBreak[]` (each
   `ConstraintBreak` carries `a`/`b`/`error` plus a `joints: number[]` list naming the joints
   involved — pin endpoints, the grounded joint, an unreachable slider rider, or the anchor's joint
@@ -239,8 +273,18 @@ lands exactly there and gets a coincident.
   cleanup sweeps run, and the final residual. Phase A **early-exits** once the structural
   residual is under tolerance — but **only when no driver is present**: the driver is
   step-limited (`DRIVER_MAX_STEP` per sweep), so a weakly-constrained grab keeps residual ≈ 0
-  and an unconditional early-exit would starve the drag to one pull per solve. See "Solver
-  notes" below.
+  and an unconditional early-exit would starve the drag to one pull per solve.
+  **Permanent groups as rigid composites**: `solve` builds a per-call `groupCtx`
+  (body id → member list / group id, module-level since solve isn't reentrant); a grouped
+  body's host (`bodyHostAt`, used by `hostFor` / `driverHost` / `railHostFor`) carries the
+  group's **combined** mass, centroid, and inertia (parallel-axis), and `groupImpulse`
+  translates + rotates **all members about the combined centroid** — so pins, sliders,
+  grounds, the mouse driver, and motor/actuator anchors on any member move the whole group
+  as one rigid body. `projectGrounds` pools ground corrections **per rigid unit** (per
+  group, or per lone body) and translates all members together. `sameRigid(a, b)` (same
+  body or same group) makes **intra-group pins and riders inert**: skipped in the sweeps
+  and excluded from residuals/breaks (the group is rigid — they could only fight it).
+  See "Solver notes" below.
 - **sketch.ts** — the **sketch solver** (draw-mode only; the sim solver is untouched).
   Gauss-Seidel projection like solver.ts, but the variables are *shape*: the world
   positions of body **control vertices** (`v:body:index`) and **joints** (`j:id`) — a
@@ -316,6 +360,12 @@ lands exactly there and gets a coincident.
   pill border (`measureText(info, paren)`); `flash: Set<number>` paints the constraints /
   dimensions a rejected sketch edit named in the error red for a moment. Selection kind
   `"sketch"` highlights a badge in ink.
+  **Multi-selection & groups**: `multiSelected: { bodies, joints } | null` highlights every
+  member like a normal selection (bodies get the ink outline, free joints the selected
+  ring); `marquee: { a, b } | null` draws the in-progress box selection (dashed rect +
+  translucent fill); each **permanent group** draws a faint dashed **convex hull** around
+  its members — but **only while the group is selected** (any member in `multiSelected`;
+  never in sim, where `multiSelected` is null).
 - **main.ts** — canvas/DPI setup, toolbar wiring (the toolbar is **icon buttons** — SVG glyphs with
   tooltips; wiring is by id/`data-*`/class, never button text), mode/tool state (tools are one-shot +
   have keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
@@ -418,14 +468,37 @@ lands exactly there and gets a coincident.
     toggle). Change-detected so editing the speed input mid-drag doesn't get clobbered.
     `selectedLinearActuator()` and `selectedMotor()` find the constraint the current `selection`
     identifies (rider / slider for actuators; body / pivot / crank for motors).
-  - **Edit utilities**: `copySelection`/`pasteAt` (clipboard is a `BodyClip` held in `main`;
-    paste lands at the cursor, grid-snapped), `mirrorSelection("h"|"v")`, and a **rotate** tool.
-    Rotate is a persistent mode (not one-shot): `startRotate` picks the pivot (a control node of
-    the selected body if grabbed, else the centroid of the body under the cursor) and a
-    `rotateDrag` tracks the pointer's swing about it — accumulated/unwrapped so it survives ±π,
-    with the resulting absolute body angle snapped to 45° (`snapAngle`/`ROTATE_SNAP_TOL`) and only
-    the incremental delta applied per move via `scene.rotateBody`. Copy/paste are also on
-    `Ctrl/Cmd+C`/`V`; rotate on `R`.
+  - **Multi-selection** (`multiSel: { bodies, joints } | null`, draw mode, mutually exclusive
+    with the single `selection`): **Ctrl/Cmd+click** toggles the body / free joint under the
+    cursor (`toggleMultiAt`, seeded from the single selection; a grouped body toggles its
+    whole group); **box select** (`boxSelect` state → `applyBoxSelect`) starts on a
+    left-drag from empty space (Ctrl+drag = additive) and selects bodies **fully inside**
+    the rectangle plus free joints inside it — a non-moved press stays a plain
+    click-to-deselect. `setMulti` commits a selection: expands permanent groups
+    (**selection-atomic** — `handleSelectClick` on a grouped body selects the whole group),
+    prunes dead ids, and collapses a single ungrouped body / free joint back to a normal
+    single selection. Clicking any member drags the whole set (`LeftDrag` kind `"multi"`:
+    same delta via `moveBody`/`moveJoint` per member; snap anchor = nearest
+    centroid/corner/joint to the grab). Delete removes every member; Esc / plain click
+    elsewhere clears. **G** with ≥ 2 bodies selected → `groupSelection()`
+    (`scene.addGroup`; with fewer, G falls through to arming the Ground tool as before);
+    **Ctrl/Cmd+G** → `ungroupSelection()`. Renderer inputs `multiSelected` + `marquee`.
+  - **Edit utilities**: `copySelection`/`pasteAt` (clipboard is a `SelectionClip` held in
+    `main` — a multi-selection copies via `extractSelection` with everything internal to it,
+    incl. cross-body pins and group membership; a single body via `extractBody`; paste lands
+    at the cursor, grid-snapped, and re-selects the copy via `setMulti`),
+    `mirrorSelection("h"|"v")` (multi-selection / group → `scene.mirrorBodies` about the
+    combined bbox centre; single body → `mirrorBody` about its centroid), and a **rotate**
+    tool. Rotate is a persistent mode (not one-shot): `startRotate` picks the pivot — a
+    control node of the singly-selected body if grabbed; the **centre of the combined bbox**
+    when the grabbed body is part of the multi-selection (or of a permanent group, which
+    gets auto-selected); else the body's centroid — and a `rotateDrag`
+    (`bodyIds`/`jointIds`) tracks the pointer's swing about it — accumulated/unwrapped so it
+    survives ±π, with the first body's absolute angle snapped to 45°
+    (`snapAngle`/`ROTATE_SNAP_TOL`) and only the incremental delta applied per move:
+    `scene.rotateBody` per body about the shared pivot + selected free joints orbiting it —
+    a rigid rotation of the whole selection. Arming rotate keeps an existing single *or*
+    multi selection. Copy/paste are also on `Ctrl/Cmd+C`/`V`; rotate on `R`.
   - **Theme** (`#theme-btn`): a dark/light toggle that sets `data-theme` on `<html>` (CSS vars drive
     the chrome) and passes the matching `DARK_THEME`/`LIGHT_THEME` palette to the renderer; the
     choice persists in `localStorage` (`disjointed:theme`, separate from scene autosave).
@@ -507,22 +580,41 @@ Select mode (default, no tool armed):
   **Double-click** an edge of the selected body to add a control node there (`insertBodyVertex`,
   grid-snapped), or a node to remove it (`removeBodyVertex`, kept ≥ 3). Clicking on/near the
   selected body's control polygon keeps it selected (so an edge double-click isn't lost).
+- **Multi-selection**: **Ctrl/Cmd+click** toggles bodies (and free joints) in and out of a
+  multi-selection; **box select** — left-drag on empty space — selects every body fully
+  inside the marquee plus the free joints inside it (Ctrl+drag adds to the selection).
+  Dragging any selected element **moves the whole selection together**; Delete removes it
+  all; a plain click elsewhere (or Esc) clears it. A single ungrouped body collapses back
+  to a normal selection.
+- **Permanent groups**: with 2+ bodies multi-selected, **G** groups them permanently
+  (**Ctrl/Cmd+G** ungroups; grouping into an existing group merges). Groups are
+  selection-atomic — clicking any member selects the whole group — and show a faint dashed
+  hull **while selected**. In draw mode they move/rotate/mirror/copy as one; in **sim they
+  are one rigid body** (see solver notes). With fewer than 2 bodies selected, G still arms
+  the Ground tool.
 - `Delete` removes the selection: a body takes its joints/constraints with it; a slider keeps
   its joints; a joint detaches from any rail and any constraints referencing it go; a
   measurement just disappears (measurements are also cascade-removed with their elements).
 - A **measurement's value label** is the topmost pick: click to select it, drag to reposition
   (a point–point measurement re-derives h/v/direct from the new spot), Delete to remove —
   this works in **sim mode** too, without disturbing the mechanism underneath.
-- **Edit utilities** (act on a selected body): **Copy/Paste** (`Ctrl/Cmd+C`/`V`, **keyboard-only**
-  now — no toolbar buttons) duplicates a body with its joints + own constraints — including its
-  fully-internal sketch constraints and driving dimensions — **keeping its
-  colour**; the copy lands at the cursor (grid-snapped) and is selected. **Mirror H/V** (toolbar,
-  grouped with **Rotate**) reflects the body + joints in place about its centroid.
+- **Edit utilities** (act on the selection — a single body, or a multi-selection / group):
+  **Copy/Paste** (`Ctrl/Cmd+C`/`V`, **keyboard-only** — no toolbar buttons) duplicates the
+  selection with its joints + every constraint internal to it — grounds, internal sliders,
+  pins (including pins **between** the selected bodies), group membership, fully-internal
+  sketch constraints and driving dimensions — **keeping colours**; the copy lands at the
+  cursor (grid-snapped) and is selected. **Mirror H/V** (toolbar, grouped with **Rotate**)
+  reflects a single body in place about its centroid, or a multi-selection / group about
+  the centre of its combined bounding box (constraint refs are remapped, so mirrored
+  geometry keeps its constraints on the right corners/edges).
 
 Rotate tool (`R`, draw mode — a mode, not one-shot):
 - Drag a body to rotate it about its **centroid**; drag a **control node** of the already-selected
-  body to rotate about that node. The body's absolute angle snaps to the nearest 45° when within
-  ~2°. Joints and ground anchors rotate rigidly with the body. Esc / another tool exits.
+  body to rotate about that node. A body in the **multi-selection** (or a **permanent group**,
+  which gets auto-selected) rotates the **whole selection rigidly** about the centre of its
+  combined bounding box — selected free joints orbit with it. The (first) body's absolute angle
+  snaps to the nearest 45° when within ~2°. Joints and ground anchors rotate rigidly with the
+  body. Arming rotate keeps the current selection. Esc / another tool exits.
 
 Simulate mode:
 - Drag any joint, or any part of a body. It becomes the driver; the grabbed point follows the
@@ -697,6 +789,19 @@ Persistence:
   index remapping across `insertBodyVertex`/`removeBodyVertex`; a bodyPoint ref riding its
   body's frame; cascade removal (joint / slider / body); serialize/load round-trip (modes,
   values, deep copy, `nextId`) and pre-v7 files loading with no measurements.
+- **groups.ts** — permanent groups end-to-end (59 checks): group management (`addGroup`
+  needs 2+ bodies, overlap-merge, `groupOf`, `ungroup`, prune on `removeBody`, dissolve
+  < 2); serialize/load v9 round-trip + legacy files with no groups; **rigid sim behaviour**
+  (driving any member carries the rest with the relative pose exact to ~1e-13; a ground on
+  one member anchors the whole group, which pivots about it; an intra-group pin is inert —
+  never a break, never moves anything; an external pin holds while the group is towed; a
+  rider on a grouped body slides its whole group along a fixed track); **selection
+  copy/paste** (`extractSelection`/`insertSelection`: cross-body pin kept, group + free
+  joint carried, colours preserved, centre lands at the drop point, spacing/offsets exact);
+  **multi mirror** (`mirrorBodies` reflects centroids + free joints about the bbox centre,
+  cross-body pin stays coincident); **shared-pivot rotation** rigidity; and the **mirror
+  ref-remap fix** (vertex/edge refs follow their corners/edges through a mirror; a sketch
+  solve right after mirroring — or after mirroring + dragging the group — is a no-op).
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
@@ -764,23 +869,35 @@ Persistence:
   8 units/frame instead of tracking the cursor. Fixed: the early-exit only fires when **no driver
   is present** (the pure-animation case it was built for); with a driver the loop runs the full
   budget, as before.
+- **Mirror left sketch constraints / measurements pointing at the wrong corners.**
+  `mirrorBody` reverses the control polygon (to keep the winding valid for the rounding),
+  but vertex/edge refs are index-based — after the reversal "vertex 0" / "edge 2" silently
+  named a *different* corner/edge, so an H constraint could land on a vertical edge. The
+  mirrored geometry looked right, but the next sketch solve (e.g. dragging the mirrored
+  group) snapped everything to satisfy the mis-aimed constraints. Fixed in `mirrorBody`
+  itself (covers single-body and group mirrors): vertex `i → n−1−i`, edge `i → n−2−i`
+  (wrapping), and `bodyPoint` refs re-baked onto the reflected material. Reflection itself
+  preserves every constraint kind, so after the remap everything stays satisfied.
 
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);
   an auto-constraint on/off toggle in the toolbar; auto-coincident while *dragging* (today
-  it's inferred only while drawing); constraint badges could use hover feedback; sketch
-  constraints aren't remapped by `mirrorBody` (same as measurements) — copy/paste **does**
-  carry the fully-internal ones (+ driving dimensions) since format-v8 follow-up work.
-- Measurement follow-ups: `mirrorBody` doesn't remap vertex/edge/bodyPoint measurement refs;
-  copy/paste doesn't carry *driven* (reference) measurements (consistent with
-  actuators/motors; driving dimensions are carried, as constraints).
+  it's inferred only while drawing); constraint badges could use hover feedback.
+  (`mirrorBody` now remaps constraint/measurement refs; copy/paste carries the
+  fully-internal ones + driving dimensions.)
+- Measurement follow-ups: copy/paste doesn't carry *driven* (reference) measurements
+  (consistent with actuators/motors; driving dimensions are carried, as constraints).
+- **Group follow-ups**: permanent groups contain bodies only (free joints can be
+  multi-selected and moved, but not made group members); reshaping a grouped body's
+  outline in draw mode is still per-body (groups constrain sim + move-together, not
+  draw-mode shape editing).
 - More joint types as needed.
 - Joint containment covers placement + drags only (by choice): **reshaping** a body (corner
   handles, radius shrink, vertex removal) can still strand an already-placed joint outside the
   new outline. If that bites, clamp stranded joints back in `rebuildBody`.
 - **Actuator / motor follow-ups**: editing speed/profile while in sim (selection clears on mode
   change today, so the inline panel only appears in draw); copy/paste carrying actuators + motors
-  in the `BodyClip` (today the body + its joints survive but the powered constraints don't).
+  in the `SelectionClip` (today the body + its joints survive but the powered constraints don't).
 - **Auto-pause false positives — investigation in progress.** The "auto-pause on impossible"
   feature works for genuinely unreachable configurations, and a 3-frame debounce filters obvious
   solver chatter — but the animation still pauses on some borderline complex closed-loop scenes

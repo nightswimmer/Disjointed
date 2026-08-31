@@ -1,6 +1,6 @@
 /** Canvas rendering of the scene plus transient editor/sim overlays. */
 import { Scene, MeasureInfo, ResolvedMeasureRef, SketchConstraintKind } from "./model";
-import { Vec2, sub, distToSegment, normalize, scale } from "./geometry";
+import { Vec2, sub, distToSegment, normalize, scale, convexHull } from "./geometry";
 import { View } from "./view";
 import { ConstraintBreak } from "./solver";
 
@@ -17,6 +17,10 @@ export interface RenderInput {
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
   selection: { kind: "body" | "joint" | "slider" | "measure" | "sketch"; id: number } | null;
+  /** Draw-mode multi-selection (Ctrl+click / box select): bodies + free joints, highlighted. */
+  multiSelected: { bodies: number[]; joints: number[] } | null;
+  /** In-progress box selection: the rectangle's two world corners, or null. */
+  marquee: { a: Vec2; b: Vec2 } | null;
   /** Resolved measurements of the current mode (values update live in sim). */
   measurements: MeasureInfo[];
   /**
@@ -173,9 +177,11 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   // Bodies.
   const selectedBody =
     input.selection?.kind === "body" ? input.selection.id : null;
+  const multiBodies = new Set(input.multiSelected?.bodies ?? []);
+  const multiJoints = new Set(input.multiSelected?.joints ?? []);
   for (const body of scene.bodies) {
     const verts = scene.bodyWorldVerts(body);
-    const isSelected = body.id === selectedBody;
+    const isSelected = body.id === selectedBody || multiBodies.has(body.id);
     const isHover = body.id === input.hoverBody;
     ctx.beginPath();
     verts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
@@ -185,6 +191,30 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.strokeStyle = isSelected ? theme.ink : body.color;
     ctx.lineWidth = px(isSelected || isHover ? 3 : 2);
     ctx.stroke();
+  }
+
+  // Permanent groups: a faint dashed convex hull around a group's members, drawn only
+  // while the group is selected (groups are selection-atomic, so any selected member
+  // means the whole group is).
+  for (const g of scene.groups) {
+    if (!g.bodyIds.some((id) => multiBodies.has(id))) continue;
+    const pts: Vec2[] = [];
+    for (const id of g.bodyIds) {
+      const body = scene.getBody(id);
+      if (body) pts.push(...scene.bodyWorldVerts(body));
+    }
+    if (pts.length < 3) continue;
+    const hull = convexHull(pts);
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    ctx.strokeStyle = theme.ink;
+    ctx.lineWidth = px(1.2);
+    ctx.setLineDash([px(6), px(5)]);
+    ctx.beginPath();
+    hull.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Slider rails (drawn under joints): a bounded segment between the two rail joints,
@@ -354,7 +384,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   for (const j of scene.joints) {
     const p = scene.jointWorld(j);
     const isHover = input.hoverJoint === j.id;
-    const isSelected = input.activeJoints.includes(j.id) || j.id === selectedJointId;
+    const isSelected =
+      input.activeJoints.includes(j.id) || j.id === selectedJointId || multiJoints.has(j.id);
     const isDriver = input.driverJoint === j.id;
     const isBroken = brokenJoints.has(j.id);
     // A body-less joint reads as "loose" (muted dashed ring) only while unconstrained;
@@ -451,6 +482,25 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       ctx.fill();
       ctx.stroke();
     }
+  }
+
+  // Box-selection rectangle (drawn over the geometry, under the annotations).
+  if (input.marquee) {
+    const { a, b } = input.marquee;
+    const x = Math.min(a.x, b.x);
+    const y = Math.min(a.y, b.y);
+    const bw = Math.abs(b.x - a.x);
+    const bh = Math.abs(b.y - a.y);
+    ctx.save();
+    ctx.fillStyle = theme.ink;
+    ctx.globalAlpha = 0.06;
+    ctx.fillRect(x, y, bw, bh);
+    ctx.globalAlpha = 0.7;
+    ctx.strokeStyle = theme.ink;
+    ctx.lineWidth = px(1);
+    ctx.setLineDash([px(5), px(4)]);
+    ctx.strokeRect(x, y, bw, bh);
+    ctx.restore();
   }
 
   // Sketch-constraint badges (draw mode; annotations, so they sit over the geometry).

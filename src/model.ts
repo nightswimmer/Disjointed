@@ -133,6 +133,18 @@ export type Constraint =
   | LinearActuatorConstraint
   | MotorConstraint;
 
+/**
+ * A permanent group of bodies (created from a multi-selection in draw mode). Grouped
+ * bodies are selected and moved as one in draw mode, and behave as a **single rigid
+ * body** in simulation: the solver applies every impulse to the whole group about its
+ * combined centroid, so the members never move relative to each other. A body belongs
+ * to at most one group; groups need at least 2 members (smaller ones dissolve).
+ */
+export interface BodyGroup {
+  id: number;
+  bodyIds: number[];
+}
+
 // --- measurements ---------------------------------------------------------
 
 /** Which mode a measurement belongs to — draw and sim each keep their own set. */
@@ -245,35 +257,41 @@ export interface SceneData {
   measurements?: Measurement[];
   /** Draw-mode sketch constraints. Absent pre-v8. */
   sketch?: SketchConstraint[];
+  /** Permanent body groups. Absent pre-v9. */
+  groups?: BodyGroup[];
 }
 
 /**
- * A self-contained snapshot of a body for copy/paste: its control polygon, the joints
- * attached to it, and the constraints that reference *only* those joints (grounds,
- * fully-internal sliders, intra-body pins). Everything is stored in world coordinates
- * relative to the original centroid; pasting translates the whole fragment so the
- * centroid lands at the drop point. `tmp` ids are the original joint / slider ids,
- * remapped to fresh elements on paste. Cross-body pins can't be reproduced and are
- * dropped, and so is any sketch constraint / driving dimension that references an
- * element outside the body (its own vertices/edges, its joints, its internal rails).
+ * A self-contained snapshot of a selection for copy/paste: one or more bodies (with the
+ * joints attached to them), any free joints included in the selection, and every
+ * constraint whose joints all travel with the clip — grounds, internal sliders,
+ * and pins (including pins *between* copied bodies, which is how a linked pair or a
+ * permanent group copies as a working unit). Permanent groups among the copied bodies
+ * are captured too, so pasting a group yields a new group. Everything is stored in
+ * world coordinates; pasting translates the whole fragment so `center` lands at the
+ * drop point. `tmp` ids are the original body / joint / slider ids, remapped to fresh
+ * elements on paste. Anything referencing an element outside the selection (a pin to
+ * an uncopied body, a cross-selection sketch constraint / driving dimension) is dropped.
  */
-export interface BodyClip {
-  controlWorld: Vec2[];
-  radius: number;
-  round: RoundMode;
-  color: string;
-  centroid: Vec2;
-  joints: { tmp: number; world: Vec2 }[];
+export interface SelectionClip {
+  /** Paste reference: the mass-weighted centre of the copied bodies (a single body's
+   *  own centroid), or the copied joints' average for a body-less clip. */
+  center: Vec2;
+  bodies: { tmp: number; controlWorld: Vec2[]; radius: number; round: RoundMode; color: string }[];
+  /** Copied joints: attached ones carry their body's tmp id, free ones null. */
+  joints: { tmp: number; bodyTmp: number | null; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
   sliders: { tmp: number; railA: number; railB: number; riders: number[] }[];
   pins: { a: number; b: number }[];
+  /** Permanent groups among the copied bodies (member body tmp ids). */
+  groups: number[][];
   /** Fully-internal sketch constraints; refs carry the original ids, remapped on paste. */
   sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null }[];
   /** Fully-internal draw-mode driving dimensions; refs carry the original ids. */
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target: number }[];
 }
 
-const FORMAT_VERSION = 8;
+const FORMAT_VERSION = 9;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -298,6 +316,7 @@ export class Scene {
   constraints: Constraint[] = [];
   measurements: Measurement[] = [];
   sketch: SketchConstraint[] = [];
+  groups: BodyGroup[] = [];
   private nextId = 1;
 
   private id(): number {
@@ -1055,6 +1074,16 @@ export class Scene {
     const c = body.pos;
     const reflect = (w: Vec2): Vec2 =>
       axis === "h" ? vec(2 * c.x - w.x, w.y) : vec(w.x, 2 * c.y - w.y);
+    // bodyPoint refs name a spot fixed in the body's frame — capture their current world
+    // positions now, so they can be re-baked onto the reflected material afterwards.
+    const bodyPoints: { ref: { local: Vec2 }; world: Vec2 }[] = [];
+    for (const m of this.measurements) {
+      for (const ref of [m.refA, m.refB]) {
+        if (ref.kind === "bodyPoint" && ref.bodyId === bodyId) {
+          bodyPoints.push({ ref, world: add(body.pos, rotate(ref.local, body.angle)) });
+        }
+      }
+    }
     // Reflect the control polygon in world space; reverse it to preserve the winding.
     const ctrlWorld = this.bodyControlWorld(body).map(reflect).reverse();
     const attached = this.joints.filter((j) => j.bodyId === bodyId);
@@ -1070,20 +1099,155 @@ export class Scene {
     body.controlLocal = ctrlWorld.map((p) => sub(p, c));
     for (const j of attached) j.local = sub(jointWorlds.get(j.id)!, c);
     this.rebuildBody(body);
+    // The reversal renumbered the control polygon, so vertex/edge refs (sketch constraints
+    // and measurements) must be remapped to keep naming the same — now reflected — corner
+    // or edge: vertex i → n−1−i; edge i (vᵢ→vᵢ₊₁) → n−2−i, wrapping for i = n−1. Without
+    // this, an H/V constraint jumps to a different edge and the next sketch solve drags
+    // the geometry to satisfy the wrong element. (Reflection itself preserves every
+    // constraint kind: H stays H, V stays V, parallel/perpendicular/equal/coincident and
+    // distances are all reflection-invariant.)
+    const n = body.controlLocal.length;
+    const remap = (ref: MeasureRef | null): void => {
+      if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) return;
+      ref.index = ref.kind === "vertex" ? n - 1 - ref.index : (2 * n - 2 - ref.index) % n;
+    };
+    for (const m of this.measurements) {
+      remap(m.refA);
+      remap(m.refB);
+    }
+    for (const sc of this.sketch) {
+      remap(sc.refA);
+      remap(sc.refB);
+    }
+    // bodyPoint refs land on the reflection of the spot they marked (angle is 0 now).
+    for (const bp of bodyPoints) bp.ref.local = sub(reflect(bp.world), body.pos);
   }
 
   /**
-   * Snapshot a body and its dependent features into a copy/paste clip (see `BodyClip`).
-   * Returns null if the body doesn't exist.
+   * Mirror a whole selection (bodies + free joints) across an axis through the centre of
+   * its combined bounding box: every body is mirrored in place, then its centroid is
+   * reflected across the shared axis (in-place reflection + centroid reflection = a true
+   * reflection of the whole arrangement), and free joints reflect their world position.
+   * Pins between selected bodies stay coincident, since both endpoints land on the same
+   * reflected point.
    */
-  extractBody(bodyId: number): BodyClip | null {
-    const body = this.getBody(bodyId);
-    if (!body) return null;
-    const attached = this.joints.filter((j) => j.bodyId === bodyId);
-    const owned = new Set(attached.map((j) => j.id));
-    const grounds: BodyClip["grounds"] = [];
-    const sliders: BodyClip["sliders"] = [];
-    const pins: BodyClip["pins"] = [];
+  mirrorBodies(bodyIds: number[], freeJointIds: number[], axis: "h" | "v"): void {
+    const bodies = [...new Set(bodyIds)]
+      .map((id) => this.getBody(id))
+      .filter((b): b is Body => b !== undefined);
+    const joints = [...new Set(freeJointIds)]
+      .map((id) => this.getJoint(id))
+      .filter((j): j is Joint => j !== undefined && j.bodyId === null);
+    let min = Infinity;
+    let max = -Infinity;
+    const include = (p: Vec2): void => {
+      const v = axis === "h" ? p.x : p.y;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    };
+    for (const b of bodies) this.bodyWorldVerts(b).forEach(include);
+    for (const j of joints) include(this.jointWorld(j));
+    if (!Number.isFinite(min)) return;
+    const c = (min + max) / 2;
+    const reflectDelta = (p: Vec2): Vec2 =>
+      axis === "h" ? vec(2 * (c - p.x), 0) : vec(0, 2 * (c - p.y));
+    for (const b of bodies) {
+      this.mirrorBody(b.id, axis); // mirror in place about its own centroid...
+      this.moveBody(b.id, reflectDelta(b.pos)); // ...then reflect the centroid itself
+    }
+    for (const j of joints) {
+      this.moveJoint(j.id, reflectDelta(this.jointWorld(j)));
+    }
+  }
+
+  // --- permanent body groups ------------------------------------------------
+
+  /** The group a body belongs to, or undefined (a body is in at most one group). */
+  groupOf(bodyId: number): BodyGroup | undefined {
+    return this.groups.find((g) => g.bodyIds.includes(bodyId));
+  }
+
+  /**
+   * Create a permanent group over `bodyIds`. Any existing group touching one of them is
+   * absorbed (grouping is a union — a body belongs to at most one group), so grouping a
+   * selection that includes grouped bodies merges everything into a single group.
+   * Returns the new group, or null when fewer than 2 distinct existing bodies remain.
+   */
+  addGroup(bodyIds: number[]): BodyGroup | null {
+    const members = new Set<number>();
+    for (const id of bodyIds) {
+      if (!this.getBody(id)) continue;
+      const existing = this.groupOf(id);
+      if (existing) existing.bodyIds.forEach((b) => members.add(b));
+      else members.add(id);
+    }
+    if (members.size < 2) return null;
+    this.groups = this.groups.filter((g) => !g.bodyIds.some((b) => members.has(b)));
+    const group: BodyGroup = { id: this.id(), bodyIds: [...members] };
+    this.groups.push(group);
+    return group;
+  }
+
+  /** Dissolve every group containing any of `bodyIds`. Returns whether anything changed. */
+  ungroup(bodyIds: number[]): boolean {
+    const hit = new Set(bodyIds);
+    const before = this.groups.length;
+    this.groups = this.groups.filter((g) => !g.bodyIds.some((b) => hit.has(b)));
+    return this.groups.length !== before;
+  }
+
+  /** Drop removed bodies from groups; a group left with fewer than 2 members dissolves. */
+  private pruneGroups(): void {
+    for (const g of this.groups) g.bodyIds = g.bodyIds.filter((b) => this.getBody(b));
+    this.groups = this.groups.filter((g) => g.bodyIds.length >= 2);
+  }
+
+  /**
+   * Snapshot a selection of bodies (with their joints) and free joints into a copy/paste
+   * clip (see `SelectionClip`). Constraints travel when every joint they reference is in
+   * the copied set — so pins *between* copied bodies are kept, while anything reaching
+   * outside the selection is dropped. Permanent groups among the copied bodies travel
+   * too. Returns null when nothing copyable is selected.
+   */
+  extractSelection(bodyIds: number[], freeJointIds: number[] = []): SelectionClip | null {
+    const bodies = [...new Set(bodyIds)]
+      .map((id) => this.getBody(id))
+      .filter((b): b is Body => b !== undefined);
+    const bodyIdSet = new Set(bodies.map((b) => b.id));
+    const freeJoints = [...new Set(freeJointIds)]
+      .map((id) => this.getJoint(id))
+      .filter((j): j is Joint => j !== undefined && j.bodyId === null);
+    const attached = this.joints.filter((j) => j.bodyId !== null && bodyIdSet.has(j.bodyId));
+    const copiedJoints = [...attached, ...freeJoints];
+    if (bodies.length === 0 && copiedJoints.length === 0) return null;
+    const owned = new Set(copiedJoints.map((j) => j.id));
+    // Paste reference: mass-weighted centre of the bodies (a single body's own centroid),
+    // or the joints' average for a body-less clip.
+    let center: Vec2;
+    if (bodies.length > 0) {
+      let m = 0;
+      let cx = 0;
+      let cy = 0;
+      for (const b of bodies) {
+        const bm = 1 / b.invMass;
+        m += bm;
+        cx += bm * b.pos.x;
+        cy += bm * b.pos.y;
+      }
+      center = vec(cx / m, cy / m);
+    } else {
+      let cx = 0;
+      let cy = 0;
+      for (const j of copiedJoints) {
+        const w = this.jointWorld(j);
+        cx += w.x;
+        cy += w.y;
+      }
+      center = vec(cx / copiedJoints.length, cy / copiedJoints.length);
+    }
+    const grounds: SelectionClip["grounds"] = [];
+    const sliders: SelectionClip["sliders"] = [];
+    const pins: SelectionClip["pins"] = [];
     for (const c of this.constraints) {
       if (c.kind === "ground" && owned.has(c.joint)) {
         grounds.push({ joint: c.joint, anchor: clone(c.anchor) });
@@ -1098,8 +1262,14 @@ export class Scene {
         pins.push({ a: c.jointA, b: c.jointB });
       }
     }
-    // A ref is internal when its element travels with the clip: a copied joint, this
-    // body's vertices/edges/frame, or the rail of a copied (fully-internal) slider.
+    // Permanent groups whose members were copied (at least 2 of them) travel with the clip.
+    const groups: number[][] = [];
+    for (const g of this.groups) {
+      const members = g.bodyIds.filter((id) => bodyIdSet.has(id));
+      if (members.length >= 2) groups.push(members);
+    }
+    // A ref is internal when its element travels with the clip: a copied joint, a copied
+    // body's vertices/edges/frame, or the rail of a copied slider.
     const clippedSliders = new Set(sliders.map((s) => s.tmp));
     const internal = (r: MeasureRef | null): boolean => {
       if (!r) return true;
@@ -1109,12 +1279,12 @@ export class Scene {
         case "vertex":
         case "edge":
         case "bodyPoint":
-          return r.bodyId === bodyId;
+          return bodyIdSet.has(r.bodyId);
         case "rail":
           return clippedSliders.has(r.sliderId);
       }
     };
-    const sketch: BodyClip["sketch"] = [];
+    const sketch: SelectionClip["sketch"] = [];
     for (const c of this.sketch) {
       if (internal(c.refA) && internal(c.refB)) {
         sketch.push({
@@ -1124,7 +1294,7 @@ export class Scene {
         });
       }
     }
-    const dims: BodyClip["dims"] = [];
+    const dims: SelectionClip["dims"] = [];
     for (const m of this.measurements) {
       if (
         m.mode === "draw" &&
@@ -1143,38 +1313,66 @@ export class Scene {
       }
     }
     return {
-      controlWorld: this.bodyControlWorld(body).map(clone),
-      radius: body.radius,
-      round: body.round,
-      color: body.color,
-      centroid: clone(body.pos),
-      joints: attached.map((j) => ({ tmp: j.id, world: this.jointWorld(j) })),
+      center,
+      bodies: bodies.map((b) => ({
+        tmp: b.id,
+        controlWorld: this.bodyControlWorld(b).map(clone),
+        radius: b.radius,
+        round: b.round,
+        color: b.color,
+      })),
+      joints: copiedJoints.map((j) => ({ tmp: j.id, bodyTmp: j.bodyId, world: this.jointWorld(j) })),
       grounds,
       sliders,
       pins,
+      groups,
       sketch,
       dims,
     };
   }
 
+  /** Single-body convenience wrapper around `extractSelection`. */
+  extractBody(bodyId: number): SelectionClip | null {
+    return this.getBody(bodyId) ? this.extractSelection([bodyId], []) : null;
+  }
+
   /**
-   * Paste a `BodyClip` so its original centroid lands at `at` (the whole fragment is
-   * translated by `at − clip.centroid`). Recreates the body, its joints, and the clipped
-   * constraints with fresh ids. Returns the new body's id, or null on failure.
+   * Paste a `SelectionClip` so its `center` lands at `at` (the whole fragment is
+   * translated by `at − clip.center`). Recreates the bodies, joints, clipped constraints,
+   * and permanent groups with fresh ids. Returns the new body / free-joint ids (for
+   * re-selecting the pasted fragment), or null on failure.
    */
-  insertBody(clip: BodyClip, at: Vec2): number | null {
-    const offset = sub(at, clip.centroid);
-    const body = this.addBody(
-      clip.controlWorld.map((p) => add(p, offset)),
-      clip.radius,
-      clip.round
-    );
-    if (body.local.length < 3) return null;
-    body.color = clip.color; // paste keeps the source body's colour
-    const idMap = new Map<number, number>(); // tmp id → new joint id
-    for (const j of clip.joints) {
-      idMap.set(j.tmp, this.addJoint(body.id, add(j.world, offset)).id);
+  insertSelection(
+    clip: SelectionClip,
+    at: Vec2
+  ): { bodyIds: number[]; freeJointIds: number[] } | null {
+    const offset = sub(at, clip.center);
+    const bodyIdMap = new Map<number, number>(); // body tmp id → new body id
+    for (const b of clip.bodies) {
+      const body = this.addBody(
+        b.controlWorld.map((p) => add(p, offset)),
+        b.radius,
+        b.round
+      );
+      if (body.local.length < 3) return null;
+      body.color = b.color; // paste keeps the source body's colour
+      bodyIdMap.set(b.tmp, body.id);
     }
+    const idMap = new Map<number, number>(); // joint tmp id → new joint id
+    const freeJointIds: number[] = [];
+    for (const j of clip.joints) {
+      if (j.bodyTmp === null) {
+        const nj = this.addFreeJoint(add(j.world, offset));
+        idMap.set(j.tmp, nj.id);
+        freeJointIds.push(nj.id);
+      } else {
+        const bid = bodyIdMap.get(j.bodyTmp);
+        if (bid === undefined) continue;
+        idMap.set(j.tmp, this.addJoint(bid, add(j.world, offset)).id);
+      }
+    }
+    // Grounds before sliders, so addSlider's auto-grounding of free rail joints sees them
+    // already grounded (a copied world-fixed track keeps exactly one ground per rail joint).
     for (const g of clip.grounds) {
       const id = idMap.get(g.joint);
       if (id !== undefined) this.addGround(id, add(g.anchor, offset));
@@ -1196,6 +1394,10 @@ export class Scene {
       const b = idMap.get(p.b);
       if (a !== undefined && b !== undefined) this.addPin(a, b);
     }
+    for (const g of clip.groups) {
+      const ids = g.map((t) => bodyIdMap.get(t)).filter((x): x is number => x !== undefined);
+      if (ids.length >= 2) this.addGroup(ids);
+    }
     // Recreate the clipped sketch constraints / driving dimensions on the new elements.
     // Everything they express is translation-invariant, so the pasted geometry already
     // satisfies them — no solve needed. Vertex/edge indices carry over unchanged
@@ -1207,11 +1409,14 @@ export class Scene {
           return id === undefined ? null : { kind: "joint", jointId: id };
         }
         case "vertex":
-          return { kind: "vertex", bodyId: body.id, index: r.index };
         case "edge":
-          return { kind: "edge", bodyId: body.id, index: r.index };
-        case "bodyPoint":
-          return { kind: "bodyPoint", bodyId: body.id, local: clone(r.local) };
+        case "bodyPoint": {
+          const bid = bodyIdMap.get(r.bodyId);
+          if (bid === undefined) return null;
+          return r.kind === "bodyPoint"
+            ? { kind: "bodyPoint", bodyId: bid, local: clone(r.local) }
+            : { kind: r.kind, bodyId: bid, index: r.index };
+        }
         case "rail": {
           const id = sliderIdMap.get(r.sliderId);
           return id === undefined ? null : { kind: "rail", sliderId: id };
@@ -1239,7 +1444,12 @@ export class Scene {
         target: d.target,
       });
     }
-    return body.id;
+    return { bodyIds: [...bodyIdMap.values()], freeJointIds };
+  }
+
+  /** Single-body convenience wrapper around `insertSelection`: returns the new body's id. */
+  insertBody(clip: SelectionClip, at: Vec2): number | null {
+    return this.insertSelection(clip, at)?.bodyIds[0] ?? null;
   }
 
   /** Remove a body along with its joints, pruning the constraints that used them. */
@@ -1248,6 +1458,7 @@ export class Scene {
     this.bodies = this.bodies.filter((b) => b.id !== id);
     this.joints = this.joints.filter((j) => j.bodyId !== id);
     this.pruneConstraints(removed);
+    this.pruneGroups();
   }
 
   /** Remove a single joint, pruning the constraints that used it. */
@@ -1298,6 +1509,7 @@ export class Scene {
     this.constraints = [];
     this.measurements = [];
     this.sketch = [];
+    this.groups = [];
     this.nextId = 1;
   }
 
@@ -1310,6 +1522,7 @@ export class Scene {
       constraints: this.constraints,
       measurements: this.measurements,
       sketch: this.sketch,
+      groups: this.groups,
     };
   }
 
@@ -1363,12 +1576,18 @@ export class Scene {
           refB: c.refB ? cloneMeasureRef(c.refB) : null,
         }))
       : [];
+    // Permanent groups arrived in v9; older files simply have none.
+    this.groups = Array.isArray(data.groups)
+      ? data.groups.map((g) => ({ id: g.id, bodyIds: Array.isArray(g.bodyIds) ? g.bodyIds.slice() : [] }))
+      : [];
+    this.pruneGroups(); // drop stale body ids / degenerate groups from hand-edited files
     const ids = [
       ...this.bodies.map((b) => b.id),
       ...this.joints.map((j) => j.id),
       ...this.constraints.map((c) => c.id),
       ...this.measurements.map((m) => m.id),
       ...this.sketch.map((c) => c.id),
+      ...this.groups.map((g) => g.id),
     ];
     this.nextId = (ids.length ? Math.max(...ids) : 0) + 1;
   }

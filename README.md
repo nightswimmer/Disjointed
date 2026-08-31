@@ -25,6 +25,10 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
     speed, sine = smooth ease). Off-animation it behaves like any other rider — draggable, pinnable.
   - **Motor** — a pivot + crank pair on one body; the crank pin orbits the pivot at a configurable
     angular speed (Hz) when animation runs. Off-animation the body behaves normally.
+- **Group** — a permanent set of bodies that acts as **one object**: selected, moved, rotated,
+  mirrored and copied together in Draw mode, and simulated as a **single rigid body** (nothing
+  inside a group can move relative to the rest). Made from a multi-selection with `G`,
+  dissolved with `Ctrl+G`.
 
 ## Usage
 
@@ -44,7 +48,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
 | **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
-| **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
+| **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `L` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
 | **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node, or any point inside a body) or a **line** (a slider rail or a body edge). Works in **both modes** — see *Measurements* below. |
@@ -64,15 +68,26 @@ when Snap is on), or double-click a **node** to remove it (kept to a minimum of 
 **Delete** to remove the selection: a body takes its joints and constraints with it; a slider rail
 leaves its joints; a joint detaches from any rail.
 
-**Editing utilities** (on a selected body):
-- **Copy / Paste** (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`, keyboard only) — duplicate a body together with
-  its joints and the constraints that belong only to it: grounds, fully-internal sliders, and its
-  **sketch constraints and driving dimensions** (the ones referencing only the body's own corners,
-  edges, joints, and internal rails). The copy
-  **keeps the original's colour**, lands at the cursor (grid-snapped when Snap is on) and becomes
-  the selection. Cross-body pins and cross-body constraints aren't reproduced.
-- **Mirror H / V** — reflect the selected body (and its joints) left↔right or top↔bottom, in place
-  about its centroid. Grouped in the toolbar next to **Rotate**.
+**Multi-select & groups.** **Ctrl/Cmd+click** bodies (or free joints) to build a multi-selection,
+or **drag a box** on empty space to select everything fully inside it (Ctrl+drag adds). A
+multi-selection **moves together** — drag any member — and Delete removes it all. With two or
+more bodies selected, press **`G`** to make them a **permanent group** (`Ctrl/Cmd+G` ungroups;
+grouping something already grouped merges). A group behaves as **one object**: clicking any
+member selects the whole group (shown with a dashed outline while selected), it drags, rotates,
+mirrors and copies as a unit — and in **Simulate mode it moves as a single rigid body**. With
+fewer than two bodies selected, `G` still arms the Ground tool.
+
+**Editing utilities** (on the selection — a single body, or a multi-selection / group):
+- **Copy / Paste** (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`, keyboard only) — duplicate the selection with
+  its joints and every constraint internal to it: grounds, internal sliders, **pins between the
+  selected bodies**, **group membership**, and its **sketch constraints and driving dimensions**.
+  The copy **keeps the original colours**, lands at the cursor (grid-snapped when Snap is on) and
+  becomes the selection — pasting a group gives you a new, working group. Anything reaching
+  outside the selection (e.g. a pin to an uncopied body) isn't reproduced.
+- **Mirror H / V** — reflect a selected body left↔right or top↔bottom in place about its centroid;
+  a multi-selection / group reflects about the centre of its combined bounding box. Constraints
+  and dimensions follow their corners/edges through the flip. Grouped in the toolbar next to
+  **Rotate**.
 
 **Measurements.** The Measure tool (`D`) works in **both modes**, and each mode keeps its own
 set of measurements. What gets measured follows from the two references you pick:
@@ -134,7 +149,9 @@ normal (green) rider. While drawing, a constraint whose endpoints don't yet touc
 Drag any joint, or **any part of a body**, to drive the mechanism. The grabbed point follows the
 cursor and every connected body moves with it. Structural constraints always win over the cursor —
 a grounded body can only rotate about its ground point, and the grabbed point walks to the nearest
-position it can actually reach. Your drawn layout is preserved when you switch back to Draw.
+position it can actually reach. A **permanent group** moves as one rigid body: grab any member and
+the whole group translates and rotates together (a ground on one member anchors them all). Your
+drawn layout is preserved when you switch back to Draw.
 
 **Animate (▶ button or `Space`).** With any linear actuators / motors in the scene, press the
 run-animation button in the sim-mode toolbar (or Spacebar) to drive them all at their configured
@@ -188,7 +205,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups
 ```
 
 ## How it works
@@ -215,6 +232,10 @@ two corners so neighbouring fillets never overlap or fold — even on thin shape
 actuator/motor computes a world target for its joint(s) from its phase + speed, and the solver
 takes those targets as additional "moving grounds" — sacred just like a normal ground, so
 pins/sliders propagate the imposed motion through the whole assembly.
+**Permanent groups** are rigid composites in the solver: a grouped body's "host" carries the
+group's combined mass, centroid and inertia, and every impulse translates + rotates **all**
+members about the combined centroid — so pins, sliders, grounds, drags and motors on any member
+move the group as one body, and constraints *between* members of one group are inert.
 **Measurements** store references to elements (a joint, a body node or edge, a rail — never raw
 coordinates) and re-resolve them to world geometry every frame, which is why their values track
 the running simulation for free.

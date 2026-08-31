@@ -2,7 +2,7 @@ import "./style.css";
 import {
   Scene,
   SceneData,
-  BodyClip,
+  SelectionClip,
   LinearActuatorConstraint,
   MotorConstraint,
   Measurement,
@@ -143,21 +143,32 @@ let hoverBody: number | null = null; // body under the cursor in normal mode
 let selectedJoint: number | null = null; // first pick for connect
 let sliderDraftIds: number[] = []; // rail joints picked so far for the slider tool (0–2)
 let selection: Selection | null = null; // element selected in normal mode
+/**
+ * Draw-mode multi-selection (Ctrl+click toggles; box select replaces/extends): bodies and
+ * free joints that move together while selected. Permanent groups are selection-atomic —
+ * touching any member selects all of them. Mutually exclusive with `selection`.
+ */
+let multiSel: { bodies: Set<number>; joints: Set<number> } | null = null;
+/** In-progress box selection (world corners); `additive` = started with Ctrl/Cmd held. */
+let boxSelect: { start: Vec2; end: Vec2; additive: boolean; moved: boolean } | null = null;
 let driver: Driver | null = null;
 /** Constraints the last solve couldn't satisfy (impossible assembly); drives the red overlay + banner. */
 let solveBreaks: ConstraintBreak[] = [];
 /** Body poses saved when entering simulation, restored when leaving. */
 let savedPoses: Map<number, { pos: Vec2; angle: number }> | null = null;
-/** Last body copied (Ctrl+C / Copy button); pasted at the cursor with Ctrl+V / Paste. */
-let clipboard: BodyClip | null = null;
+/** Last selection copied with Ctrl+C (one body, or a multi-selection / permanent group,
+ *  with everything internal to it); pasted at the cursor with Ctrl+V. */
+let clipboard: SelectionClip | null = null;
 /**
- * Active rotate (rotate tool): turning `bodyId` about a fixed `pivot`. `grabAngle` is the
- * body's angle at grab; `prevPointer` / `accum` track the pointer's accumulated swing about
- * the pivot (unwrapped); `lastTotal` is the rotation applied so far (lets us apply only the
- * incremental delta each move while snapping the absolute angle to 45°).
+ * Active rotate (rotate tool): turning `bodyIds` (plus any multi-selected free `jointIds`)
+ * about a fixed `pivot`. `grabAngle` is the first body's angle at grab; `prevPointer` /
+ * `accum` track the pointer's accumulated swing about the pivot (unwrapped); `lastTotal`
+ * is the rotation applied so far (lets us apply only the incremental delta each move
+ * while snapping the absolute angle to 45°).
  */
 type RotateDrag = {
-  bodyId: number;
+  bodyIds: number[];
+  jointIds: number[];
   pivot: Vec2;
   grabAngle: number;
   prevPointer: number;
@@ -272,7 +283,10 @@ type LeftDrag =
   | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean }
   | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean }
   | { kind: "vertex"; bodyId: number; index: number; grabOffset: Vec2; moved: boolean }
-  | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean };
+  | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean }
+  // Whole multi-selection move: `anchor` is the current world position of the snap anchor
+  // (nearest centroid / corner / free joint to the grab), updated as the drag applies.
+  | { kind: "multi"; bodies: number[]; joints: number[]; anchor: Vec2; grabOffset: Vec2; moved: boolean };
 let leftDrag: LeftDrag | null = null;
 
 /** Current world position of a drag's anchor (the point that snaps to the grid). */
@@ -282,6 +296,7 @@ function dragAnchorWorld(d: LeftDrag): Vec2 {
   if (d.kind === "measureLabel") {
     return scene.measurementLabelPos(scene.getMeasurement(d.id)!) ?? vec(0, 0);
   }
+  if (d.kind === "multi") return d.anchor;
   return scene.jointWorld(scene.getJoint(d.id)!);
 }
 
@@ -298,6 +313,168 @@ function bodyDragAnchor(bodyId: number, grab: Vec2): Vec2 {
     }
   }
   return best;
+}
+
+// --- multi-selection (Ctrl+click / box select) + permanent groups -----------
+/**
+ * Commit a multi-selection: expand permanent groups (selection-atomic), drop dead ids,
+ * and collapse trivial results — a single ungrouped body / free joint becomes a normal
+ * single selection, an empty set clears everything. Otherwise `multiSel` is set and the
+ * single `selection` cleared (they're mutually exclusive).
+ */
+function setMulti(bodies: Set<number>, joints: Set<number>): void {
+  for (const id of [...bodies]) {
+    const g = scene.groupOf(id);
+    if (g) for (const b of g.bodyIds) bodies.add(b);
+  }
+  for (const id of [...bodies]) if (!scene.getBody(id)) bodies.delete(id);
+  for (const id of [...joints]) {
+    const j = scene.getJoint(id);
+    if (!j || j.bodyId !== null) joints.delete(id);
+  }
+  selection = null;
+  if (bodies.size === 0 && joints.size === 0) {
+    multiSel = null;
+    return;
+  }
+  if (bodies.size === 1 && joints.size === 0) {
+    multiSel = null;
+    selection = { kind: "body", id: [...bodies][0] };
+    return;
+  }
+  if (bodies.size === 0 && joints.size === 1) {
+    multiSel = null;
+    selection = { kind: "joint", id: [...joints][0] };
+    return;
+  }
+  multiSel = { bodies, joints };
+}
+
+/**
+ * Ctrl/Cmd+click: toggle the body or free joint under `p` in the multi-selection (seeded
+ * from the current single selection, so Ctrl+click naturally extends it). A body toggles
+ * together with its whole permanent group. Returns false when nothing is under the cursor
+ * (the caller starts an additive box select instead).
+ */
+function toggleMultiAt(p: Vec2): boolean {
+  const bodies = new Set(multiSel?.bodies ?? []);
+  const joints = new Set(multiSel?.joints ?? []);
+  if (selection?.kind === "body") bodies.add(selection.id);
+  if (selection?.kind === "joint") {
+    const j = scene.getJoint(selection.id);
+    if (j && j.bodyId === null) joints.add(j.id);
+  }
+  const toggleBody = (id: number): void => {
+    const g = scene.groupOf(id);
+    const ids = g ? g.bodyIds : [id];
+    const on = ids.some((x) => bodies.has(x));
+    for (const x of ids) {
+      if (on) bodies.delete(x);
+      else bodies.add(x);
+    }
+  };
+  const j = scene.jointAt(p, pickRadius());
+  if (j) {
+    if (j.bodyId === null) {
+      if (joints.has(j.id)) joints.delete(j.id);
+      else joints.add(j.id);
+    } else {
+      toggleBody(j.bodyId);
+    }
+  } else {
+    const b = scene.bodyAt(p);
+    if (!b) return false;
+    toggleBody(b.id);
+  }
+  setMulti(bodies, joints);
+  return true;
+}
+
+/**
+ * Whether a click at `p` lands on an element of the current multi-selection (a selected
+ * body, a joint on one, or a selected free joint) — such a click drags the whole selection.
+ * Measurement labels / constraint badges stay the topmost pick, as in single selection.
+ */
+function multiHitAt(p: Vec2): boolean {
+  if (!multiSel) return false;
+  if (measurementLabelAt(p) || sketchGlyphAt(p) !== null) return false;
+  const j = scene.jointAt(p, pickRadius());
+  if (j) {
+    return j.bodyId === null ? multiSel.joints.has(j.id) : multiSel.bodies.has(j.bodyId);
+  }
+  const b = scene.bodyAt(p);
+  return !!b && multiSel.bodies.has(b.id);
+}
+
+/** Begin dragging the whole multi-selection; the snap anchor is the nearest landmark to the grab. */
+function startMultiDrag(grab: Vec2): void {
+  if (!multiSel) return;
+  let anchor = grab;
+  let bestD = Infinity;
+  const consider = (c: Vec2): void => {
+    const d = dist(grab, c);
+    if (d < bestD) {
+      bestD = d;
+      anchor = c;
+    }
+  };
+  for (const id of multiSel.bodies) {
+    const body = scene.getBody(id);
+    if (!body) continue;
+    consider(body.pos);
+    for (const v of scene.bodyControlWorld(body)) consider(v);
+  }
+  for (const id of multiSel.joints) {
+    const j = scene.getJoint(id);
+    if (j) consider(scene.jointWorld(j));
+  }
+  leftDrag = {
+    kind: "multi",
+    bodies: [...multiSel.bodies],
+    joints: [...multiSel.joints],
+    anchor,
+    grabOffset: sub(grab, anchor),
+    moved: false,
+  };
+  canvas.style.cursor = "move";
+}
+
+/** Box-select result: bodies fully inside the rectangle, plus free joints inside it. */
+function applyBoxSelect(): void {
+  if (!boxSelect) return;
+  const x0 = Math.min(boxSelect.start.x, boxSelect.end.x);
+  const x1 = Math.max(boxSelect.start.x, boxSelect.end.x);
+  const y0 = Math.min(boxSelect.start.y, boxSelect.end.y);
+  const y1 = Math.max(boxSelect.start.y, boxSelect.end.y);
+  const inside = (p: Vec2) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+  const bodies = new Set(boxSelect.additive && multiSel ? multiSel.bodies : []);
+  const joints = new Set(boxSelect.additive && multiSel ? multiSel.joints : []);
+  if (boxSelect.additive && selection?.kind === "body") bodies.add(selection.id);
+  for (const b of scene.bodies) {
+    if (scene.bodyWorldVerts(b).every(inside)) bodies.add(b.id);
+  }
+  for (const j of scene.joints) {
+    if (j.bodyId === null && inside(scene.jointWorld(j))) joints.add(j.id);
+  }
+  setMulti(bodies, joints);
+}
+
+/** G with 2+ bodies multi-selected: make (or extend) a permanent group over them. */
+function groupSelection(): void {
+  if (mode !== "draw" || !multiSel || multiSel.bodies.size < 2) return;
+  const g = scene.addGroup([...multiSel.bodies]);
+  if (!g) return;
+  multiSel = { bodies: new Set(g.bodyIds), joints: multiSel.joints };
+  markDirty();
+}
+
+/** Ctrl+G: dissolve every permanent group the current selection touches. */
+function ungroupSelection(): void {
+  if (mode !== "draw") return;
+  const ids: number[] = [];
+  if (multiSel) ids.push(...multiSel.bodies);
+  if (selection?.kind === "body") ids.push(selection.id);
+  if (ids.length && scene.ungroup(ids)) markDirty();
 }
 
 // --- canvas sizing -------------------------------------------------------
@@ -362,13 +539,13 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · [ and ] round corners · Delete to remove.",
+  select: "Click to select · drag to move · Ctrl+click or drag a box to select several bodies (they move together) · G groups them permanently, Ctrl+G ungroups · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · [ and ] round corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
   ground: "Click a joint to lock its position (it can still rotate).",
   slider: "Click two joints on the same body to create a slider rail.",
-  rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. Snaps to 45°.",
+  rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. A multi-selection or group rotates as one about its centre. Snaps to 45°.",
   linearActuator: "Click a slider rail to drop a self-driving rider — it travels back and forth when animation runs.",
   motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
   measure: "Click two references — a joint, body corner, body edge, slider rail, or a point on a body — then click where the value should sit.",
@@ -544,12 +721,15 @@ function setMode(next: Mode): void {
 }
 
 function setTool(next: Tool): void {
-  // Rotate operates on a selected body, so keep an existing body selection when arming it
-  // (lets you grab one of its control nodes as the pivot right away).
+  // Rotate operates on the current selection, so keep an existing body selection (lets
+  // you grab one of its control nodes as the pivot right away) — or multi-selection /
+  // group (so R then drag rotates the whole set) — when arming it.
   const keepSel = next === "rotate" && selection?.kind === "body" ? selection : null;
+  const keepMulti = next === "rotate" ? multiSel : null;
   tool = next;
   resetTransient();
   selection = keepSel;
+  multiSel = keepMulti;
   document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((b) =>
     b.classList.toggle("active", b.dataset.tool === tool)
   );
@@ -582,6 +762,8 @@ function resetTransient(): void {
   motorPivotDraft = null;
   measurePicks = [];
   selection = null;
+  multiSel = null;
+  boxSelect = null;
   driver = null;
   rotateDrag = null;
 }
@@ -1110,6 +1292,7 @@ function sketchGlyphAt(p: Vec2): number | null {
 
 /** Normal/select mode: pick a measurement label (topmost overlay), then a joint, a slider rail, a body. */
 function handleSelectClick(p: Vec2): void {
+  multiSel = null; // a plain click rebuilds the selection from what's under the cursor
   const ml = measurementLabelAt(p);
   if (ml) {
     selection = { kind: "measure", id: ml.id };
@@ -1137,7 +1320,17 @@ function handleSelectClick(p: Vec2): void {
     return;
   }
   const body = scene.bodyAt(p);
-  selection = body ? { kind: "body", id: body.id } : null;
+  if (body) {
+    const g = scene.groupOf(body.id);
+    if (g) {
+      // A grouped body is selection-atomic: clicking any member selects the whole group.
+      setMulti(new Set(g.bodyIds), new Set());
+      return;
+    }
+    selection = { kind: "body", id: body.id };
+    return;
+  }
+  selection = null;
 }
 
 /** Index of the selected body's control vertex within pick range of `p`, or -1. */
@@ -1189,6 +1382,14 @@ function selectedBodyEdgeAt(p: Vec2): { index: number; point: Vec2 } | null {
 
 /** Delete the currently selected element and its dependent features. */
 function deleteSelection(): void {
+  if (multiSel) {
+    for (const id of multiSel.bodies) scene.removeBody(id);
+    for (const id of multiSel.joints) scene.removeJoint(id);
+    multiSel = null;
+    selection = null;
+    markDirty();
+    return;
+  }
   if (!selection) return;
   if (selection.kind === "body") scene.removeBody(selection.id);
   else if (selection.kind === "joint") scene.removeJoint(selection.id);
@@ -1199,56 +1400,95 @@ function deleteSelection(): void {
   markDirty();
 }
 
-/** Copy the selected body (with its joints and own constraints) to the clipboard. */
+/** Copy the selection (a body, or a whole multi-selection / group) to the clipboard. */
 function copySelection(): void {
-  if (mode !== "draw" || selection?.kind !== "body") return;
-  clipboard = scene.extractBody(selection.id);
+  if (mode !== "draw") return;
+  if (multiSel) {
+    clipboard = scene.extractSelection([...multiSel.bodies], [...multiSel.joints]);
+  } else if (selection?.kind === "body") {
+    clipboard = scene.extractSelection([selection.id]);
+  }
 }
 
-/** Paste the clipboard body so its centroid lands at `at` (grid-snapped), then select it. */
+/** Paste the clipboard so its centre lands at `at` (grid-snapped), then select the copy. */
 function pasteAt(at: Vec2 | null): void {
   if (mode !== "draw" || !clipboard) return;
   const drop = snap(at ?? screenToWorld(view, vec(canvas.clientWidth / 2, canvas.clientHeight / 2)));
-  const id = scene.insertBody(clipboard, drop);
-  if (id !== null) {
-    selection = { kind: "body", id };
+  const res = scene.insertSelection(clipboard, drop);
+  if (res) {
+    // A single pasted body collapses to a normal selection; a fragment stays multi-selected.
+    setMulti(new Set(res.bodyIds), new Set(res.freeJointIds));
     markDirty();
   }
 }
 
-/** Mirror the selected body in place across the given axis through its centroid. */
+/** Mirror the selection in place: a single body about its centroid, a multi-selection /
+ *  group about the centre of its combined bounding box. */
 function mirrorSelection(axis: "h" | "v"): void {
-  if (mode !== "draw" || selection?.kind !== "body") return;
+  if (mode !== "draw") return;
+  if (multiSel) {
+    scene.mirrorBodies([...multiSel.bodies], [...multiSel.joints], axis);
+    markDirty();
+    return;
+  }
+  if (selection?.kind !== "body") return;
   scene.mirrorBody(selection.id, axis);
   markDirty();
 }
 
 /**
- * Begin a rotate (rotate tool). Pivot: a control node of the already-selected body if the
- * grab lands on one, otherwise the centroid of whichever body is under the cursor (which
- * also becomes the selection). No body → nothing happens.
+ * Begin a rotate (rotate tool). A control node of the already-selected body rotates that
+ * body about the node. Otherwise the body under the cursor decides: a body of the current
+ * multi-selection — or of a permanent group, which gets selected — rotates the whole
+ * selection about the centre of its combined bounding box; a lone body rotates about its
+ * centroid (and becomes the selection). No body → nothing happens.
  */
 function startRotate(p: Vec2): void {
-  let bodyId: number | null = null;
-  let pivot: Vec2 | null = null;
   const vi = selectedBodyVertexAt(p);
   if (vi >= 0 && selection?.kind === "body") {
-    bodyId = selection.id;
-    pivot = scene.bodyControlWorld(scene.getBody(bodyId)!)[vi];
-  } else {
-    const body = scene.bodyAt(p);
-    if (body) {
-      bodyId = body.id;
-      pivot = body.pos; // centroid
-      selection = { kind: "body", id: bodyId };
-    }
+    const pivot = scene.bodyControlWorld(scene.getBody(selection.id)!)[vi];
+    beginRotate([selection.id], [], pivot, p);
+    return;
   }
-  if (bodyId === null || pivot === null) return;
+  const body = scene.bodyAt(p);
+  if (!body) return;
+  if (!multiSel?.bodies.has(body.id)) {
+    // Not part of the current multi-selection: select it — a grouped body selects its
+    // whole group; setMulti collapses an ungrouped body to a normal single selection.
+    setMulti(new Set([body.id]), new Set());
+  }
+  if (multiSel) {
+    // Rotate the whole selection about the centre of its combined bounding box.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const include = (q: Vec2): void => {
+      if (q.x < minX) minX = q.x;
+      if (q.y < minY) minY = q.y;
+      if (q.x > maxX) maxX = q.x;
+      if (q.y > maxY) maxY = q.y;
+    };
+    for (const id of multiSel.bodies) {
+      const b = scene.getBody(id);
+      if (b) scene.bodyWorldVerts(b).forEach(include);
+    }
+    for (const id of multiSel.joints) {
+      const j = scene.getJoint(id);
+      if (j) include(scene.jointWorld(j));
+    }
+    beginRotate([...multiSel.bodies], [...multiSel.joints], vec((minX + maxX) / 2, (minY + maxY) / 2), p);
+  } else {
+    beginRotate([body.id], [], body.pos, p); // centroid
+  }
+}
+
+function beginRotate(bodyIds: number[], jointIds: number[], pivot: Vec2, grab: Vec2): void {
+  const ref = scene.getBody(bodyIds[0]);
+  if (!ref) return;
   rotateDrag = {
-    bodyId,
+    bodyIds,
+    jointIds,
     pivot,
-    grabAngle: scene.getBody(bodyId)!.angle,
-    prevPointer: Math.atan2(p.y - pivot.y, p.x - pivot.x),
+    grabAngle: ref.angle,
+    prevPointer: Math.atan2(grab.y - pivot.y, grab.x - pivot.x),
     accum: 0,
     lastTotal: 0,
     moved: false,
@@ -1408,12 +1648,23 @@ canvas.addEventListener("mousedown", (e) => {
     if (tool === "rotate") {
       startRotate(world);
     } else if (tool === null) {
+      // Ctrl/Cmd+click: toggle what's under the cursor in the multi-selection; on empty
+      // space, start an additive box select instead.
+      if (e.ctrlKey || e.metaKey) {
+        if (!toggleMultiAt(world)) {
+          boxSelect = { start: world, end: world, additive: true, moved: false };
+        }
+        return;
+      }
       // A selected body shows draggable corner handles; grabbing one reshapes the body.
       const vi = selectedBodyVertexAt(world);
       if (vi >= 0 && selection?.kind === "body") {
         const anchor = scene.bodyControlWorld(scene.getBody(selection.id)!)[vi];
         leftDrag = { kind: "vertex", bodyId: selection.id, index: vi, grabOffset: sub(world, anchor), moved: false };
         canvas.style.cursor = "move";
+      } else if (multiHitAt(world)) {
+        // Clicking any element of the multi-selection drags the whole selection.
+        startMultiDrag(world);
       } else {
         // Otherwise select what's under the cursor; if it's movable, begin a drag of it.
         handleSelectClick(world);
@@ -1436,6 +1687,12 @@ canvas.addEventListener("mousedown", (e) => {
           const anchor = scene.jointWorld(scene.getJoint(selection.id)!);
           leftDrag = { kind: "joint", id: selection.id, grabOffset: sub(world, anchor), moved: false };
           canvas.style.cursor = "move";
+        } else if (multiHitAt(world)) {
+          // A plain click on a grouped body selected its whole group — drag it as one.
+          startMultiDrag(world);
+        } else if (!selection) {
+          // Empty space: begin a box selection (a plain click, no drag, just deselects).
+          boxSelect = { start: world, end: world, additive: false, moved: false };
         }
       }
     } else {
@@ -1484,6 +1741,13 @@ canvas.addEventListener("mousemove", (e) => {
     return;
   }
 
+  if (boxSelect) {
+    boxSelect.end = world;
+    // Only count it as a box once the pointer has clearly moved (else it's a plain click).
+    if (dist(boxSelect.start, world) * view.scale > 4) boxSelect.moved = true;
+    return;
+  }
+
   if (rotateDrag) {
     // Accumulate the pointer's swing about the pivot (unwrapped so it survives crossing ±π),
     // snap the resulting absolute body angle to 45°, then apply only the incremental delta.
@@ -1491,7 +1755,17 @@ canvas.addEventListener("mousemove", (e) => {
     rotateDrag.accum += wrapAngle(ptr - rotateDrag.prevPointer);
     rotateDrag.prevPointer = ptr;
     const total = snapAngle(rotateDrag.grabAngle + rotateDrag.accum) - rotateDrag.grabAngle;
-    scene.rotateBody(rotateDrag.bodyId, rotateDrag.pivot, total - rotateDrag.lastTotal);
+    const delta = total - rotateDrag.lastTotal;
+    // Every selected body turns about the shared pivot by the same delta (a rigid
+    // rotation of the whole selection); selected free joints orbit the pivot with it.
+    for (const id of rotateDrag.bodyIds) scene.rotateBody(id, rotateDrag.pivot, delta);
+    for (const id of rotateDrag.jointIds) {
+      const j = scene.getJoint(id);
+      if (!j) continue;
+      const w = scene.jointWorld(j);
+      const nw = add(rotateDrag.pivot, rotate(sub(w, rotateDrag.pivot), delta));
+      scene.moveJoint(id, sub(nw, w));
+    }
     rotateDrag.lastTotal = total;
     rotateDrag.moved = true;
     solveSketchLive(); // constraints (e.g. an H edge) pull back against the rotation
@@ -1511,7 +1785,12 @@ canvas.addEventListener("mousemove", (e) => {
     const delta = sub(target, dragAnchorWorld(leftDrag));
     if (leftDrag.kind === "vertex") scene.moveBodyVertex(leftDrag.bodyId, leftDrag.index, delta);
     else if (leftDrag.kind === "body") scene.moveBody(leftDrag.id, delta);
-    else scene.moveJoint(leftDrag.id, delta);
+    else if (leftDrag.kind === "multi") {
+      // Move the whole multi-selection together by the same delta.
+      for (const id of leftDrag.bodies) scene.moveBody(id, delta);
+      for (const id of leftDrag.joints) scene.moveJoint(id, delta);
+      leftDrag.anchor = target;
+    } else scene.moveJoint(leftDrag.id, delta);
     leftDrag.moved = true;
     solveSketchLive(); // sketch dragging: constraints hold while the geometry follows
     return;
@@ -1552,6 +1831,13 @@ canvas.addEventListener("mousemove", (e) => {
 window.addEventListener("mouseup", (e) => {
   if (e.button === 2 && pan) {
     pan = null;
+    canvas.style.cursor = defaultCursor();
+  }
+  if (e.button === 0 && boxSelect) {
+    // A dragged box selects its contents; a plain click already deselected on mousedown
+    // (and a Ctrl+click on empty space is a no-op).
+    if (boxSelect.moved) applyBoxSelect();
+    boxSelect = null;
     canvas.style.cursor = defaultCursor();
   }
   if (e.button === 0 && leftDrag) {
@@ -1682,8 +1968,8 @@ window.addEventListener("keydown", (e) => {
     redo();
     return;
   }
-  // Copy / paste the selected body (draw mode). Paste lands at the cursor.
-  if (mod && e.key.toLowerCase() === "c" && mode === "draw" && selection?.kind === "body") {
+  // Copy / paste the selection (draw mode). Paste lands at the cursor.
+  if (mod && e.key.toLowerCase() === "c" && mode === "draw" && (selection?.kind === "body" || multiSel)) {
     e.preventDefault();
     copySelection();
     return;
@@ -1691,6 +1977,24 @@ window.addEventListener("keydown", (e) => {
   if (mod && e.key.toLowerCase() === "v" && mode === "draw" && clipboard) {
     e.preventDefault();
     pasteAt(cursor);
+    return;
+  }
+  // Ctrl/Cmd+G dissolves the permanent group(s) the current selection touches.
+  if (mod && e.key.toLowerCase() === "g" && mode === "draw") {
+    e.preventDefault();
+    ungroupSelection();
+    return;
+  }
+  // G with 2+ bodies multi-selected makes them a permanent group; otherwise G falls
+  // through to the tool shortcuts below and arms the Ground tool as before.
+  if (
+    e.key.toLowerCase() === "g" &&
+    !e.ctrlKey && !e.metaKey && !e.altKey &&
+    mode === "draw" && tool === null &&
+    multiSel && multiSel.bodies.size >= 2
+  ) {
+    e.preventDefault();
+    groupSelection();
     return;
   }
   if (e.key === "Escape") {
@@ -1712,7 +2016,7 @@ window.addEventListener("keydown", (e) => {
     (e.key === "Delete" || e.key === "Backspace") &&
     mode === "draw" &&
     tool === null &&
-    selection
+    (selection || multiSel)
   ) {
     deleteSelection();
     return;
@@ -2190,6 +2494,11 @@ function frame(now?: number): void {
     activeJoints: activeJoints(),
     // In sim only a measurement selection is meaningful (labels stay editable there).
     selection: mode === "draw" ? selection : selection?.kind === "measure" ? selection : null,
+    multiSelected:
+      mode === "draw" && multiSel
+        ? { bodies: [...multiSel.bodies], joints: [...multiSel.joints] }
+        : null,
+    marquee: boxSelect?.moved ? { a: boxSelect.start, b: boxSelect.end } : null,
     editVertices: editVerticesView(),
     sliderDraft: sliderDraftView(),
     bodyJointDraft: bodyJointDraftView(),
