@@ -508,7 +508,8 @@ it rigidly about that centre — and `mirrorBody` now **remaps vertex/edge/bodyP
     is synced to the selection each frame by `syncColorPicker` (change-detected so it never clobbers
     the picker mid-drag). The `#color-group` hides in sim mode like the tool/edit groups.
   - **Grid / snapping** (session-only state, not persisted): `gridVisible`, `snapEnabled`,
-    `gridStep` (clamped 1–200 via `parseGridSize`; number input + a preset `<select>`). `snap(p)`
+    `gridStep` (clamped 1–200 via `parseGridSize`, **decimals allowed** — the input uses
+    `step="any"` and the value is no longer rounded; number input + a preset `<select>`). `snap(p)`
     rounds a world point to the nearest grid intersection when enabled (identity otherwise) and is
     applied to placements (free/attached joints, freehand vertices) and to drags. Drags snap an
     **anchor** in absolute terms via a `grabOffset` captured at mousedown: a vertex reshape snaps
@@ -538,7 +539,10 @@ aborts the current placement.
 - **Connect** (`C`) — click a joint, then another joint on a *different* body to pin them, or a
   *slider rail* to attach the joint to it as a rider.
 - **Ground** (`G`) — click a joint to lock its world position (grounding a free joint makes a
-  body-less anchor; a body can still rotate about a grounded joint).
+  body-less anchor; a body can still rotate about a grounded joint). **Clicking an
+  already-grounded joint removes its ground** (toggle; duplicate grounds from earlier versions
+  are all cleared). Exception: a free joint serving as a world-fixed slider-rail endpoint keeps
+  its ground — the rail must stay anchored (`addSlider`'s invariant).
 - **Slider** (`S`) — click two joints on the *same body* (a rail that moves with it), or two
   *free joints* (a world-fixed track — they get grounded automatically), to create a slider rail
   (riders are attached later via Connect). A free+body or cross-body pair restarts the draft.
@@ -648,7 +652,8 @@ Navigation (both modes):
 
 Grid (toolbar grid group):
 - **Grid** button toggles grid visibility; **Snap** button toggles snap-to-grid; a number field
-  (1–200, with a preset dropdown) sets the spacing — both the drawn grid and the snap increment.
+  (1–200, decimals allowed, with a preset dropdown) sets the spacing — both the drawn grid and
+  the snap increment.
   Visibility and snapping are independent. See main.ts "Grid / snapping" above for what snaps.
 
 Undo / redo (draw mode):

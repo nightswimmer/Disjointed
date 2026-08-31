@@ -543,7 +543,7 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
-  ground: "Click a joint to lock its position (it can still rotate).",
+  ground: "Click a joint to lock its position (it can still rotate); click a grounded joint to unground it.",
   slider: "Click two joints on the same body to create a slider rail.",
   rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. A multi-selection or group rotates as one about its centre. Snaps to 45°.",
   linearActuator: "Click a slider rail to drop a self-driving rider — it travels back and forth when animation runs.",
@@ -659,7 +659,7 @@ const GRID_MIN = 1;
 const GRID_MAX = 200;
 /** Read the grid-size field, clamped to [GRID_MIN, GRID_MAX]; null while it's empty/invalid. */
 function parseGridSize(): number | null {
-  const n = Math.round(Number(gridSizeInput.value));
+  const n = Number(gridSizeInput.value);
   if (!Number.isFinite(n) || gridSizeInput.value.trim() === "") return null;
   return Math.min(GRID_MAX, Math.max(GRID_MIN, n));
 }
@@ -964,8 +964,25 @@ function handleDrawClick(p: Vec2): void {
     case "ground": {
       const j = scene.jointAt(p, pickRadius());
       if (j) {
-        scene.addGround(j.id, scene.jointWorld(j));
-        placed = true;
+        const existing = scene.constraints.filter(
+          (c) => c.kind === "ground" && c.joint === j.id
+        );
+        if (existing.length > 0) {
+          // Already grounded — toggle the ground off. Exception: a free joint serving as
+          // a world-fixed slider rail endpoint must stay anchored (addSlider's invariant).
+          const isFreeRailEnd =
+            j.bodyId === null &&
+            scene.constraints.some(
+              (c) => c.kind === "slider" && (c.railA === j.id || c.railB === j.id)
+            );
+          if (!isFreeRailEnd) {
+            for (const g of existing) scene.removeConstraint(g.id);
+            placed = true;
+          }
+        } else {
+          scene.addGround(j.id, scene.jointWorld(j));
+          placed = true;
+        }
       }
       break;
     }

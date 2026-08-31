@@ -46,7 +46,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **slider rail (or rail node)** and it's automatically attached to that slider as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
-| **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. |
+| **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click an **already-grounded** joint to remove its ground (a free joint anchoring a world-fixed slider rail keeps its ground — the track must stay anchored). |
 | **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `L` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
@@ -180,7 +180,7 @@ animation runs.
 ### Grid & snapping
 The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**
 toggles snap-to-grid, and the number field (with a preset dropdown) sets the spacing — any value
-from **1 to 200** world units. With Snap on, new joints and freehand vertices land on the grid,
+from **1 to 200** world units, decimals included. With Snap on, new joints and freehand vertices land on the grid,
 and dragging snaps too: a per-vertex reshape snaps the grabbed corner, while moving a whole body
 snaps whichever is nearest the grab point — the body's centroid or one of its corners. Visibility
 and snapping are independent (you can snap to a hidden grid).

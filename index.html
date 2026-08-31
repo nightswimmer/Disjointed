@@ -53,7 +53,7 @@
           <button data-tool="connect" class="tool-btn icon-btn" title="Pin two joints together (C)" aria-label="Connect tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="15" r="2.5"/><circle cx="15" cy="5" r="2.5"/><line x1="6.8" y1="13.2" x2="13.2" y2="6.8"/></svg>
           </button>
-          <button data-tool="ground" class="tool-btn icon-btn" title="Ground a joint — fixed position, free rotation (G)" aria-label="Ground tool">
+          <button data-tool="ground" class="tool-btn icon-btn" title="Ground a joint — fixed position, free rotation; click again to unground (G)" aria-label="Ground tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="4" r="1.6"/><line x1="10" y1="5.6" x2="10" y2="10"/><line x1="4" y1="10" x2="16" y2="10"/><line x1="6" y1="10" x2="4" y2="14"/><line x1="9" y1="10" x2="7" y2="14"/><line x1="12" y1="10" x2="10" y2="14"/><line x1="15" y1="10" x2="13" y2="14"/></svg>
           </button>
           <button data-tool="slider" class="tool-btn icon-btn" title="Constrain a joint to slide along a line (S)" aria-label="Slider tool">
@@ -141,7 +141,7 @@
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3v7a4 4 0 0 0 8 0V3"/><line x1="4" y1="3" x2="8" y2="3"/><line x1="12" y1="3" x2="16" y2="3"/><line x1="6" y1="10" x2="6" y2="12"/><line x1="14" y1="10" x2="14" y2="12"/></svg>
           </button>
           <label class="select-label" title="Grid spacing in world units (1–200)">
-            <input id="grid-size" type="number" min="1" max="200" step="1" value="40" />
+            <input id="grid-size" type="number" min="1" max="200" step="any" value="40" />
             <select id="grid-size-presets" title="Pick a preset grid size">
               <option value="" selected disabled hidden>·</option>
               <option value="1">1</option>
