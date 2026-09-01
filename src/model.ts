@@ -15,6 +15,8 @@ import {
   dot,
   cross,
   len,
+  normalize,
+  distToLine,
   distToSegment,
   filletPolygon,
   roundedConvexBody,
@@ -152,6 +154,21 @@ export interface BodyGroup {
   bodyIds: number[];
 }
 
+// --- construction guidelines ------------------------------------------------
+
+/**
+ * A construction guideline: an **infinite** line defined by two points `a` and `b`
+ * (world coordinates). A drawing aid only — guidelines never participate in
+ * simulation. Dragging the line translates both points (the angle is preserved);
+ * dragging either defining point re-aims the line. With snapping enabled,
+ * placements and drags snap onto guidelines in preference to the grid.
+ */
+export interface Guide {
+  id: number;
+  a: Vec2;
+  b: Vec2;
+}
+
 // --- measurements ---------------------------------------------------------
 
 /** Which mode a measurement belongs to — draw and sim each keep their own set. */
@@ -173,7 +190,9 @@ export type MeasureRef =
   | { kind: "vertex"; bodyId: number; index: number } // point: a body control vertex
   | { kind: "bodyPoint"; bodyId: number; local: Vec2 } // point: fixed in a body's frame
   | { kind: "rail"; sliderId: number } // line: a slider rail
-  | { kind: "edge"; bodyId: number; index: number }; // line: control edge index → index+1
+  | { kind: "edge"; bodyId: number; index: number } // line: control edge index → index+1
+  | { kind: "guidePoint"; guideId: number; which: "a" | "b" } // point: a guideline defining point
+  | { kind: "guideLine"; guideId: number }; // line: a construction guideline (infinite)
 
 /**
  * A dimension between two references. What it measures follows from the reference kinds:
@@ -266,6 +285,8 @@ export interface SceneData {
   sketch?: SketchConstraint[];
   /** Permanent body groups. Absent pre-v9. */
   groups?: BodyGroup[];
+  /** Construction guidelines. Absent pre-v11. */
+  guides?: Guide[];
 }
 
 /**
@@ -298,7 +319,7 @@ export interface SelectionClip {
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target: number }[];
 }
 
-const FORMAT_VERSION = 10;
+const FORMAT_VERSION = 11;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -324,6 +345,7 @@ export class Scene {
   measurements: Measurement[] = [];
   sketch: SketchConstraint[] = [];
   groups: BodyGroup[] = [];
+  guides: Guide[] = [];
   private nextId = 1;
 
   private id(): number {
@@ -681,6 +703,16 @@ export class Scene {
         const verts = this.bodyControlWorld(b);
         return { kind: "line", a: verts[ref.index], b: verts[(ref.index + 1) % verts.length] };
       }
+      case "guidePoint": {
+        const g = this.getGuide(ref.guideId);
+        return g ? { kind: "point", p: clone(g[ref.which]) } : null;
+      }
+      case "guideLine": {
+        // Resolved as the defining segment; consumers that need the infinite line
+        // (point+line measurements, the renderer) already extend line refs themselves.
+        const g = this.getGuide(ref.guideId);
+        return g ? { kind: "line", a: clone(g.a), b: clone(g.b) } : null;
+      }
     }
   }
 
@@ -800,17 +832,20 @@ export class Scene {
    * Create a sketch constraint. Reference kinds are validated per constraint kind:
    * `coincident` takes two point refs; `horizontal`/`vertical` take one line ref (refB
    * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs.
-   * Point refs must be joints or body control vertices (`bodyPoint` refs are
-   * measurement-only — the sketch solver can't move them independently). Returns null
-   * on a kind mismatch, an unresolvable ref, or two refs naming the same element.
+   * Point refs are joints, body control vertices, or guideline defining points
+   * (`bodyPoint` refs are measurement-only — the sketch solver can't move them
+   * independently); line refs are slider rails, body control edges, or guidelines
+   * (except `equal`, which rejects guidelines — an infinite line has no length).
+   * Returns null on a kind mismatch, an unresolvable ref, or two refs naming the
+   * same element.
    */
   addSketchConstraint(
     kind: SketchConstraintKind,
     refA: MeasureRef,
     refB?: MeasureRef
   ): SketchConstraint | null {
-    const isPoint = (r: MeasureRef) => r.kind === "joint" || r.kind === "vertex";
-    const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge";
+    const isPoint = (r: MeasureRef) => r.kind === "joint" || r.kind === "vertex" || r.kind === "guidePoint";
+    const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
     const b = refB ?? null;
     if (kind === "coincident") {
       if (!b || !isPoint(refA) || !isPoint(b)) return null;
@@ -818,6 +853,9 @@ export class Scene {
       if (b ? !(isPoint(refA) && isPoint(b)) : !isLine(refA)) return null;
     } else {
       if (!b || !isLine(refA) || !isLine(b)) return null;
+      // Equal length is meaningless on an infinite guideline (its defining segment's
+      // length is arbitrary construction, not geometry) — reject it.
+      if (kind === "equal" && (refA.kind === "guideLine" || b.kind === "guideLine")) return null;
     }
     if (!this.resolveMeasureRef(refA) || (b && !this.resolveMeasureRef(b))) return null;
     if (b && sameMeasureRef(refA, b)) return null;
@@ -1227,6 +1265,84 @@ export class Scene {
     this.groups = this.groups.filter((g) => g.bodyIds.length >= 2);
   }
 
+  // --- construction guidelines ----------------------------------------------
+
+  /** Below this separation two guide points can't define a direction (rejected). */
+  static readonly GUIDE_MIN_SPAN = 1e-6;
+
+  getGuide(id: number): Guide | undefined {
+    return this.guides.find((g) => g.id === id);
+  }
+
+  /** Create a guideline through two points. Returns null when they (nearly) coincide. */
+  addGuide(a: Vec2, b: Vec2): Guide | null {
+    if (dist(a, b) < Scene.GUIDE_MIN_SPAN) return null;
+    const guide: Guide = { id: this.id(), a: clone(a), b: clone(b) };
+    this.guides.push(guide);
+    return guide;
+  }
+
+  removeGuide(id: number): void {
+    this.guides = this.guides.filter((g) => g.id !== id);
+    // Constraints / measurements referencing the removed guide cascade away.
+    this.pruneMeasurements();
+    this.pruneSketch();
+  }
+
+  /** Translate a whole guideline by `delta` (both points move; the angle is preserved). */
+  moveGuide(id: number, delta: Vec2): void {
+    const g = this.getGuide(id);
+    if (!g) return;
+    g.a = add(g.a, delta);
+    g.b = add(g.b, delta);
+  }
+
+  /**
+   * Move one of a guideline's defining points to `worldPos` (re-aiming the line).
+   * Ignored when it would land on the other point (the line needs a direction).
+   */
+  moveGuidePoint(id: number, which: "a" | "b", worldPos: Vec2): void {
+    const g = this.getGuide(id);
+    if (!g) return;
+    const other = which === "a" ? g.b : g.a;
+    if (dist(worldPos, other) < Scene.GUIDE_MIN_SPAN) return;
+    g[which] = clone(worldPos);
+  }
+
+  /** Nearest guideline whose **infinite** line passes within `radius` of `p` (topmost first). */
+  guideAt(p: Vec2, radius: number): Guide | undefined {
+    let best: Guide | undefined;
+    let bestD = radius;
+    for (let i = this.guides.length - 1; i >= 0; i--) {
+      const g = this.guides[i];
+      const d = distToLine(p, g.a, normalize(sub(g.b, g.a)));
+      if (d <= bestD) {
+        bestD = d;
+        best = g;
+      }
+    }
+    return best;
+  }
+
+  /** Guideline defining point within `radius` of `p` (topmost first), or null.
+   *  `excludeGuide` leaves one guideline's points out (a dragged point can't pick itself). */
+  guidePointAt(p: Vec2, radius: number, excludeGuide?: number): { guide: Guide; which: "a" | "b" } | null {
+    let best: { guide: Guide; which: "a" | "b" } | null = null;
+    let bestD = radius;
+    for (let i = this.guides.length - 1; i >= 0; i--) {
+      const g = this.guides[i];
+      if (g.id === excludeGuide) continue;
+      for (const which of ["a", "b"] as const) {
+        const d = dist(g[which], p);
+        if (d <= bestD) {
+          bestD = d;
+          best = { guide: g, which };
+        }
+      }
+    }
+    return best;
+  }
+
   /**
    * Snapshot a selection of bodies (with their joints) and free joints into a copy/paste
    * clip (see `SelectionClip`). Constraints travel when every joint they reference is in
@@ -1307,6 +1423,9 @@ export class Scene {
           return bodyIdSet.has(r.bodyId);
         case "rail":
           return clippedSliders.has(r.sliderId);
+        case "guidePoint":
+        case "guideLine":
+          return false; // guides don't travel with a selection clip
       }
     };
     const sketch: SelectionClip["sketch"] = [];
@@ -1448,6 +1567,9 @@ export class Scene {
           const id = sliderIdMap.get(r.sliderId);
           return id === undefined ? null : { kind: "rail", sliderId: id };
         }
+        case "guidePoint":
+        case "guideLine":
+          return null; // guides never travel with a clip (extractSelection drops these refs)
       }
     };
     for (const c of clip.sketch) {
@@ -1537,6 +1659,7 @@ export class Scene {
     this.measurements = [];
     this.sketch = [];
     this.groups = [];
+    this.guides = [];
     this.nextId = 1;
   }
 
@@ -1550,6 +1673,7 @@ export class Scene {
       measurements: this.measurements,
       sketch: this.sketch,
       groups: this.groups,
+      guides: this.guides,
     };
   }
 
@@ -1609,6 +1733,12 @@ export class Scene {
       ? data.groups.map((g) => ({ id: g.id, bodyIds: Array.isArray(g.bodyIds) ? g.bodyIds.slice() : [] }))
       : [];
     this.pruneGroups(); // drop stale body ids / degenerate groups from hand-edited files
+    // Construction guidelines arrived in v11; older files simply have none.
+    this.guides = Array.isArray(data.guides)
+      ? data.guides
+          .map((g) => ({ id: g.id, a: vec(g.a.x, g.a.y), b: vec(g.b.x, g.b.y) }))
+          .filter((g) => dist(g.a, g.b) >= Scene.GUIDE_MIN_SPAN)
+      : [];
     const ids = [
       ...this.bodies.map((b) => b.id),
       ...this.joints.map((j) => j.id),
@@ -1616,6 +1746,7 @@ export class Scene {
       ...this.measurements.map((m) => m.id),
       ...this.sketch.map((c) => c.id),
       ...this.groups.map((g) => g.id),
+      ...this.guides.map((g) => g.id),
     ];
     this.nextId = (ids.length ? Math.max(...ids) : 0) + 1;
   }
@@ -1678,6 +1809,13 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
       );
     case "rail":
       return a.sliderId === (b as { sliderId: number }).sliderId;
+    case "guidePoint":
+      return (
+        a.guideId === (b as { guideId: number }).guideId &&
+        a.which === (b as { which: "a" | "b" }).which
+      );
+    case "guideLine":
+      return a.guideId === (b as { guideId: number }).guideId;
     default:
       return false;
   }

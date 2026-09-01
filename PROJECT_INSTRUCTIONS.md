@@ -33,7 +33,7 @@ and a converge-to-tolerance solver with **impossible-assembly handling** (ground
 unreachable pins/sliders are isolated, the rest still solves, and the breaks are drawn as red
 dotted lines plus an on-canvas error banner). The solver and shape/edit logic are verified
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
-**View navigation**: zoom range 0.05×–20×; a **fit-to-screen** button + `F` shortcut frames the
+**View navigation**: zoom range 0.05×–200×; a **fit-to-screen** button + `F` shortcut frames the
 whole mechanism (bodies, joints, ground anchors) centered with a margin; **Tab** toggles
 draw ↔ simulate mode.
 **UI polish**: the toolbar is icon buttons with tooltips; a dark/light **theme toggle** (persisted)
@@ -126,6 +126,26 @@ frozen world are **out of scope** (not solved, not reported as breaks). Rigid dr
 sim-like, so **sketch constraints are not applied** during them (a rigid rotation can
 leave an H/V constraint unsatisfied until the next sketch solve). Plain drag, vertex
 reshaping and label drags are unchanged (vertex handles win over Shift).
+**Construction guidelines** (draw mode, serialization v11): **infinite** lines defined by
+two points — pure drawing aids (invisible and unpickable in sim, never simulated). Tool
+**`L`** (the linear actuator moved to **`A`**): two clicks; each click lands **exactly on**
+a joint / body corner / another guide's point (recording a CAD-style **auto-coincident**),
+projects onto a slider rail / body edge, or falls back to the grid/guide snap. Rendered as
+muted dash-dot lines spanning the viewport with dots on the two defining points; click to
+select (endpoints beat the line, the line beats body areas), **drag the line** to move it
+whole (angle kept), **drag a defining point** to re-aim it (endpoint drags also land on
+joints / corners / other guides' points), Delete removes (constraints + measurements on the
+guide cascade away). With **snap on, guidelines beat the grid**: near one line the point
+projects onto it, near two it lands on their **intersection**. Guides are first-class
+`MeasureRef`s (`guidePoint` / `guideLine`), so **measurements** and **sketch constraints**
+work on them — coincident on defining points; H/V, parallel, perpendicular on the lines
+(`equal` is rejected: an infinite line has no length). The sketch solver ranks mobility
+**construction < geometry < dragged** — guide constraints are satisfied by moving **only
+free guide points, never joints or body nodes** (a guide fully bound to joints rejects an
+unsatisfiable H/V with a red flash), while drags pin the dragged geometry so guides follow
+it exactly; when a drag would break a constraint the solver falls back to a symmetric
+re-solve **that same frame**, so dragging can only move things along the directions the
+constraints leave free (a bound vertical guide's free point slides only vertically).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -201,6 +221,17 @@ reshaping and label drags are unchanged (vertex handles win over Shift).
     (dissolves every group touched); `pruneGroups()` (drops removed bodies, dissolves
     < 2-member groups — called from `removeBody` and `load`). Groups make their members
     move together in draw mode (main.ts) and act as one rigid body in sim (solver.ts).
+  - **Construction guidelines** (`guides: Guide[]`, a `Guide = { id, a, b }` — two world
+    points defining an **infinite** line; drawing aids only, never simulated): `addGuide`
+    (rejects spans < `GUIDE_MIN_SPAN`), `removeGuide` (cascades — prunes measurements and
+    sketch constraints referencing the guide), `moveGuide` (translates both points, angle
+    kept), `moveGuidePoint` (re-aims; refuses collapsing onto the twin point), hit tests
+    `guideAt` (distance to the **infinite** line) and `guidePointAt` (defining points;
+    optional `excludeGuide` so a dragged point can't pick itself). `MeasureRef` gained two
+    kinds — `guidePoint` (a defining point) and `guideLine` (the line) — resolvable by
+    measurements and sketch constraints alike; `addSketchConstraint` accepts them wherever
+    points/lines go, except `equal` on a `guideLine` (rejected — no meaningful length).
+    Copy/paste drops refs to guides (guides don't travel with a `SelectionClip`).
   - Edit utilities: `rotateBody(id, pivot, delta)` rigidly turns a body about a fixed world
     point (joints follow; ground anchors rotate too; no rebuild needed). `mirrorBody(id, "h"|"v")`
     reflects the control polygon + attached joints + their ground anchors across a centroid axis,
@@ -271,11 +302,12 @@ reshaping and label drags are unchanged (vertex handles win over Shift).
     uniformly about its centroid — control polygon, corner radius, attached joints, their
     ground anchors, and `bodyPoint` measurement refs all together.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 10`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 11`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
-    constraints or driving flags, pre-v9 files no groups, pre-v10 bodies load ungrounded —
+    constraints or driving flags, pre-v9 files no groups, pre-v10 bodies load ungrounded,
+    pre-v11 files no guides —
     all load fine as-is; loaded groups are pruned against the loaded bodies). The
     `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its colour.
 - **solver.ts** — `solve(scene, driver, iterations, relax, anchors?, stats?): ConstraintBreak[]` (each
@@ -345,6 +377,17 @@ reshaping and label drags are unchanged (vertex handles win over Shift).
   solve; commits the driving flag only on success), `tryAddConstraint` (add + solve,
   remove again on conflict), `autoConstrainBody` (H/V inference within `AUTO_HV_TOL` =
   5°, each constraint solved in as it's added).
+  The variables also include **guideline defining points** (`g:id:a` / `g:id:b`, applied
+  back via `moveGuidePoint`), and every variable carries a **mobility rank** — 0
+  construction (guide points), 1 geometry (vertices, joints), 2 drag-anchored — with each
+  pairwise projection weighted so corrections flow entirely to the **lowest** rank (equal
+  ranks split evenly, the old symmetric behaviour): guide constraints move only free guide
+  points, never geometry, and a drag is never tugged back by its constraints.
+  `solveSketch(scene, anchors?)` takes the drag-pinned variable keys, built in main via
+  the exported `anchorVarsForBody` / `anchorVarsForJoint` / `anchorVarsForGuide` /
+  `anchorVarForGuidePoint` / `anchorVarForVertex` helpers; main falls back to a
+  symmetric re-solve whenever the anchored solve is infeasible, so live drags can never
+  leave a constraint visibly broken.
 - **analyzer.ts** — read-only **topology diagnostic** (Stage 1 of the propagation-solver
   exploration; not yet imported by the app — call `formatReport(analyzeScene(scene), scene)`
   from a console/debug hook). Builds a constraint graph (bodies + free joints as nodes; pins +
@@ -357,7 +400,11 @@ reshaping and label drags are unchanged (vertex handles win over Shift).
   blocks. Labels are `#id`-based (bodies have no user-facing name).
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.05..20).
-- **renderer.ts** — joints involved in any `ConstraintBreak.joints` are painted red (fill +
+- **renderer.ts** — **construction guidelines** (draw mode only) draw right after the grid:
+  muted dash-dot lines (`GUIDE_COLOR` grey) clipped to the viewport via `drawGuideLine`
+  (the segment is centred on the view, so the line always spans it), with dots on the two
+  defining points; the selected guide uses theme ink; `guideDraft` previews the infinite
+  line from the first placed point to the (element-snapped) cursor. Also: joints involved in any `ConstraintBreak.joints` are painted red (fill +
   stroke + slight size bump) so the stuck points stand out alongside the existing red dotted
   break lines. Draws under the camera transform in world space: world-locked grid
   (spacing = `gridStep`, drawn only when `gridVisible`),
@@ -430,6 +477,18 @@ reshaping and label drags are unchanged (vertex handles win over Shift).
     second joint on the **same body** becomes the crank pin (mismatched second click restarts the
     draft at the new joint). Both tools select the resulting element so the inline properties panel
     appears right away.
+  - **Guideline tool** (`L`, draw mode; the actuator's shortcut moved to `A`): two clicks
+    through `guidePlacementAt` — exactly on a picked point element (joint / body corner /
+    guide point; recorded and turned into an **auto-coincident** via `tryAddConstraint`),
+    projected onto a picked rail / body edge, else `snap`. Selection kind `"guide"`;
+    `LeftDrag` kinds `"guide"` (whole-line translate, anchor = point `a`) and
+    `"guidePoint"` (endpoint re-aim with element snapping, own guide excluded from every
+    pick). `snap(p, excludeGuide?)` prefers guidelines over the grid (projection; two
+    near guides → their intersection). `dragAnchorVars()` maps the active drag / rotate to
+    sketch anchor keys; `solveSketchLive` runs the anchored solve and **falls back to a
+    symmetric solve when it's infeasible** (constraints win over the drag), plus a settle
+    solve on mouseup. `measureRefAt` / `constraintPointRefAt` / `constraintLineRefAt` pick
+    guide points and lines (draw mode only for measure — guides are invisible in sim).
   - **Measure tool** (`D`, one-shot, the only tool that also works in **sim mode** — its
     toolbar group never hides): two reference picks then a label-placement click →
     `handleMeasureClick` / `measurePicks`. `measureRefAt(p)` picks by priority: joint →
@@ -577,9 +636,9 @@ reshaping and label drags are unchanged (vertex handles win over Shift).
     the centroid (`dragAnchorWorld` reconstructs its live position).
 
 ### Interaction model
-Draw-mode tools are **one-shot**: arming a tool (toolbar button or first-letter shortcut —
-`B`/`J`/`C`/`G`/`S`/`L`/`M`) lets you place one element, then it returns to **Select** mode. `Esc`
-aborts the current placement.
+Draw-mode tools are **one-shot**: arming a tool (toolbar button or shortcut —
+`B`/`J`/`C`/`G`/`S`/`L` guideline/`A` actuator/`M`) lets you place one element, then it returns
+to **Select** mode. `Esc` aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
   **existing joint**: build a body *from joints* — click joints to outline (loose free joints
@@ -608,7 +667,13 @@ aborts the current placement.
 - **Slider** (`S`) — click two joints on the *same body* (a rail that moves with it), or two
   *free joints* (a world-fixed track — they get grounded automatically), to create a slider rail
   (riders are attached later via Connect). A free+body or cross-body pair restarts the draft.
-- **Linear actuator** (`L`) — click a *slider rail* to drop a **self-driving rider** on it (a free
+- **Guideline** (`L`) — two clicks place an **infinite construction line**. Clicks land
+  exactly on joints / body corners / other guides' points (with an auto-coincident), project
+  onto rails / body edges, or grid/guide-snap. Select it to drag the whole line (angle kept)
+  or either defining point (re-aims); Delete removes it with its constraints/measurements.
+  With snap on, placements prefer guidelines (and guide intersections) over the grid.
+  Constraints on guides move **only free guide points**, never geometry.
+- **Linear actuator** (`A`) — click a *slider rail* to drop a **self-driving rider** on it (a free
   joint attached as a rider, plus a `linearActuator` constraint that drives it during animation).
   Off-animation the rider is a normal slider rider (draggable / pinnable). Default speed 0.5 Hz,
   default profile `triangle`.
@@ -620,9 +685,11 @@ aborts the current placement.
   should sit. Point+point: the label spot picks horizontal / vertical / direct. Point+line:
   perpendicular distance to the infinite line. Line+line: distance while parallel, angle
   otherwise (dynamic; the label's sector picks θ vs 180−θ). Values update live in sim.
-- **Sketch constraints** (draw mode only): **Coincident** (`O`) — two points. **Horizontal**
-  (`H`) / **Vertical** (`V`) — one edge/rail, or two points. **Parallel** (`P`) /
-  **Perpendicular** (`T`) / **Equal length** (`E`) — two edges/rails. The geometry solves to
+- **Sketch constraints** (draw mode only): **Coincident** (`O`) — two points (joints, body
+  corners, guide points). **Horizontal**
+  (`H`) / **Vertical** (`V`) — one edge/rail/guideline, or two points. **Parallel** (`P`) /
+  **Perpendicular** (`T`) — two lines (edges/rails/guidelines); **Equal length** (`E`) —
+  two edges/rails (guidelines rejected — no length). The geometry solves to
   satisfy the constraint the moment it's placed; an unsatisfiable one is rejected (conflicting
   items flash red). Badges are click-to-select, Delete to remove.
 - **Driving dimensions** (draw mode): double-click a dimension's value → type a number →
@@ -712,7 +779,7 @@ Simulate mode:
   actuators before they push past a physically unreachable configuration.
 
 Navigation (both modes):
-- **Mouse wheel** zooms toward the cursor (0.05×–20×).
+- **Mouse wheel** zooms toward the cursor (0.05×–200×).
 - **Right-drag always pans** the view (anywhere). Moving elements is left-drag in select mode
   (above); there is no right-drag-to-move.
 - **Fit to screen** (`F`, or the toolbar button next to Save): frames the whole mechanism
@@ -891,6 +958,20 @@ Persistence:
   open pin from the selection to the frozen world snaps closed (assemble-on-drag); an open
   pin **between two frozen bodies** is neither closed nor reported as a break — and the
   same pin without a freeze is closed by a normal solve (the skip is freeze-only).
+- **guides.ts** — construction guidelines end-to-end (57 checks): CRUD + moves (whole-line
+  translate preserves the angle; endpoint re-aim; collapse-onto-twin refused), hit tests
+  (infinite line, defining points), serialize/load v11 round-trip + pre-v11 files + id
+  continuity + deep copy; `guidePoint`/`guideLine` refs resolving; H solved on a free
+  guide; coincident guide↔joint (guide follows, joint fixed) surviving a move + re-solve;
+  `equal` with a guide rejected; parallel guide↔edge; constraint/measurement cascade on
+  `removeGuide`; point↔guide measurement using the infinite line; **drag anchoring** (a
+  rigid two-body move with a joint-bound guide leaves the bodies exactly rigid, guide
+  following in full); **mobility ranks** (perpendicular between a joint-bound guide and a
+  half-bound guide moves only the free point — body, joints and the bound guide untouched;
+  H on a fully-bound guide rejected with the scene untouched; H on a half-bound guide
+  solved by the free point); and the **drag fallback** (an infeasible anchored drag step
+  followed by the symmetric solve restores V, keeps the drag's feasible component, joint
+  untouched).
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
@@ -967,6 +1048,31 @@ Persistence:
   itself (covers single-body and group mirrors): vertex `i → n−1−i`, edge `i → n−2−i`
   (wrapping), and `bodyPoint` refs re-baked onto the reflected material. Reflection itself
   preserves every constraint kind, so after the remap everything stays satisfied.
+- **A group drifted apart when dragged with a guide coincident to one member's joints.**
+  Two causes: the sketch solver split every coincident correction 50/50 (the constrained
+  body handed half of each increment to the guide), and the multi-drag's snap anchor was a
+  *stored position* updated to the commanded target — unlike every other drag it never
+  re-read the live scene, so the loss was never corrected and accumulated to half the drag
+  distance. Fixed by **drag anchoring** (the dragged geometry is passed to `solveSketch`
+  as pinned; free elements absorb the whole correction) and by making the multi-drag
+  anchor a live-read landmark spec (`{bodyId, offset}` / `{jointId}`).
+- **Guide constraints moved geometry.** A perpendicular between two guidelines rotated
+  both lines' defining points — including ones coincident-bound to joints, dragging the
+  joints along. Fixed with the **mobility ranks** (construction < geometry < dragged):
+  guide constraints now move only free guide points; ones that would need geometry to
+  move are rejected.
+- **H/V on a guideline silently did nothing.** `handleConstraintClick`'s line test only
+  knew rails and edges, so a guideline pick was stored as a bogus first *point* pick and
+  the eventual commit failed model validation without feedback. Fixed by adding
+  `guideLine` to that classification (parallel/perpendicular were unaffected — they use
+  the line picker directly).
+- **A drag could visibly break a guide constraint until release.** Dragging the free
+  point of a joint-bound vertical guide sideways made the anchored live solve infeasible
+  (neither the dragged point nor the joint may move), and the old policy just *skipped*
+  failed mid-drag solves — the line went angled and only snapped back on mouseup. Fixed:
+  `solveSketchLive` immediately falls back to a symmetric solve when the anchored one
+  can't converge, so constraints hold every frame and the drag only moves things along
+  the free directions.
 
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);
@@ -976,6 +1082,13 @@ Persistence:
   fully-internal ones + driving dimensions.)
 - Measurement follow-ups: copy/paste doesn't carry *driven* (reference) measurements
   (consistent with actuators/motors; driving dimensions are carried, as constraints).
+- **Guideline follow-ups**: no point-**on**-line constraint kind yet (a guide point placed
+  on an edge/rail lands there but isn't constrained to stay); guides don't join
+  multi-selections / copy / mirror / rotate; the violet hover highlight for a guide-line
+  ref covers only the defining segment (picking works anywhere on the infinite line);
+  guides are deliberately invisible + unpickable in sim. If "level two joints through a
+  guide" is ever wanted, constrain the joints directly (H on the point pair) — guide
+  constraints never move geometry by design.
 - **Group follow-ups**: permanent groups contain bodies only (free joints can be
   multi-selected and moved, but not made group members); reshaping a grouped body's
   outline in draw mode is still per-body (groups constrain sim + move-together, not

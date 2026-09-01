@@ -13,18 +13,21 @@ import {
   sameMeasureRef,
 } from "./model";
 import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig } from "./solver";
-import { solveSketch, applyDrivingDimension, tryAddConstraint, autoConstrainBody, SketchBreak } from "./sketch";
+import {
+  solveSketch, applyDrivingDimension, tryAddConstraint, autoConstrainBody, SketchBreak,
+  anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
+} from "./sketch";
 import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
-import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, normalize, roundedConvexBody, distToSegment } from "./geometry";
+import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, roundedConvexBody, distToSegment, distToLine } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
 type Tool =
-  | "body" | "joint" | "connect" | "ground" | "slider" | "rotate"
+  | "body" | "joint" | "connect" | "ground" | "slider" | "rotate" | "guide"
   | "linearActuator" | "motor" | "measure"
   | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
 /** An existing element picked in normal/select mode. */
-type Selection = { kind: "body" | "joint" | "slider" | "measure" | "sketch"; id: number };
+type Selection = { kind: "body" | "joint" | "slider" | "measure" | "sketch" | "guide"; id: number };
 
 /** The tools that place a sketch constraint (tool name = constraint kind). */
 const CONSTRAINT_TOOLS = new Set<Tool>([
@@ -142,6 +145,9 @@ let hoverJoint: number | null = null;
 let hoverBody: number | null = null; // body under the cursor in normal mode
 let selectedJoint: number | null = null; // first pick for connect
 let sliderDraftIds: number[] = []; // rail joints picked so far for the slider tool (0–2)
+let guideDraft: Vec2 | null = null; // guide tool: the first defining point placed
+/** The existing point element the first guide click landed on (→ coincident on commit). */
+let guideDraftPick: MeasureRef | null = null;
 let selection: Selection | null = null; // element selected in normal mode
 /**
  * Draw-mode multi-selection (Ctrl+click toggles; box select replaces/extends): bodies and
@@ -262,9 +268,40 @@ let snapEnabled = false;
 /** When true, the world-locked grid is drawn (snapping still works when hidden). */
 let gridVisible = true;
 
-/** Snap a world point to the nearest grid intersection (identity when snap is off). */
-function snap(p: Vec2): Vec2 {
+/** Screen-px capture range for snapping onto a construction guideline. */
+const GUIDE_SNAP_PX = 10;
+
+/**
+ * Snap a world point (identity when snap is off). Construction guidelines take
+ * precedence over the grid: within capture range of one guideline the point projects
+ * onto its infinite line; within range of two, it lands on their intersection. Away
+ * from any guideline it snaps to the nearest grid intersection. `excludeGuide` leaves
+ * one guideline out, so dragging a guide never snaps it onto itself.
+ */
+function snap(p: Vec2, excludeGuide?: number): Vec2 {
   if (!snapEnabled) return p;
+  const r = GUIDE_SNAP_PX / view.scale;
+  const near: { o: Vec2; d: Vec2; dist: number; proj: Vec2 }[] = [];
+  for (const g of scene.guides) {
+    if (g.id === excludeGuide) continue;
+    const d = normalize(sub(g.b, g.a));
+    if (d.x === 0 && d.y === 0) continue;
+    const proj = add(g.a, scale(d, dot(sub(p, g.a), d)));
+    const dd = dist(p, proj);
+    if (dd <= r) near.push({ o: g.a, d, dist: dd, proj });
+  }
+  if (near.length > 0) {
+    near.sort((x, y) => x.dist - y.dist);
+    // Two (non-parallel) guidelines in range: land exactly on their intersection.
+    for (let i = 1; i < near.length; i++) {
+      const den = cross(near[0].d, near[i].d);
+      if (Math.abs(den) < 1e-6) continue; // (near-)parallel — no usable intersection
+      const t = cross(sub(near[i].o, near[0].o), near[i].d) / den;
+      const q = add(near[0].o, scale(near[0].d, t));
+      if (dist(p, q) <= r) return q;
+    }
+    return near[0].proj;
+  }
   return vec(Math.round(p.x / gridStep) * gridStep, Math.round(p.y / gridStep) * gridStep);
 }
 
@@ -284,9 +321,22 @@ type LeftDrag =
   | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean }
   | { kind: "vertex"; bodyId: number; index: number; grabOffset: Vec2; moved: boolean }
   | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean }
-  // Whole multi-selection move: `anchor` is the current world position of the snap anchor
-  // (nearest centroid / corner / free joint to the grab), updated as the drag applies.
-  | { kind: "multi"; bodies: number[]; joints: number[]; anchor: Vec2; grabOffset: Vec2; moved: boolean }
+  // Whole-guideline move (angle preserved; anchored on its point `a`)…
+  | { kind: "guide"; id: number; grabOffset: Vec2; moved: boolean }
+  // …or one of its two defining points (re-aims the line).
+  | { kind: "guidePoint"; id: number; which: "a" | "b"; grabOffset: Vec2; moved: boolean }
+  // Whole multi-selection move: `anchor` names the snap-anchor landmark (nearest
+  // centroid / corner / free joint to the grab). Its world position is re-read live
+  // each move — a stored position would go stale if a sketch solve nudged a member,
+  // and the accumulated increments would let the members drift apart.
+  | {
+      kind: "multi";
+      bodies: number[];
+      joints: number[];
+      anchor: { bodyId: number; offset: Vec2 } | { jointId: number };
+      grabOffset: Vec2;
+      moved: boolean;
+    }
   // Rigid (Shift) drag: the grabbed selection moves like in simulation — the solver drives
   // it each frame, grounds hold, and the rest of the scene is frozen (`freeze`).
   | { kind: "rigid"; driver: Driver; freeze: SolveFreeze; moved: boolean };
@@ -299,8 +349,14 @@ function dragAnchorWorld(d: LeftDrag): Vec2 {
   if (d.kind === "measureLabel") {
     return scene.measurementLabelPos(scene.getMeasurement(d.id)!) ?? vec(0, 0);
   }
-  if (d.kind === "multi") return d.anchor;
+  if (d.kind === "multi") {
+    return "jointId" in d.anchor
+      ? scene.jointWorld(scene.getJoint(d.anchor.jointId)!)
+      : add(scene.getBody(d.anchor.bodyId)!.pos, d.anchor.offset);
+  }
   if (d.kind === "rigid") return d.driver.target; // solver-driven; no snap anchor
+  if (d.kind === "guide") return scene.getGuide(d.id)!.a;
+  if (d.kind === "guidePoint") return scene.getGuide(d.id)![d.which];
   return scene.jointWorld(scene.getJoint(d.id)!);
 }
 
@@ -413,31 +469,37 @@ function multiHitAt(p: Vec2): boolean {
 /** Begin dragging the whole multi-selection; the snap anchor is the nearest landmark to the grab. */
 function startMultiDrag(grab: Vec2): void {
   if (!multiSel) return;
-  let anchor = grab;
+  type MultiAnchor = { bodyId: number; offset: Vec2 } | { jointId: number };
+  let anchor: MultiAnchor | null = null;
+  let anchorPos = grab;
   let bestD = Infinity;
-  const consider = (c: Vec2): void => {
+  const consider = (c: Vec2, spec: MultiAnchor): void => {
     const d = dist(grab, c);
     if (d < bestD) {
       bestD = d;
-      anchor = c;
+      anchor = spec;
+      anchorPos = c;
     }
   };
   for (const id of multiSel.bodies) {
     const body = scene.getBody(id);
     if (!body) continue;
-    consider(body.pos);
-    for (const v of scene.bodyControlWorld(body)) consider(v);
+    consider(body.pos, { bodyId: id, offset: vec(0, 0) });
+    for (const v of scene.bodyControlWorld(body)) {
+      consider(v, { bodyId: id, offset: sub(v, body.pos) });
+    }
   }
   for (const id of multiSel.joints) {
     const j = scene.getJoint(id);
-    if (j) consider(scene.jointWorld(j));
+    if (j) consider(scene.jointWorld(j), { jointId: id });
   }
+  if (!anchor) return; // no live members — nothing to drag
   leftDrag = {
     kind: "multi",
     bodies: [...multiSel.bodies],
     joints: [...multiSel.joints],
     anchor,
-    grabOffset: sub(grab, anchor),
+    grabOffset: sub(grab, anchorPos),
     moved: false,
   };
   canvas.style.cursor = "move";
@@ -621,15 +683,16 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
   ground: "Click a joint to lock its position (it can still rotate), or a body / group to fix it entirely; click again to unground.",
   slider: "Click two joints on the same body to create a slider rail.",
+  guide: "Click two points to place an infinite construction guideline — clicks land on joints, body corners and edges (points get a coincident constraint). Drag the line to move it (angle kept), or drag one of its two points to re-aim it. With snap on, placements prefer guidelines over the grid.",
   rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. A multi-selection or group rotates as one about its centre. Snaps to 45°.",
   linearActuator: "Click a slider rail to drop a self-driving rider — it travels back and forth when animation runs.",
   motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
-  measure: "Click two references — a joint, body corner, body edge, slider rail, or a point on a body — then click where the value should sit.",
-  coincident: "Click two points (joints or body corners) to make them share a position.",
-  horizontal: "Click a body edge or slider rail — or two points — to make it horizontal.",
-  vertical: "Click a body edge or slider rail — or two points — to make it vertical.",
-  parallel: "Click two lines (body edges or slider rails) to make them parallel.",
-  perpendicular: "Click two lines (body edges or slider rails) to make them perpendicular.",
+  measure: "Click two references — a joint, body corner, body edge, slider rail, guideline, or a point on a body — then click where the value should sit.",
+  coincident: "Click two points (joints, body corners, or guideline points) to make them share a position.",
+  horizontal: "Click a body edge, slider rail or guideline — or two points — to make it horizontal.",
+  vertical: "Click a body edge, slider rail or guideline — or two points — to make it vertical.",
+  parallel: "Click two lines (body edges, slider rails or guidelines) to make them parallel.",
+  perpendicular: "Click two lines (body edges, slider rails or guidelines) to make them perpendicular.",
   equal: "Click two lines (body edges or slider rails) to make their lengths equal.",
 };
 
@@ -835,6 +898,8 @@ function resetTransient(): void {
   jointDraftExpanding = false;
   selectedJoint = null;
   sliderDraftIds = [];
+  guideDraft = null;
+  guideDraftPick = null;
   motorPivotDraft = null;
   measurePicks = [];
   selection = null;
@@ -1088,6 +1153,34 @@ function handleDrawClick(p: Vec2): void {
       }
       break;
     }
+    case "guide": {
+      // Two clicks define an infinite construction guideline. Each click lands exactly
+      // on an existing point element (joint / body corner / guide point — recorded for
+      // an auto-coincident), projects onto a rail / body edge, or grid/guide-snaps.
+      const { at, pick } = guidePlacementAt(p);
+      if (guideDraft === null) {
+        guideDraft = at;
+        guideDraftPick = pick;
+        return; // nothing committed yet
+      }
+      if (dist(at, guideDraft) < 1e-6) return; // same point — wait for a distinct second one
+      const g = scene.addGuide(guideDraft, at);
+      const firstPick = guideDraftPick;
+      disarmTool(); // clears the draft (and, via resetTransient, the selection)
+      if (g) {
+        // CAD-style auto-constraints: a defining point placed on an existing point
+        // sticks to it with a coincident (skipped if the sketch can't take it).
+        if (firstPick) {
+          tryAddConstraint(scene, "coincident", { kind: "guidePoint", guideId: g.id, which: "a" }, firstPick);
+        }
+        if (pick) {
+          tryAddConstraint(scene, "coincident", { kind: "guidePoint", guideId: g.id, which: "b" }, pick);
+        }
+        selection = { kind: "guide", id: g.id };
+        markDirty();
+      }
+      return;
+    }
     case "linearActuator": {
       // Single click on a slider rail: drop a self-driving rider on it (a free joint
       // attached as a rider) and create the actuator constraint that will drive it.
@@ -1140,8 +1233,10 @@ function handleDrawClick(p: Vec2): void {
 }
 
 // --- sketch-constraint tools -------------------------------------------------
-/** The point reference a constraint click would pick: a joint, then a body control vertex. */
-function constraintPointRefAt(p: Vec2): MeasureRef | null {
+/** The point reference a constraint click would pick: a joint, then a body control
+ *  vertex, then a guideline defining point. `excludeGuide` leaves one guideline out
+ *  (so a dragged guide point never picks itself). */
+function constraintPointRefAt(p: Vec2, excludeGuide?: number): MeasureRef | null {
   const j = scene.jointAt(p, pickRadius());
   if (j) return { kind: "joint", jointId: j.id };
   for (let i = scene.bodies.length - 1; i >= 0; i--) {
@@ -1151,10 +1246,13 @@ function constraintPointRefAt(p: Vec2): MeasureRef | null {
       if (dist(verts[vi], p) <= pickRadius()) return { kind: "vertex", bodyId: body.id, index: vi };
     }
   }
+  const gp = scene.guidePointAt(p, pickRadius(), excludeGuide);
+  if (gp) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
   return null;
 }
 
-/** The line reference a constraint click would pick: a slider rail, then a body control edge. */
+/** The line reference a constraint click would pick: a slider rail, then a body control
+ *  edge, then a guideline (its infinite line). */
 function constraintLineRefAt(p: Vec2): MeasureRef | null {
   const s = scene.sliderAt(p, pickRadius());
   if (s) return { kind: "rail", sliderId: s.id };
@@ -1167,7 +1265,46 @@ function constraintLineRefAt(p: Vec2): MeasureRef | null {
       }
     }
   }
+  const gl = scene.guideAt(p, pickRadius());
+  if (gl) return { kind: "guideLine", guideId: gl.id };
   return null;
+}
+
+/**
+ * Where a guide-point click (or the placement preview) lands: exactly on a picked point
+ * element (joint / body corner / another guide's point — returned as `pick` for the
+ * auto-coincident), projected onto a picked slider rail / body edge, else grid/guide-
+ * snapped like any placement.
+ */
+function guidePlacementAt(p: Vec2): { at: Vec2; pick: MeasureRef | null } {
+  const pick = constraintPointRefAt(p);
+  if (pick) {
+    const res = scene.resolveMeasureRef(pick);
+    if (res?.kind === "point") return { at: res.p, pick };
+  }
+  const s = scene.sliderAt(p, pickRadius());
+  const lineRes = s ? scene.resolveMeasureRef({ kind: "rail", sliderId: s.id }) : null;
+  let seg = lineRes?.kind === "line" ? lineRes : null;
+  if (!seg) {
+    // Body control edge under the cursor (same walk as constraintLineRefAt).
+    outer: for (let i = scene.bodies.length - 1; i >= 0; i--) {
+      const verts = scene.bodyControlWorld(scene.bodies[i]);
+      for (let ei = 0; ei < verts.length; ei++) {
+        const a = verts[ei];
+        const b = verts[(ei + 1) % verts.length];
+        if (distToSegment(p, a, b) <= pickRadius()) {
+          seg = { kind: "line", a, b };
+          break outer;
+        }
+      }
+    }
+  }
+  if (seg) {
+    const ab = sub(seg.b, seg.a);
+    const t = Math.max(0, Math.min(1, dot(sub(p, seg.a), ab) / Math.max(lenSq(ab), 1e-9)));
+    return { at: add(seg.a, scale(ab, t)), pick: null };
+  }
+  return { at: snap(p), pick: null };
 }
 
 /** The reference the armed constraint tool would pick at `p` (for hover + clicks). */
@@ -1193,7 +1330,7 @@ function handleConstraintClick(p: Vec2): void {
   const kind = tool as SketchConstraintKind;
   const ref = constraintRefAt(p);
   if (!ref) return; // empty space — keep waiting for a reference
-  const isLine = ref.kind === "rail" || ref.kind === "edge";
+  const isLine = ref.kind === "rail" || ref.kind === "edge" || ref.kind === "guideLine";
   if (constraintPicks.length === 0) {
     if ((kind === "horizontal" || kind === "vertical") && isLine) {
       commitConstraint(kind, ref);
@@ -1242,11 +1379,58 @@ function sketchActive(): boolean {
 /**
  * Live-solve the sketch during a draw-mode edit (drags, rotates): the moved geometry
  * stays where the user put it as far as the constraints allow, and everything
- * constrained to it follows — CAD-style sketch dragging. A solve that can't converge
- * mid-drag is simply skipped (the next successful one re-tightens the sketch).
+ * constrained to it follows — CAD-style sketch dragging. The dragged geometry is
+ * passed to the solver as *anchored*, so constraints never tug it back mid-drag —
+ * free elements (guidelines especially) absorb the whole correction and follow
+ * exactly, which keeps a dragged group rigid.
+ *
+ * When the anchored solve is *infeasible* — satisfying the constraints would require
+ * moving the dragged geometry itself (e.g. pulling the free point of a vertical
+ * guideline sideways when its other point is bound to a joint) — the constraints win:
+ * a symmetric re-solve runs right away, so the drag can only move things along the
+ * directions the constraints leave free. Geometry is never allowed to sit in a
+ * constraint-breaking pose mid-drag.
  */
 function solveSketchLive(): void {
-  if (mode === "draw" && sketchActive()) solveSketch(scene);
+  if (mode !== "draw" || !sketchActive()) return;
+  const anchors = dragAnchorVars();
+  if (!anchors) {
+    solveSketch(scene);
+    return;
+  }
+  if (solveSketch(scene, anchors).length > 0) solveSketch(scene);
+}
+
+/** The sketch variables pinned by the active drag / rotate (undefined when idle). */
+function dragAnchorVars(): Set<string> | undefined {
+  const keys: string[] = [];
+  if (rotateDrag) {
+    for (const id of rotateDrag.bodyIds) keys.push(...anchorVarsForBody(scene, id));
+    for (const id of rotateDrag.jointIds) keys.push(...anchorVarsForJoint(scene, id));
+  } else if (leftDrag) {
+    switch (leftDrag.kind) {
+      case "body":
+        keys.push(...anchorVarsForBody(scene, leftDrag.id));
+        break;
+      case "joint":
+        keys.push(...anchorVarsForJoint(scene, leftDrag.id));
+        break;
+      case "vertex":
+        keys.push(anchorVarForVertex(leftDrag.bodyId, leftDrag.index));
+        break;
+      case "multi":
+        for (const id of leftDrag.bodies) keys.push(...anchorVarsForBody(scene, id));
+        for (const id of leftDrag.joints) keys.push(...anchorVarsForJoint(scene, id));
+        break;
+      case "guide":
+        keys.push(...anchorVarsForGuide(leftDrag.id));
+        break;
+      case "guidePoint":
+        keys.push(anchorVarForGuidePoint(leftDrag.id, leftDrag.which));
+        break;
+    }
+  }
+  return keys.length ? new Set(keys) : undefined;
 }
 
 // --- inline dimension-value editing ------------------------------------------
@@ -1326,6 +1510,11 @@ function measureRefAt(p: Vec2): MeasureRef | null {
       if (dist(verts[vi], p) <= pickRadius()) return { kind: "vertex", bodyId: body.id, index: vi };
     }
   }
+  // Guides are draw-mode-only aids (invisible in sim), so only draw-mode picks see them.
+  if (mode === "draw") {
+    const gp = scene.guidePointAt(p, pickRadius());
+    if (gp) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
+  }
   const s = scene.sliderAt(p, pickRadius());
   if (s) return { kind: "rail", sliderId: s.id };
   for (let i = scene.bodies.length - 1; i >= 0; i--) {
@@ -1336,6 +1525,10 @@ function measureRefAt(p: Vec2): MeasureRef | null {
         return { kind: "edge", bodyId: body.id, index: ei };
       }
     }
+  }
+  if (mode === "draw") {
+    const gl = scene.guideAt(p, pickRadius());
+    if (gl) return { kind: "guideLine", guideId: gl.id };
   }
   const body = scene.bodyAt(p);
   if (body) {
@@ -1406,9 +1599,21 @@ function handleSelectClick(p: Vec2): void {
     selection = { kind: "joint", id: j.id };
     return;
   }
+  // A guideline's defining points are small point targets — they beat the line picks.
+  const gp = scene.guidePointAt(p, pickRadius());
+  if (gp) {
+    selection = { kind: "guide", id: gp.guide.id };
+    return;
+  }
   const s = scene.sliderAt(p, pickRadius());
   if (s) {
     selection = { kind: "slider", id: s.id };
+    return;
+  }
+  // Guidelines are thin precise targets, so (like rails) they win over body areas.
+  const gl = scene.guideAt(p, pickRadius());
+  if (gl) {
+    selection = { kind: "guide", id: gl.id };
     return;
   }
   // Keep the selected body when clicking on/near its control polygon (its edges sit on
@@ -1493,6 +1698,7 @@ function deleteSelection(): void {
   else if (selection.kind === "joint") scene.removeJoint(selection.id);
   else if (selection.kind === "measure") scene.removeMeasurement(selection.id);
   else if (selection.kind === "sketch") scene.removeSketchConstraint(selection.id);
+  else if (selection.kind === "guide") scene.removeGuide(selection.id);
   else scene.removeConstraint(selection.id); // slider: remove it, keep the joints
   selection = null;
   markDirty();
@@ -1790,6 +1996,22 @@ canvas.addEventListener("mousedown", (e) => {
           const anchor = scene.jointWorld(scene.getJoint(selection.id)!);
           leftDrag = { kind: "joint", id: selection.id, grabOffset: sub(world, anchor), moved: false };
           canvas.style.cursor = "move";
+        } else if (selection?.kind === "guide") {
+          // On a defining point: re-aim the line; elsewhere on the line: move it whole.
+          const g = scene.getGuide(selection.id)!;
+          const gp = scene.guidePointAt(world, pickRadius());
+          if (gp && gp.guide.id === g.id) {
+            leftDrag = {
+              kind: "guidePoint",
+              id: g.id,
+              which: gp.which,
+              grabOffset: sub(world, g[gp.which]),
+              moved: false,
+            };
+          } else {
+            leftDrag = { kind: "guide", id: g.id, grabOffset: sub(world, g.a), moved: false };
+          }
+          canvas.style.cursor = "move";
         } else if (multiHitAt(world)) {
           // A plain click on a grouped body selected its whole group — drag it as one.
           startMultiDrag(world);
@@ -1891,16 +2113,34 @@ canvas.addEventListener("mousemove", (e) => {
       leftDrag.moved = true;
       return;
     }
-    // Snap the dragged anchor to the grid (in absolute terms), preserving where it was grabbed.
-    const target = snap(sub(world, leftDrag.grabOffset));
+    // A dragged guide point lands on joints / body corners / other guides' points
+    // (exact, like placement) before falling back to the grid/guide snap — its own
+    // guideline is excluded from every pick (it can't snap to itself).
+    if (leftDrag.kind === "guidePoint") {
+      const raw = sub(world, leftDrag.grabOffset);
+      const pick = constraintPointRefAt(raw, leftDrag.id);
+      const res = pick ? scene.resolveMeasureRef(pick) : null;
+      const to = res?.kind === "point" ? res.p : snap(raw, leftDrag.id);
+      scene.moveGuidePoint(leftDrag.id, leftDrag.which, to);
+      leftDrag.moved = true;
+      solveSketchLive(); // constraints on the guide hold while it follows
+      return;
+    }
+    // Snap the dragged anchor to the grid (in absolute terms), preserving where it was
+    // grabbed. A dragged guideline is left out of the snap targets (it can't snap to itself).
+    const target = snap(
+      sub(world, leftDrag.grabOffset),
+      leftDrag.kind === "guide" ? leftDrag.id : undefined
+    );
     const delta = sub(target, dragAnchorWorld(leftDrag));
     if (leftDrag.kind === "vertex") scene.moveBodyVertex(leftDrag.bodyId, leftDrag.index, delta);
     else if (leftDrag.kind === "body") scene.moveBody(leftDrag.id, delta);
+    else if (leftDrag.kind === "guide") scene.moveGuide(leftDrag.id, delta);
     else if (leftDrag.kind === "multi") {
-      // Move the whole multi-selection together by the same delta.
+      // Move the whole multi-selection together by the same delta (the anchor is
+      // re-read live in dragAnchorWorld, so the delta always closes the real gap).
       for (const id of leftDrag.bodies) scene.moveBody(id, delta);
       for (const id of leftDrag.joints) scene.moveJoint(id, delta);
-      leftDrag.anchor = target;
     } else scene.moveJoint(leftDrag.id, delta);
     leftDrag.moved = true;
     solveSketchLive(); // sketch dragging: constraints hold while the geometry follows
@@ -1919,7 +2159,9 @@ canvas.addEventListener("mousemove", (e) => {
       selectedBodyVertexAt(world) >= 0 ||
       hoverJoint !== null ||
       hoverBody !== null ||
-      measurementLabelAt(world) !== null;
+      measurementLabelAt(world) !== null ||
+      scene.guidePointAt(world, pickRadius()) !== null ||
+      scene.guideAt(world, pickRadius()) !== undefined;
     // With Shift held a drag would be rigid (sim-style), so hint with the sim grab cursor.
     canvas.style.cursor = grabbable ? (e.shiftKey ? "grab" : "move") : "crosshair";
   }
@@ -1953,20 +2195,29 @@ window.addEventListener("mouseup", (e) => {
     canvas.style.cursor = defaultCursor();
   }
   if (e.button === 0 && leftDrag) {
-    if (leftDrag.moved) {
+    const finished = leftDrag;
+    leftDrag = null; // cleared first: the settle solve below must run un-anchored
+    if (finished.moved) {
       // A rigid drag solves in the frame loop; run one last solve so the pose the user
       // released at is exactly the pose that gets persisted.
-      if (leftDrag.kind === "rigid") {
-        timedSolve("rigidDrag", leftDrag.driver, 100, undefined, leftDrag.freeze);
+      if (finished.kind === "rigid") {
+        timedSolve("rigidDrag", finished.driver, 100, undefined, finished.freeze);
+      } else if (finished.kind !== "measureLabel") {
+        // Settle: one symmetric sketch solve at rest, repairing anything the anchored
+        // live solves couldn't satisfy without moving the dragged geometry.
+        solveSketchLive();
       }
       markDirty(); // persist a reposition (a plain click just selects)
     }
-    leftDrag = null;
     canvas.style.cursor = defaultCursor();
   }
   if (e.button === 0 && rotateDrag) {
-    if (rotateDrag.moved) markDirty(); // a plain click (no drag) only selected the body
-    rotateDrag = null;
+    const didRotate = rotateDrag.moved;
+    rotateDrag = null; // cleared first, as above
+    if (didRotate) {
+      solveSketchLive(); // symmetric settle at rest
+      markDirty(); // a plain click (no drag) only selected the body
+    }
     canvas.style.cursor = defaultCursor();
   }
   if (e.button === 0 && mode === "sim" && driver) {
@@ -2026,7 +2277,8 @@ canvas.addEventListener("dblclick", (e) => {
   }
 });
 
-/** Draw-tool shortcuts: each tool is armed by the first letter of its name. */
+/** Draw-tool shortcuts: mostly the first letter of the tool's name (L = guideLine —
+ *  G is Ground; the actuator moved to A when L was given to guidelines). */
 const TOOL_KEYS: Record<string, Tool> = {
   b: "body",
   j: "joint",
@@ -2034,7 +2286,8 @@ const TOOL_KEYS: Record<string, Tool> = {
   g: "ground",
   s: "slider",
   r: "rotate",
-  l: "linearActuator",
+  l: "guide",
+  a: "linearActuator",
   m: "motor",
   d: "measure",
   o: "coincident",
@@ -2430,6 +2683,13 @@ function sliderDraftView(): { rail: Vec2[]; cursor: Vec2 } | null {
   return { rail: sliderDraftIds.map((id) => scene.jointWorld(scene.getJoint(id)!)), cursor };
 }
 
+/** Guide tool: the first defining point placed, with the live cursor (line preview,
+ *  landing where the click would — on elements, projections, or the grid). */
+function guideDraftView(): { a: Vec2; cursor: Vec2 } | null {
+  if (mode !== "draw" || tool !== "guide" || guideDraft === null || !cursor) return null;
+  return { a: guideDraft, cursor: guidePlacementAt(cursor).at };
+}
+
 /** Control-vertex handles to show for the body selected in select / rotate mode (else null). */
 function editVerticesView(): Vec2[] | null {
   if (mode !== "draw" || (tool !== null && tool !== "rotate") || selection?.kind !== "body")
@@ -2481,6 +2741,8 @@ function sketchRefKey(ref: MeasureRef): string {
     case "vertex": return `v:${ref.bodyId}:${ref.index}`;
     case "edge": return `e:${ref.bodyId}:${ref.index}`;
     case "rail": return `r:${ref.sliderId}`;
+    case "guidePoint": return `gp:${ref.guideId}:${ref.which}`;
+    case "guideLine": return `gl:${ref.guideId}`;
     default: return "?";
   }
 }
@@ -2498,6 +2760,13 @@ function refHovered(ref: MeasureRef, p: Vec2): boolean {
   if (res.kind === "point" && dist(res.p, p) <= r) return true;
   if (res.kind === "line" && distToSegment(p, res.a, res.b) <= r) return true;
   if (ref.kind === "vertex" || ref.kind === "edge") return scene.bodyAt(p)?.id === ref.bodyId;
+  // A guideline is infinite: hovering anywhere along it (not just the defining
+  // segment) reveals its constraints; so does hovering either defining point.
+  if (ref.kind === "guideLine" || ref.kind === "guidePoint") {
+    const g = scene.getGuide(ref.guideId);
+    if (!g) return false;
+    return distToLine(p, g.a, normalize(sub(g.b, g.a))) <= r || dist(g.a, p) <= r || dist(g.b, p) <= r;
+  }
   return false;
 }
 
@@ -2615,6 +2884,7 @@ function frame(now?: number): void {
     marquee: boxSelect?.moved ? { a: boxSelect.start, b: boxSelect.end } : null,
     editVertices: editVerticesView(),
     sliderDraft: sliderDraftView(),
+    guideDraft: guideDraftView(),
     bodyJointDraft: bodyJointDraftView(),
     driverJoint: driver?.jointId ?? null,
     rotatePivot: rotateDrag?.pivot ?? null,

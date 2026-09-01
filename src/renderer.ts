@@ -16,7 +16,7 @@ export interface RenderInput {
   /** Joints highlighted as in-progress tool picks (connect's first pick, slider rail picks). */
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
-  selection: { kind: "body" | "joint" | "slider" | "measure" | "sketch"; id: number } | null;
+  selection: { kind: "body" | "joint" | "slider" | "measure" | "sketch" | "guide"; id: number } | null;
   /** Draw-mode multi-selection (Ctrl+click / box select): bodies + free joints, highlighted. */
   multiSelected: { bodies: number[]; joints: number[] } | null;
   /** In-progress box selection: the rectangle's two world corners, or null. */
@@ -45,6 +45,8 @@ export interface RenderInput {
    * (1 → previewing toward the cursor; 2 → rail set, awaiting the riding joint).
    */
   sliderDraft: { rail: Vec2[]; cursor: Vec2 } | null;
+  /** Guide tool: the first defining point placed (line previews toward the cursor). */
+  guideDraft: { a: Vec2; cursor: Vec2 } | null;
   /**
    * While building a body from joints: `outline` are the picked joints; `preview` is
    * the expanded body boundary once the user is sizing its margin (else null).
@@ -173,6 +175,24 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   const bottom = (h - view.ty) / s;
 
   if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
+
+  // Construction guidelines (draw mode only): infinite dash-dot lines drawn under the
+  // geometry, with small handles on the two defining points (drag one to re-aim the line).
+  if (input.mode === "draw") {
+    const selectedGuide = input.selection?.kind === "guide" ? input.selection.id : null;
+    for (const g of scene.guides) {
+      const sel = g.id === selectedGuide;
+      const color = sel ? theme.ink : GUIDE_COLOR;
+      drawGuideLine(ctx, g.a, g.b, left, top, right, bottom, px, color, sel);
+      dot(ctx, g.a, px(sel ? 4.5 : 3.5), color);
+      dot(ctx, g.b, px(sel ? 4.5 : 3.5), color);
+    }
+    if (input.guideDraft) {
+      const { a, cursor } = input.guideDraft;
+      drawGuideLine(ctx, a, cursor, left, top, right, bottom, px, GUIDE_COLOR, false);
+      dot(ctx, a, px(3.5), theme.ink);
+    }
+  }
 
   // Bodies.
   const selectedBody =
@@ -540,6 +560,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
 
 /** Accent colour for measurements (fixed across themes, like the other semantic accents). */
 const MEASURE_COLOR = "#46c2cb";
+/** Construction guidelines: muted, CAD-centre-line grey (reads on both themes). */
+const GUIDE_COLOR = "#9aa0ac";
 /** Accent colour for sketch constraints (violet, distinct from every other accent). */
 const SKETCH_COLOR = "#b48cff";
 /** Rejected sketch edits flash the conflicting items in the error red. */
@@ -721,6 +743,37 @@ function drawMeasurement(
   ctx.textBaseline = "middle";
   ctx.fillText(text, sx, sy + 0.5);
   ctx.restore();
+}
+
+/**
+ * Draw the **infinite** line through `a`–`b`, clipped to the visible world rect, as a
+ * dash-dot construction line. The segment drawn is centred on the viewport (projection
+ * of the view centre onto the line ± the viewport diagonal), so it always spans the view.
+ */
+function drawGuideLine(
+  ctx: CanvasRenderingContext2D,
+  a: Vec2,
+  b: Vec2,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+  px: (n: number) => number,
+  color: string,
+  selected: boolean
+): void {
+  const d = normalize(sub(b, a));
+  if (d.x === 0 && d.y === 0) return;
+  const tc = (((left + right) / 2 - a.x) * d.x + ((bottom + top) / 2 - a.y) * d.y);
+  const half = Math.hypot(right - left, bottom - top);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = px(selected ? 2 : 1.2);
+  ctx.setLineDash([px(12), px(5), px(3), px(5)]);
+  ctx.beginPath();
+  ctx.moveTo(a.x + d.x * (tc - half), a.y + d.y * (tc - half));
+  ctx.lineTo(a.x + d.x * (tc + half), a.y + d.y * (tc + half));
+  ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 function drawGrid(

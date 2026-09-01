@@ -30,6 +30,10 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
 - **Group** — a permanent set of bodies that acts as **one object**: selected, moved, rotated,
   mirrored and copied together in Draw mode, and simulated as a **single rigid body** (nothing
   inside a group can move relative to the rest). Made and dissolved with `Ctrl+G` (a toggle).
+- **Guideline** — an **infinite construction line** through two points (Draw mode only; it
+  never takes part in simulation). Placement, dragging and drawing snap onto guidelines in
+  preference to the grid, and guidelines participate in sketch constraints and measurements
+  like any other line — see *Construction guidelines* below.
 
 ## Usage
 
@@ -49,13 +53,14 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed slider rail keeps its ground — the track must stay anchored). |
 | **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
+| **Guideline** | `L` | Click **two points** to place an **infinite construction line**. Each click lands exactly on a joint / body corner / another guide's point (with an automatic **coincident** constraint), projects onto a rail or body edge, or snaps to the grid. See *Construction guidelines* below. |
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
-| **Linear actuator** | `L` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
+| **Linear actuator** | `A` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
-| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node, or any point inside a body) or a **line** (a slider rail or a body edge). Works in **both modes** — see *Measurements* below. |
-| **Coincident** | `O` | Click **two points** (joints or body corners) to make them share a position. |
-| **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge or slider rail** (one click), or **two points**, to make it horizontal / vertical. |
-| **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges or slider rails) to constrain their directions — or, for Equal, their lengths. |
+| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node, a guide point, or any point inside a body) or a **line** (a slider rail, a body edge, or a guideline). Works in **both modes** — see *Measurements* below. |
+| **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position. |
+| **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, slider rail or guideline** (one click), or **two points**, to make it horizontal / vertical. |
+| **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, slider rails or guidelines) to constrain their directions — or, for Equal, their lengths (Equal doesn't take guidelines: an infinite line has no length). |
 
 **Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
@@ -139,6 +144,29 @@ works in both modes. Measurements are saved with the mechanism.
   vertical snaps straight and gets the H/V constraint; a vertex clicked **on an existing
   joint or corner** lands exactly there and gets a coincident constraint.
 
+**Construction guidelines** (Draw mode). The Guideline tool (`L`) places **infinite lines**
+through two points — CAD-style scaffolding for laying out a mechanism:
+
+- **Placement snaps to existing elements**: a click lands exactly on a joint, body corner or
+  another guide's defining point (and records an automatic **coincident** constraint so the
+  guide stays attached when that point later moves), projects onto a slider rail or body
+  edge, or falls back to the grid.
+- **Snapping prefers guidelines over the grid**: with Snap on, anything you place or drag
+  lands *on* a nearby guideline (projected onto it) — and where two guidelines cross, on
+  their **intersection**. Great for laying out joints along a line or at a crossing.
+- **Editing**: click to select (its two defining points show as dots); drag the **line** to
+  move it whole (angle preserved), drag a **defining point** to re-aim it, **Delete** to
+  remove it (its constraints and measurements go with it).
+- **Constraints on guidelines** (H / V / parallel / perpendicular / coincident, and
+  measurements — including driving dimensions) follow one strict rule: they are satisfied
+  by moving **only free guide points — never joints or body nodes**. A constraint that
+  would need geometry to move is rejected with a red flash (e.g. Horizontal on a guide
+  whose both points are bound to joints at different heights). Constraints hold **during**
+  drags too: dragging the free point of a joint-bound vertical guide slides it vertically —
+  it can't be pulled off-axis even momentarily.
+- Guidelines are drawing aids only: they're invisible (and unpickable) in Simulate mode,
+  never affect the simulation, and don't travel with copy/paste.
+
 **Body colour.** A colour swatch in the toolbar sets the active colour: with **nothing selected**
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
 and editing it recolours the body.
@@ -198,7 +226,7 @@ snaps whichever is nearest the grab point — the body's centroid or one of its 
 and snapping are independent (you can snap to a hidden grid).
 
 ### Navigate
-- **Mouse wheel** — zoom toward the cursor (0.05× to 20×).
+- **Mouse wheel** — zoom toward the cursor (0.05× to 200×).
 - **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode).
 - **Fit to screen** (`F`, or the toolbar button) — frame the whole mechanism centered in the canvas.
 - **Tab** — switch between Draw and Simulate mode.
@@ -217,7 +245,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups, grounded bodies, rigid-drag scoped solves
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups, grounded bodies, rigid-drag scoped solves, construction guidelines
 ```
 
 ## How it works
@@ -258,9 +286,16 @@ it kinematically without disturbing — or being spuriously blocked by — the r
 coordinates) and re-resolve them to world geometry every frame, which is why their values track
 the running simulation for free.
 **Sketch constraints** get their own solver (`sketch.ts`): the same Gauss-Seidel projection
-idea, but over *shape* — the world positions of body corner nodes and joints — rather than
-rigid poses. After a converged solve, bodies rebuild from their new control polygons; an
-unsatisfiable solve never touches the scene (edits are rejected, not approximated).
+idea, but over *shape* — the world positions of body corner nodes, joints and guideline
+defining points — rather than rigid poses. After a converged solve, bodies rebuild from
+their new control polygons; an unsatisfiable solve never touches the scene (edits are
+rejected, not approximated). Every solver variable carries a **mobility rank** —
+construction (guide points) < geometry (nodes, joints) < actively-dragged — and each
+correction flows entirely to the more mobile side (equals split evenly). That one rule
+gives the CAD feel: guide constraints move guides rather than geometry, dragged geometry
+is never tugged back by its constraints (guides follow it exactly, so groups stay rigid),
+and when a drag would need the constraints to give way, a symmetric re-solve runs the same
+frame so the constraint visibly holds and the drag slides along the directions left free.
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `sketch.ts`,
 `view.ts` (camera),

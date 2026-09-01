@@ -38,15 +38,31 @@ export const sketchConfig = {
 // --- variables --------------------------------------------------------------
 
 /**
- * A solver variable is one movable world point: a body control vertex (`v:body:index`)
- * or a joint (`j:id`). A joint coincident with one of its body's control vertices is
- * *linked* to it (see VERTEX_LINK_EPS in model.ts), so its refs map onto the vertex
- * variable — the constraint then drives the shape, exactly like dragging the joint does.
+ * A solver variable is one movable world point: a body control vertex (`v:body:index`),
+ * a joint (`j:id`), or a guideline defining point (`g:id:a` / `g:id:b`). A joint
+ * coincident with one of its body's control vertices is *linked* to it (see
+ * VERTEX_LINK_EPS in model.ts), so its refs map onto the vertex variable — the
+ * constraint then drives the shape, exactly like dragging the joint does.
  */
 interface System {
   keys: string[];
   pos: Vec2[];
   index: Map<string, number>;
+  /**
+   * Per-variable mobility rank: 0 = construction (guideline defining points),
+   * 1 = geometry (body control vertices, joints), 2 = pinned by the active drag.
+   * Corrections always flow to the **lowest** rank in a pair — so guide constraints
+   * are satisfied by moving free guide points, never by moving joints or body nodes,
+   * and a drag is never tugged back by its constraints. Equal ranks split evenly.
+   */
+  rank: number[];
+  anchorSet?: ReadonlySet<string>;
+}
+
+/** Mobility rank of a variable (see System.rank). */
+function varRank(key: string, anchored: boolean): number {
+  if (anchored) return 2;
+  return key.startsWith("g:") ? 0 : 1;
 }
 
 interface SolveItem {
@@ -82,6 +98,9 @@ function pointVarKey(scene: Scene, ref: MeasureRef): string | null {
     }
     return `j:${ref.jointId}`;
   }
+  if (ref.kind === "guidePoint") {
+    return scene.getGuide(ref.guideId) ? `g:${ref.guideId}:${ref.which}` : null;
+  }
   return null; // bodyPoint refs are measurement-only; line refs aren't points
 }
 
@@ -102,6 +121,11 @@ function lineVarKeys(scene: Scene, ref: MeasureRef): [string, string] | null {
     const b = pointVarKey(scene, { kind: "joint", jointId: c.railB });
     return a && b ? [a, b] : null;
   }
+  if (ref.kind === "guideLine") {
+    return scene.getGuide(ref.guideId)
+      ? [`g:${ref.guideId}:a`, `g:${ref.guideId}:b`]
+      : null;
+  }
   return null;
 }
 
@@ -113,6 +137,10 @@ function varWorld(scene: Scene, key: string): Vec2 | null {
     const index = Number(parts[2]);
     if (!body || index < 0 || index >= body.controlLocal.length) return null;
     return scene.bodyControlWorld(body)[index];
+  }
+  if (parts[0] === "g") {
+    const g = scene.getGuide(Number(parts[1]));
+    return g ? vec(g[parts[2] as "a" | "b"].x, g[parts[2] as "a" | "b"].y) : null;
   }
   const j = scene.getJoint(Number(parts[1]));
   return j ? scene.jointWorld(j) : null;
@@ -126,7 +154,18 @@ function acquire(scene: Scene, sys: System, key: string): number | null {
   sys.index.set(key, sys.keys.length);
   sys.keys.push(key);
   sys.pos.push(vec(w.x, w.y));
+  sys.rank.push(varRank(key, sys.anchorSet?.has(key) ?? false));
   return sys.keys.length - 1;
+}
+
+/**
+ * Fraction of a pairwise correction the *first* participant absorbs: equal ranks
+ * split evenly; otherwise the lower-ranked (more mobile) side takes the whole
+ * correction — construction yields to geometry, everything yields to the drag.
+ */
+function shareOf(rankA: number, rankB: number): number {
+  if (rankA === rankB) return 0.5;
+  return rankA < rankB ? 1 : 0;
 }
 
 // --- projections -------------------------------------------------------------
@@ -146,13 +185,16 @@ function rotateAboutMid(pos: Vec2[], i: number, j: number, ang: number): void {
   pos[j] = add(mid, rotate(sub(pos[j], mid), ang));
 }
 
-/** Rotate both lines toward a common direction; returns the displacement-scale residual. */
+/** Rotate both lines toward a common direction; returns the displacement-scale residual.
+ *  `w1` is the fraction of the misalignment line 1 absorbs (0.5 = even split; 0 = only
+ *  line 2 rotates — line 1 is anchored by the active drag). */
 function projectParallel(
   pos: Vec2[],
   l1: [number, number],
   l2: [number, number],
   offset: number,
-  apply: boolean
+  apply: boolean,
+  w1 = 0.5
 ): number {
   const d1 = sub(pos[l1[1]], pos[l1[0]]);
   const d2 = sub(pos[l2[1]], pos[l2[0]]);
@@ -162,8 +204,8 @@ function projectParallel(
   const dd = wrapHalfPi(Math.atan2(d2.y, d2.x) - Math.atan2(d1.y, d1.x) - offset);
   const err = Math.abs(Math.sin(dd)) * (Math.max(n1, n2) / 2);
   if (apply && Math.abs(dd) > EPS) {
-    rotateAboutMid(pos, l1[0], l1[1], dd / 2);
-    rotateAboutMid(pos, l2[0], l2[1], -dd / 2);
+    if (w1 > EPS) rotateAboutMid(pos, l1[0], l1[1], dd * w1);
+    if (1 - w1 > EPS) rotateAboutMid(pos, l2[0], l2[1], -dd * (1 - w1));
   }
   return err;
 }
@@ -197,6 +239,7 @@ function buildConstraintItem(
     const j = acquire(scene, sys, kb);
     if (i === null || j === null) return "invalid";
     if (i === j) return null; // same variable: trivially satisfied
+    const wp = shareOf(sys.rank[i], sys.rank[j]); // fraction i absorbs
     if (kind === "coincident") {
       return {
         id: c.id,
@@ -204,9 +247,10 @@ function buildConstraintItem(
         run(pos, apply) {
           const err = dist(pos[i], pos[j]) / 2;
           if (apply) {
-            const mid = scale(add(pos[i], pos[j]), 0.5);
-            pos[i] = vec(mid.x, mid.y);
-            pos[j] = vec(mid.x, mid.y);
+            // Weighted meeting point: an anchored side stays put, the free side comes to it.
+            const m = add(scale(pos[i], 1 - wp), scale(pos[j], wp));
+            pos[i] = vec(m.x, m.y);
+            pos[j] = vec(m.x, m.y);
           }
           return err;
         },
@@ -219,7 +263,7 @@ function buildConstraintItem(
       run(pos, apply) {
         const err = Math.abs(pos[i][axis] - pos[j][axis]) / 2;
         if (apply) {
-          const m = (pos[i][axis] + pos[j][axis]) / 2;
+          const m = pos[i][axis] * (1 - wp) + pos[j][axis] * wp;
           pos[i][axis] = m;
           pos[j][axis] = m;
         }
@@ -234,6 +278,7 @@ function buildConstraintItem(
     const j = acquire(scene, sys, keys[1]);
     if (i === null || j === null) return "invalid";
     if (i === j) return null;
+    const wl = shareOf(sys.rank[i], sys.rank[j]);
     const axis: "x" | "y" = kind === "horizontal" ? "y" : "x";
     return {
       id: c.id,
@@ -241,7 +286,7 @@ function buildConstraintItem(
       run(pos, apply) {
         const err = Math.abs(pos[i][axis] - pos[j][axis]) / 2;
         if (apply) {
-          const m = (pos[i][axis] + pos[j][axis]) / 2;
+          const m = pos[i][axis] * (1 - wl) + pos[j][axis] * wl;
           pos[i][axis] = m;
           pos[j][axis] = m;
         }
@@ -258,6 +303,11 @@ function buildConstraintItem(
   const b0 = acquire(scene, sys, kb[0]);
   const b1 = acquire(scene, sys, kb[1]);
   if (a0 === null || a1 === null || b0 === null || b1 === null) return "invalid";
+  // A line is as mobile as its most mobile endpoint (it can rotate/shift through it).
+  const wLine = shareOf(
+    Math.min(sys.rank[a0], sys.rank[a1]),
+    Math.min(sys.rank[b0], sys.rank[b1])
+  );
   if (kind === "equal") {
     return {
       id: c.id,
@@ -267,7 +317,7 @@ function buildConstraintItem(
         const n2 = dist(pos[b0], pos[b1]);
         const err = Math.abs(n1 - n2) / 2;
         if (apply && n1 > EPS && n2 > EPS) {
-          const target = (n1 + n2) / 2;
+          const target = n1 * (1 - wLine) + n2 * wLine; // anchored line keeps its length
           const scaleLine = (i: number, j: number, from: number) => {
             const mid = scale(add(pos[i], pos[j]), 0.5);
             const f = target / from;
@@ -285,7 +335,7 @@ function buildConstraintItem(
   return {
     id: c.id,
     kind: "constraint",
-    run: (pos, apply) => projectParallel(pos, [a0, a1], [b0, b1], offset, apply),
+    run: (pos, apply) => projectParallel(pos, [a0, a1], [b0, b1], offset, apply, wLine),
   };
 }
 
@@ -295,7 +345,7 @@ function buildDimensionItem(
   spec: DimSpec
 ): SolveItem | "invalid" {
   const { m, target } = spec;
-  const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge";
+  const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
   const aLine = isLine(m.refA);
   const bLine = isLine(m.refB);
   if (!aLine && !bLine) {
@@ -305,6 +355,7 @@ function buildDimensionItem(
     const i = acquire(scene, sys, ka);
     const j = acquire(scene, sys, kb);
     if (i === null || j === null || i === j) return "invalid";
+    const wi = shareOf(sys.rank[i], sys.rank[j]); // fraction i absorbs
     if (m.axis === "h" || m.axis === "v") {
       const axis: "x" | "y" = m.axis === "h" ? "x" : "y";
       return {
@@ -315,8 +366,8 @@ function buildDimensionItem(
           const s = d === 0 ? 1 : Math.sign(d);
           const err = target - Math.abs(d);
           if (apply) {
-            pos[j][axis] += (s * err) / 2;
-            pos[i][axis] -= (s * err) / 2;
+            pos[j][axis] += s * err * (1 - wi);
+            pos[i][axis] -= s * err * wi;
           }
           return Math.abs(err);
         },
@@ -331,8 +382,8 @@ function buildDimensionItem(
         const u = l > EPS ? scale(d, 1 / l) : vec(1, 0);
         const err = target - l;
         if (apply) {
-          pos[j] = add(pos[j], scale(u, err / 2));
-          pos[i] = sub(pos[i], scale(u, err / 2));
+          pos[j] = add(pos[j], scale(u, err * (1 - wi)));
+          pos[i] = sub(pos[i], scale(u, err * wi));
         }
         return Math.abs(err);
       },
@@ -347,13 +398,17 @@ function buildDimensionItem(
     const b0 = acquire(scene, sys, kb[0]);
     const b1 = acquire(scene, sys, kb[1]);
     if (a0 === null || a1 === null || b0 === null || b1 === null) return "invalid";
+    const wA = shareOf(
+      Math.min(sys.rank[a0], sys.rank[a1]),
+      Math.min(sys.rank[b0], sys.rank[b1])
+    ); // fraction line A absorbs
     // A driving line–line distance implies the pair is parallel (CAD convention):
     // align the directions, then set the gap along the common normal.
     return {
       id: m.id,
       kind: "dimension",
       run(pos, apply) {
-        const alignErr = projectParallel(pos, [a0, a1], [b0, b1], 0, apply);
+        const alignErr = projectParallel(pos, [a0, a1], [b0, b1], 0, apply, wA);
         const d1 = sub(pos[a1], pos[a0]);
         const n1 = len(d1);
         if (n1 < EPS) return alignErr;
@@ -364,11 +419,12 @@ function buildDimensionItem(
         const sg = s === 0 ? 1 : Math.sign(s);
         const err = sg * target - s;
         if (apply) {
-          const shift = scale(n, err / 2);
-          pos[b0] = add(pos[b0], shift);
-          pos[b1] = add(pos[b1], shift);
-          pos[a0] = sub(pos[a0], shift);
-          pos[a1] = sub(pos[a1], shift);
+          const shiftB = scale(n, err * (1 - wA));
+          const shiftA = scale(n, err * wA);
+          pos[b0] = add(pos[b0], shiftB);
+          pos[b1] = add(pos[b1], shiftB);
+          pos[a0] = sub(pos[a0], shiftA);
+          pos[a1] = sub(pos[a1], shiftA);
         }
         return Math.max(alignErr, Math.abs(err));
       },
@@ -384,6 +440,7 @@ function buildDimensionItem(
   const l0 = acquire(scene, sys, kl[0]);
   const l1 = acquire(scene, sys, kl[1]);
   if (p === null || l0 === null || l1 === null || p === l0 || p === l1) return "invalid";
+  const wp = shareOf(sys.rank[p], Math.min(sys.rank[l0], sys.rank[l1])); // fraction the point absorbs
   return {
     id: m.id,
     kind: "dimension",
@@ -396,8 +453,8 @@ function buildDimensionItem(
       const sg = s === 0 ? 1 : Math.sign(s);
       const err = sg * target - s;
       if (apply) {
-        pos[p] = add(pos[p], scale(n, err / 2));
-        const shift = scale(n, err / 2);
+        pos[p] = add(pos[p], scale(n, err * wp));
+        const shift = scale(n, err * (1 - wp));
         pos[l0] = sub(pos[l0], shift);
         pos[l1] = sub(pos[l1], shift);
       }
@@ -409,9 +466,10 @@ function buildDimensionItem(
 /**
  * Gather every draw-mode sketch constraint and driving dimension into a solvable
  * system. `override` replaces (or adds) one dimension's target — the candidate edit.
+ * `anchors` marks the variables pinned by an active drag (see System.anchored).
  */
-function buildSystem(scene: Scene, override?: DimSpec): BuildResult {
-  const sys: System = { keys: [], pos: [], index: new Map() };
+function buildSystem(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<string>): BuildResult {
+  const sys: System = { keys: [], pos: [], index: new Map(), rank: [], anchorSet: anchors };
   const items: SolveItem[] = [];
   const invalid: SketchBreak[] = [];
   for (const c of scene.sketch) {
@@ -468,7 +526,9 @@ function applySystem(scene: Scene, sys: System): void {
     if (len(delta) < EPS) continue;
     const parts = key.split(":");
     if (parts[0] === "v") scene.moveBodyVertex(Number(parts[1]), Number(parts[2]), delta);
-    else scene.moveJoint(Number(parts[1]), delta);
+    else if (parts[0] === "g") {
+      scene.moveGuidePoint(Number(parts[1]), parts[2] as "a" | "b", sys.pos[i]);
+    } else scene.moveJoint(Number(parts[1]), delta);
   }
 }
 
@@ -487,8 +547,8 @@ function restore(scene: Scene, snap: string): void {
  * left exactly as it was (unconverged solves never touch it; a verification failure
  * after applying — e.g. joint containment clamped a solved position away — reverts).
  */
-function solveAndApply(scene: Scene, override?: DimSpec): SketchBreak[] {
-  const build = buildSystem(scene, override);
+function solveAndApply(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<string>): SketchBreak[] {
+  const build = buildSystem(scene, override, anchors);
   if (build.invalid.length) return build.invalid;
   if (!build.items.length) return [];
   if (!iterate(build.sys, build.items)) {
@@ -498,7 +558,7 @@ function solveAndApply(scene: Scene, override?: DimSpec): SketchBreak[] {
   applySystem(scene, build.sys);
   // Re-measure from the actual scene: the edit paths may have adjusted positions
   // (containment clamps), so verify the applied state truly satisfies everything.
-  const after = buildSystem(scene, override);
+  const after = buildSystem(scene, override, anchors);
   const bad = residualBreaks(after.sys, after.items).concat(after.invalid);
   if (bad.length) {
     restore(scene, snap);
@@ -511,9 +571,50 @@ function solveAndApply(scene: Scene, override?: DimSpec): SketchBreak[] {
  * Re-solve every sketch constraint + driving dimension from the current geometry and
  * apply the result. Returns [] on success; on failure the scene is untouched and the
  * unsatisfiable items are returned. Call after edits that may have violated the sketch.
+ *
+ * `anchors` (optional) names the drag-pinned variables — pass the keys from the
+ * `anchorVars*` helpers while live-solving during a drag, so the dragged geometry is
+ * never tugged back by its constraints (free elements follow it instead). Static
+ * solves omit it and stay fully symmetric.
  */
-export function solveSketch(scene: Scene): SketchBreak[] {
-  return solveAndApply(scene);
+export function solveSketch(scene: Scene, anchors?: ReadonlySet<string>): SketchBreak[] {
+  return solveAndApply(scene, undefined, anchors);
+}
+
+// --- drag anchoring ------------------------------------------------------------
+
+/** Anchor keys pinning a whole body's shape: every control vertex + every joint on it. */
+export function anchorVarsForBody(scene: Scene, bodyId: number): string[] {
+  const body = scene.getBody(bodyId);
+  if (!body) return [];
+  const keys = body.controlLocal.map((_, i) => vertexKey(bodyId, i));
+  for (const j of scene.joints) {
+    if (j.bodyId !== bodyId) continue;
+    const k = pointVarKey(scene, { kind: "joint", jointId: j.id });
+    if (k) keys.push(k);
+  }
+  return keys;
+}
+
+/** Anchor key(s) pinning one joint (resolves to its linked vertex variable if stuck). */
+export function anchorVarsForJoint(scene: Scene, jointId: number): string[] {
+  const k = pointVarKey(scene, { kind: "joint", jointId });
+  return k ? [k] : [];
+}
+
+/** Anchor keys pinning a whole guideline (both defining points). */
+export function anchorVarsForGuide(guideId: number): string[] {
+  return [`g:${guideId}:a`, `g:${guideId}:b`];
+}
+
+/** Anchor key pinning one guideline defining point. */
+export function anchorVarForGuidePoint(guideId: number, which: "a" | "b"): string {
+  return `g:${guideId}:${which}`;
+}
+
+/** Anchor key pinning one body control vertex. */
+export function anchorVarForVertex(bodyId: number, index: number): string {
+  return vertexKey(bodyId, index);
 }
 
 /**
@@ -638,6 +739,9 @@ function refOwnerBody(scene: Scene, ref: MeasureRef): number | null {
       const b = scene.getJoint(c.railB);
       return a && b && a.bodyId !== null && a.bodyId === b.bodyId ? a.bodyId : null;
     }
+    case "guidePoint":
+    case "guideLine":
+      return null; // guides are world construction — no body owns them
   }
 }
 
