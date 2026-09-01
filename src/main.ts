@@ -12,7 +12,7 @@ import {
   SketchConstraintKind,
   sameMeasureRef,
 } from "./model";
-import { solve, Driver, ConstraintBreak, SolveStats, solverConfig } from "./solver";
+import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig } from "./solver";
 import { solveSketch, applyDrivingDimension, tryAddConstraint, autoConstrainBody, SketchBreak } from "./sketch";
 import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, lenSq, scale, rotate, normalize, roundedConvexBody, distToSegment } from "./geometry";
@@ -286,7 +286,10 @@ type LeftDrag =
   | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean }
   // Whole multi-selection move: `anchor` is the current world position of the snap anchor
   // (nearest centroid / corner / free joint to the grab), updated as the drag applies.
-  | { kind: "multi"; bodies: number[]; joints: number[]; anchor: Vec2; grabOffset: Vec2; moved: boolean };
+  | { kind: "multi"; bodies: number[]; joints: number[]; anchor: Vec2; grabOffset: Vec2; moved: boolean }
+  // Rigid (Shift) drag: the grabbed selection moves like in simulation — the solver drives
+  // it each frame, grounds hold, and the rest of the scene is frozen (`freeze`).
+  | { kind: "rigid"; driver: Driver; freeze: SolveFreeze; moved: boolean };
 let leftDrag: LeftDrag | null = null;
 
 /** Current world position of a drag's anchor (the point that snaps to the grid). */
@@ -297,6 +300,7 @@ function dragAnchorWorld(d: LeftDrag): Vec2 {
     return scene.measurementLabelPos(scene.getMeasurement(d.id)!) ?? vec(0, 0);
   }
   if (d.kind === "multi") return d.anchor;
+  if (d.kind === "rigid") return d.driver.target; // solver-driven; no snap anchor
   return scene.jointWorld(scene.getJoint(d.id)!);
 }
 
@@ -439,6 +443,58 @@ function startMultiDrag(grab: Vec2): void {
   canvas.style.cursor = "move";
 }
 
+/**
+ * Begin a rigid (Shift) drag: the current selection — the multi-selection / group, or
+ * the single body / joint under the cursor (a joint drags its body, with its whole
+ * group) — is driven by the sim solver while everything else in the scene is frozen.
+ * Grounds hold, pins/sliders to the frozen world constrain the motion, and the poses
+ * the drag ends in become the new drawn layout. Returns false when nothing under the
+ * cursor is rigid-draggable (the caller falls back to the normal click handling).
+ */
+function startRigidDrag(grab: Vec2): boolean {
+  // What moves: the multi-selection when the grab lands on it, else the single selection.
+  const bodies = new Set<number>();
+  const joints = new Set<number>();
+  const addBodyWithGroup = (id: number): void => {
+    const g = scene.groupOf(id);
+    for (const b of g ? g.bodyIds : [id]) bodies.add(b);
+  };
+  if (multiSel && multiHitAt(grab)) {
+    multiSel.bodies.forEach((id) => bodies.add(id));
+    multiSel.joints.forEach((id) => joints.add(id));
+  } else if (selection?.kind === "body") {
+    addBodyWithGroup(selection.id);
+  } else if (selection?.kind === "joint") {
+    const j = scene.getJoint(selection.id);
+    if (!j) return false;
+    if (j.bodyId !== null) addBodyWithGroup(j.bodyId);
+    else joints.add(j.id);
+  } else {
+    return false;
+  }
+  // The driver grabs what's under the cursor: a joint of the moving set, or a point on
+  // one of its bodies (driven like the sim-mode body grab).
+  const j = scene.jointAt(grab, pickRadius());
+  let drv: Driver;
+  if (j && (j.bodyId === null ? joints.has(j.id) : bodies.has(j.bodyId))) {
+    drv = { jointId: j.id, target: grab };
+  } else {
+    const b = scene.bodyAt(grab);
+    if (!b || !bodies.has(b.id)) return false;
+    drv = { bodyId: b.id, local: rotate(sub(grab, b.pos), -b.angle), target: grab };
+  }
+  // Freeze the rest of the scene: every body and free joint not being dragged.
+  const freeze: SolveFreeze = {
+    bodies: new Set(scene.bodies.filter((b) => !bodies.has(b.id)).map((b) => b.id)),
+    joints: new Set(
+      scene.joints.filter((jt) => jt.bodyId === null && !joints.has(jt.id)).map((jt) => jt.id)
+    ),
+  };
+  leftDrag = { kind: "rigid", driver: drv, freeze, moved: false };
+  canvas.style.cursor = "grabbing";
+  return true;
+}
+
 /** Box-select result: bodies fully inside the rectangle, plus free joints inside it. */
 function applyBoxSelect(): void {
   if (!boxSelect) return;
@@ -459,7 +515,7 @@ function applyBoxSelect(): void {
   setMulti(bodies, joints);
 }
 
-/** G with 2+ bodies multi-selected: make (or extend) a permanent group over them. */
+/** With 2+ bodies multi-selected: make (or extend) a permanent group over them. */
 function groupSelection(): void {
   if (mode !== "draw" || !multiSel || multiSel.bodies.size < 2) return;
   const g = scene.addGroup([...multiSel.bodies]);
@@ -468,13 +524,33 @@ function groupSelection(): void {
   markDirty();
 }
 
-/** Ctrl+G: dissolve every permanent group the current selection touches. */
+/** Dissolve every permanent group the current selection touches. */
 function ungroupSelection(): void {
   if (mode !== "draw") return;
   const ids: number[] = [];
   if (multiSel) ids.push(...multiSel.bodies);
   if (selection?.kind === "body") ids.push(selection.id);
   if (ids.length && scene.ungroup(ids)) markDirty();
+}
+
+/**
+ * Ctrl+G: group / ungroup toggle. A multi-selection of 2+ bodies becomes a permanent
+ * group (merging any groups it touches) — unless it already is exactly one group,
+ * which dissolves instead. With fewer bodies selected (a single grouped body counts,
+ * since groups are selection-atomic) it ungroups; otherwise it's a no-op.
+ */
+function toggleGroupSelection(): void {
+  if (mode !== "draw") return;
+  if (multiSel && multiSel.bodies.size >= 2) {
+    const first = scene.groupOf([...multiSel.bodies][0]);
+    const isOneGroup =
+      first !== undefined &&
+      [...multiSel.bodies].every((id) => scene.groupOf(id)?.id === first.id);
+    if (isOneGroup) ungroupSelection();
+    else groupSelection();
+    return;
+  }
+  ungroupSelection();
 }
 
 // --- canvas sizing -------------------------------------------------------
@@ -539,11 +615,11 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · Ctrl+click or drag a box to select several bodies (they move together) · G groups them permanently, Ctrl+G ungroups · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · [ and ] round corners · Delete to remove.",
+  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · [ and ] round corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
-  ground: "Click a joint to lock its position (it can still rotate); click a grounded joint to unground it.",
+  ground: "Click a joint to lock its position (it can still rotate), or a body / group to fix it entirely; click again to unground.",
   slider: "Click two joints on the same body to create a slider rail.",
   rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. A multi-selection or group rotates as one about its centre. Snaps to 45°.",
   linearActuator: "Click a slider rail to drop a self-driving rider — it travels back and forth when animation runs.",
@@ -983,7 +1059,12 @@ function handleDrawClick(p: Vec2): void {
           scene.addGround(j.id, scene.jointWorld(j));
           placed = true;
         }
+        break;
       }
+      // No joint under the cursor: ground/unground the body there — and, if it belongs
+      // to a permanent group, the whole group (a grounded body is fixed in simulation).
+      const b = scene.bodyAt(p);
+      if (b && scene.toggleBodyGround(b.id)) placed = true;
       break;
     }
     case "slider": {
@@ -1679,6 +1760,11 @@ canvas.addEventListener("mousedown", (e) => {
         const anchor = scene.bodyControlWorld(scene.getBody(selection.id)!)[vi];
         leftDrag = { kind: "vertex", bodyId: selection.id, index: vi, grabOffset: sub(world, anchor), moved: false };
         canvas.style.cursor = "move";
+      } else if (e.shiftKey) {
+        // Shift+drag: rigid drag — what's grabbed moves like in simulation (grounds
+        // hold, connections constrain) while the rest of the scene stays frozen.
+        if (!multiHitAt(world)) handleSelectClick(world); // select what's under the cursor first
+        startRigidDrag(world); // a miss (empty space / a label) leaves the click as a plain select
       } else if (multiHitAt(world)) {
         // Clicking any element of the multi-selection drags the whole selection.
         startMultiDrag(world);
@@ -1797,6 +1883,14 @@ canvas.addEventListener("mousemove", (e) => {
       leftDrag.moved = true;
       return;
     }
+    // Rigid drag: just aim the driver at the cursor — the frame loop runs the scoped
+    // solve (sim-style, so sketch constraints don't apply; a grabbed joint's target
+    // snaps to the grid, a grabbed body point follows the cursor exactly).
+    if (leftDrag.kind === "rigid") {
+      leftDrag.driver.target = leftDrag.driver.jointId !== undefined ? snap(world) : world;
+      leftDrag.moved = true;
+      return;
+    }
     // Snap the dragged anchor to the grid (in absolute terms), preserving where it was grabbed.
     const target = snap(sub(world, leftDrag.grabOffset));
     const delta = sub(target, dragAnchorWorld(leftDrag));
@@ -1826,7 +1920,8 @@ canvas.addEventListener("mousemove", (e) => {
       hoverJoint !== null ||
       hoverBody !== null ||
       measurementLabelAt(world) !== null;
-    canvas.style.cursor = grabbable ? "move" : "crosshair";
+    // With Shift held a drag would be rigid (sim-style), so hint with the sim grab cursor.
+    canvas.style.cursor = grabbable ? (e.shiftKey ? "grab" : "move") : "crosshair";
   }
   // Rotate tool: a grab cursor over a node of the selected body or any body.
   if (mode === "draw" && tool === "rotate") {
@@ -1858,7 +1953,14 @@ window.addEventListener("mouseup", (e) => {
     canvas.style.cursor = defaultCursor();
   }
   if (e.button === 0 && leftDrag) {
-    if (leftDrag.moved) markDirty(); // persist a reposition (a plain click just selects)
+    if (leftDrag.moved) {
+      // A rigid drag solves in the frame loop; run one last solve so the pose the user
+      // released at is exactly the pose that gets persisted.
+      if (leftDrag.kind === "rigid") {
+        timedSolve("rigidDrag", leftDrag.driver, 100, undefined, leftDrag.freeze);
+      }
+      markDirty(); // persist a reposition (a plain click just selects)
+    }
     leftDrag = null;
     canvas.style.cursor = defaultCursor();
   }
@@ -1996,22 +2098,12 @@ window.addEventListener("keydown", (e) => {
     pasteAt(cursor);
     return;
   }
-  // Ctrl/Cmd+G dissolves the permanent group(s) the current selection touches.
+  // Ctrl/Cmd+G toggles grouping: 2+ selected bodies group (merging any groups touched)
+  // unless the selection already is exactly one group, which dissolves — as does a
+  // single selected grouped body. Plain G is the Ground tool only (see TOOL_KEYS).
   if (mod && e.key.toLowerCase() === "g" && mode === "draw") {
     e.preventDefault();
-    ungroupSelection();
-    return;
-  }
-  // G with 2+ bodies multi-selected makes them a permanent group; otherwise G falls
-  // through to the tool shortcuts below and arms the Ground tool as before.
-  if (
-    e.key.toLowerCase() === "g" &&
-    !e.ctrlKey && !e.metaKey && !e.altKey &&
-    mode === "draw" && tool === null &&
-    multiSel && multiSel.bodies.size >= 2
-  ) {
-    e.preventDefault();
-    groupSelection();
+    toggleGroupSelection();
     return;
   }
   if (e.key === "Escape") {
@@ -2272,11 +2364,12 @@ function timedSolve(
   label: string,
   drv: Driver | null,
   iterations = 100,
-  anchors?: Map<number, Vec2>
+  anchors?: Map<number, Vec2>,
+  freeze?: SolveFreeze
 ): void {
   const t0 = performance.now();
   const stats: SolveStats = { phaseASweeps: 0, cleanupSweeps: 0, finalResidual: 0 };
-  solveBreaks = solve(scene, drv, iterations, 1, anchors, stats);
+  solveBreaks = solve(scene, drv, iterations, 1, anchors, stats, freeze);
   const dt = performance.now() - t0;
   if (label === "anim") {
     animSolveMin = Math.min(animSolveMin, dt);
@@ -2496,6 +2589,10 @@ function frame(now?: number): void {
     if (pauseOnImpossible && impossibleFrames >= IMPOSSIBLE_PAUSE_FRAMES) setAnimating(false);
   } else if (mode === "sim" && driver) {
     timedSolve("drive", driver);
+  } else if (mode === "draw" && leftDrag?.kind === "rigid" && leftDrag.moved) {
+    // Draw-mode rigid (Shift) drag: drive the grabbed selection with the rest of the
+    // scene frozen. The solved poses ARE the drawn layout (persisted on mouseup).
+    timedSolve("rigidDrag", leftDrag.driver, 100, undefined, leftDrag.freeze);
   }
   syncColorPicker();
   syncPropsPanel();

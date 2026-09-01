@@ -15,7 +15,9 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
   point). A free joint can be grounded to make an anchor without needing a body.
 - **Constraints**
   - **Pin** — connect two joints on different bodies; they share a position but can rotate freely.
-  - **Ground** — lock a joint's position; its body can still rotate about it.
+  - **Ground** — lock a joint's position; its body can still rotate about it. A **body (or a
+    whole group)** can also be grounded, which fixes it completely in simulation — position
+    and rotation.
   - **Slider** — a rail defined by two joints. Joints attached to it (riders) slide along the
     segment **between** those two joints, with hard stops at each end. The rail can be two joints
     on one body (it moves with the body, coupling two bodies) or **two free joints**, which makes
@@ -27,8 +29,7 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
     angular speed (Hz) when animation runs. Off-animation the body behaves normally.
 - **Group** — a permanent set of bodies that acts as **one object**: selected, moved, rotated,
   mirrored and copied together in Draw mode, and simulated as a **single rigid body** (nothing
-  inside a group can move relative to the rest). Made from a multi-selection with `G`,
-  dissolved with `Ctrl+G`.
+  inside a group can move relative to the rest). Made and dissolved with `Ctrl+G` (a toggle).
 
 ## Usage
 
@@ -46,7 +47,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **slider rail (or rail node)** and it's automatically attached to that slider as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
-| **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click an **already-grounded** joint to remove its ground (a free joint anchoring a world-fixed slider rail keeps its ground — the track must stay anchored). |
+| **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed slider rail keeps its ground — the track must stay anchored). |
 | **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `L` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
@@ -68,14 +69,25 @@ when Snap is on), or double-click a **node** to remove it (kept to a minimum of 
 **Delete** to remove the selection: a body takes its joints and constraints with it; a slider rail
 leaves its joints; a joint detaches from any rail.
 
+**Rigid drag (Shift).** Hold **Shift** when you start a drag and the grabbed object moves the way
+it would in Simulate mode instead of being translated: it behaves as a rigid body, **grounds hold
+exactly** (a body with a grounded joint pivots about it; ground anchors and grounded bodies never
+move), and its pins and slider connections to the rest of the scene constrain the motion — while
+**everything you're not dragging stays frozen in place**. It's like simulating just the selected
+object (or group, or multi-selection). A still-open dotted pin from the dragged object to the rest
+of the scene snaps closed as the drag starts pulling, so you can use it to assemble a mechanism
+piece by piece. The pose you release at becomes the new drawn layout (one undo step). Note: rigid
+drags ignore sketch constraints (like simulation does), so a rigid rotation can leave an H/V
+constraint unsatisfied until the next sketch edit re-solves it.
+
 **Multi-select & groups.** **Ctrl/Cmd+click** bodies (or free joints) to build a multi-selection,
 or **drag a box** on empty space to select everything fully inside it (Ctrl+drag adds). A
-multi-selection **moves together** — drag any member — and Delete removes it all. With two or
-more bodies selected, press **`G`** to make them a **permanent group** (`Ctrl/Cmd+G` ungroups;
-grouping something already grouped merges). A group behaves as **one object**: clicking any
-member selects the whole group (shown with a dashed outline while selected), it drags, rotates,
-mirrors and copies as a unit — and in **Simulate mode it moves as a single rigid body**. With
-fewer than two bodies selected, `G` still arms the Ground tool.
+multi-selection **moves together** — drag any member — and Delete removes it all.
+**`Ctrl/Cmd+G` toggles grouping**: with two or more bodies selected it makes them a **permanent
+group** (grouping something already grouped merges); pressed on a selection that already *is* a
+group, it dissolves it. A group behaves as **one object**: clicking any member selects the whole
+group (shown with a dashed outline while selected), it drags, rotates, mirrors and copies as a
+unit — and in **Simulate mode it moves as a single rigid body**.
 
 **Editing utilities** (on the selection — a single body, or a multi-selection / group):
 - **Copy / Paste** (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`, keyboard only) — duplicate the selection with
@@ -148,8 +160,8 @@ normal (green) rider. While drawing, a constraint whose endpoints don't yet touc
 ### Simulate
 Drag any joint, or **any part of a body**, to drive the mechanism. The grabbed point follows the
 cursor and every connected body moves with it. Structural constraints always win over the cursor —
-a grounded body can only rotate about its ground point, and the grabbed point walks to the nearest
-position it can actually reach. A **permanent group** moves as one rigid body: grab any member and
+a body with a grounded joint can only rotate about it, a **grounded body or group doesn't move at
+all**, and the grabbed point walks to the nearest position it can actually reach. A **permanent group** moves as one rigid body: grab any member and
 the whole group translates and rotates together (a ground on one member anchors them all). Your
 drawn layout is preserved when you switch back to Draw.
 
@@ -158,7 +170,7 @@ run-animation button in the sim-mode toolbar (or Spacebar) to drive them all at 
 speeds. Press again to pause. Pressing play **resumes from the current pose** — phases auto-fit so
 the motion picks up smoothly from wherever you (or the previous animation) left things.
 
-**Impossible assemblies.** Grounded joints are sacred — they never move. If a mechanism can't be
+**Impossible assemblies.** Grounded joints and grounded bodies are sacred — they never move. If a mechanism can't be
 assembled (a constraint can't be satisfied), the solver keeps every solvable part working and
 flags only the genuinely impossible connections: each shows a **red dotted line** between the two
 points that can't meet (pulled as close together as the rest of the assembly allows), the joints
@@ -205,7 +217,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups, grounded bodies, rigid-drag scoped solves
 ```
 
 ## How it works
@@ -236,6 +248,12 @@ pins/sliders propagate the imposed motion through the whole assembly.
 group's combined mass, centroid and inertia, and every impulse translates + rotates **all**
 members about the combined centroid — so pins, sliders, grounds, drags and motors on any member
 move the group as one body, and constraints *between* members of one group are inert.
+**Grounded bodies** are the degenerate case: an immovable host (zero mass and inertia), sacred
+like a ground anchor — grounding any member fixes its whole group.
+**Rigid (Shift) drags** reuse the same solver with a per-call *freeze scope*: everything outside
+the dragged selection is held immovable, and constraints living entirely inside the frozen part
+are taken out of scope (neither solved nor reported), so dragging one link of a mechanism poses
+it kinematically without disturbing — or being spuriously blocked by — the rest of the drawing.
 **Measurements** store references to elements (a joint, a body node or edge, a rail — never raw
 coordinates) and re-resolve them to world geometry every frame, which is why their values track
 the running simulation for free.

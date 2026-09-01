@@ -288,6 +288,11 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   for (const c of scene.constraints) {
     if (c.kind === "ground") drawGroundSymbol(ctx, c.anchor, s);
   }
+  // Grounded bodies: the same ground symbol at the body's centroid (every member of a
+  // grounded group carries the flag, so each shows its own symbol).
+  for (const body of scene.bodies) {
+    if (body.grounded) drawGroundSymbol(ctx, body.pos, s);
+  }
 
   // Motors: a thin yellow arm from pivot to crank (the rotation arm) plus a curved
   // arrow at the pivot indicating that side spins. Drawn before the joints so the

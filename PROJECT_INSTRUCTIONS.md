@@ -93,8 +93,10 @@ lands exactly there and gets a coincident.
 toggles bodies (and free joints) in a multi-selection; **box select** (left-drag on empty
 space) selects bodies fully inside the marquee plus free joints inside it (Ctrl+drag adds).
 A multi-selection **moves together** (drag any member), deletes together, copies together.
-**G** with 2+ bodies selected makes a **permanent group** (Ctrl+G ungroups; overlapping
-groups merge). Groups are **selection-atomic** (clicking any member selects — and drags /
+**Ctrl/Cmd+G** is a group/ungroup **toggle**: 2+ selected bodies become a **permanent
+group** (merging any groups touched) — unless the selection already is exactly one group,
+which dissolves (a single selected grouped body also ungroups). Plain **G** is the Ground
+tool only. Groups are **selection-atomic** (clicking any member selects — and drags /
 rotates / mirrors / copies — the whole group) and behave as a **single rigid body in
 simulation**: the solver treats a group as one composite (combined mass/centroid/inertia;
 every impulse moves the whole group; intra-group pins/riders are inert). A group shows a
@@ -104,6 +106,26 @@ joints, grounds, internal sliders, and internal sketch constraints / driving dim
 all travel. Mirror reflects a multi-selection about its combined bbox centre; Rotate turns
 it rigidly about that centre — and `mirrorBody` now **remaps vertex/edge/bodyPoint refs**
 (the control-polygon reversal used to leave constraints pointing at the wrong corners).
+**Grounded bodies & groups** (serialization v10): the Ground tool now also toggles on a
+**body** (no joint under the cursor) — and, through a grouped body, on its **whole group**.
+A grounded body is **completely fixed in simulation** (position *and* rotation, unlike a
+joint ground which allows pivoting); draw mode still edits/moves it freely. In the solver
+grounded bodies are immovable fixed hosts — sacred like ground anchors: pins/sliders/drags
+can't budge them, a rail on one is a fixed track, and an unreachable pin onto one is
+reported as a break. Rendered as the standard ground symbol at the body's centroid.
+**Rigid (Shift) drag** (draw mode): holding **Shift** when starting a select-mode drag
+moves the grabbed body / joint's body / free joint / multi-selection (groups always whole)
+**like in simulation**: the sim solver drives the grab point toward the cursor each frame,
+grounds hold exactly (a body pivots about its grounded joint; ground anchors never move),
+pins/sliders to the rest of the scene constrain the motion — and the **rest of the scene
+is frozen** in place. An open (dotted) pin from the dragged selection to the frozen world
+**snaps closed** as the drag starts pulling (assemble-on-drag). The released poses become
+the new drawn layout (one undo step). Implemented as an optional **`SolveFreeze`** scope
+on `solve` — frozen bodies/free joints are immovable, and constraints entirely inside the
+frozen world are **out of scope** (not solved, not reported as breaks). Rigid drags are
+sim-like, so **sketch constraints are not applied** during them (a rigid rotation can
+leave an H/V constraint unsatisfied until the next sketch solve). Plain drag, vertex
+reshaping and label drags are unchanged (vertex handles win over Shift).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -130,7 +152,9 @@ it rigidly about that centre — and `mirrorBody` now **remaps vertex/edge/bodyP
     hull outward). The render/physics polygon `local` is **derived** from these. Pose is `pos`
     (world centroid) + `angle`. `invMass`/`invInertia` from the derived polygon's area / second
     moment. `rebuildBody` regenerates `local`/centroid/mass and re-anchors attached joints when
-    the centroid shifts.
+    the centroid shifts. A `grounded` flag (v10) fixes the body completely in simulation
+    (see solver notes); `toggleBodyGround(bodyId)` toggles it — through a grouped body, on
+    every member of the group at once (any-grounded → all off, else all on).
   - `Joint` = a point with `bodyId` + `local`. If `bodyId` is a body, `local` is the offset
     from that body's centroid; if `bodyId === null` it is a **free joint** and `local` is its
     own world position (the solver treats it as a movable point particle).
@@ -247,12 +271,13 @@ it rigidly about that centre — and `mirrorBody` now **remaps vertex/edge/bodyP
     uniformly about its centroid — control polygon, corner radius, attached joints, their
     ground anchors, and `bodyPoint` measurement refs all together.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 9`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 10`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
-    constraints or driving flags, pre-v9 files no groups — all load fine as-is; loaded
-    groups are pruned against the loaded bodies).
+    constraints or driving flags, pre-v9 files no groups, pre-v10 bodies load ungrounded —
+    all load fine as-is; loaded groups are pruned against the loaded bodies). The
+    `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its colour.
 - **solver.ts** — `solve(scene, driver, iterations, relax, anchors?, stats?): ConstraintBreak[]` (each
   `ConstraintBreak` carries `a`/`b`/`error` plus a `joints: number[]` list naming the joints
   involved — pin endpoints, the grounded joint, an unreachable slider rider, or the anchor's joint
@@ -284,6 +309,20 @@ it rigidly about that centre — and `mirrorBody` now **remaps vertex/edge/bodyP
   group, or per lone body) and translates all members together. `sameRigid(a, b)` (same
   body or same group) makes **intra-group pins and riders inert**: skipped in the sweeps
   and excluded from residuals/breaks (the group is rigid — they could only fight it).
+  **Grounded bodies** (`fixedBodies`, rebuilt per solve by `buildFixedBodies`): every
+  `grounded` body — expanded to whole groups — is an **immovable fixed host** in
+  `bodyHostAt` / `railHostFor` and skipped by `projectGrounds`; like ground anchors they
+  are sacred, so an unreachable pin/slider onto one is disabled and reported as a break.
+  **Scoped solves** (`SolveFreeze`, optional last param of `solve`): extra bodies / free
+  joints held immovable for one call (frozen free joints join the `grounded` set; frozen
+  bodies join `fixedBodies`) — the engine behind draw mode's rigid (Shift) drag. Unlike
+  grounding, freezing takes the frozen part's constraints **out of scope**: when a freeze
+  is active, `eachUnit` skips any unit none of whose participants can move
+  (`jointImmovable`: pin with both ends immovable, ground on a fixed body, immovable rider
+  on an immovable rail) so a still-open pin inside the frozen world is neither counted in
+  residuals nor reported as a break — this solve couldn't change it, and counting it would
+  drive Phase B into disabling constraints the drag isn't touching. Without a freeze,
+  behaviour is exactly as before (immovable-vs-immovable conflicts still report).
   See "Solver notes" below.
 - **sketch.ts** — the **sketch solver** (draw-mode only; the sim solver is untouched).
   Gauss-Seidel projection like solver.ts, but the variables are *shape*: the world
@@ -323,7 +362,9 @@ it rigidly about that centre — and `mirrorBody` now **remaps vertex/edge/bodyP
   break lines. Draws under the camera transform in world space: world-locked grid
   (spacing = `gridStep`, drawn only when `gridVisible`),
   bodies (selected/hovered highlighted), slider rails as bounded segments with end-caps,
-  ground symbols, joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
+  ground symbols (per ground constraint, plus one at the **centroid of every grounded
+  body** — each member of a grounded group carries the flag, so each shows its own),
+  joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
   rail joints get a green ring; **a loose free joint gets a muted dashed ring — but a free joint
   that rides a slider or defines a rail drops the dashed ring and renders as anchored**), corner-handle squares
   for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
@@ -480,9 +521,27 @@ it rigidly about that centre — and `mirrorBody` now **remaps vertex/edge/bodyP
     single selection. Clicking any member drags the whole set (`LeftDrag` kind `"multi"`:
     same delta via `moveBody`/`moveJoint` per member; snap anchor = nearest
     centroid/corner/joint to the grab). Delete removes every member; Esc / plain click
-    elsewhere clears. **G** with ≥ 2 bodies selected → `groupSelection()`
-    (`scene.addGroup`; with fewer, G falls through to arming the Ground tool as before);
-    **Ctrl/Cmd+G** → `ungroupSelection()`. Renderer inputs `multiSelected` + `marquee`.
+    elsewhere clears. **Ctrl/Cmd+G** → `toggleGroupSelection()`: ≥ 2 selected bodies →
+    `groupSelection()` (`scene.addGroup`, merging groups touched) unless the selection
+    already is exactly one group → `ungroupSelection()` (a single selected grouped body
+    also ungroups). Plain **G** always arms the Ground tool. Renderer inputs
+    `multiSelected` + `marquee`.
+  - **Rigid (Shift) drag** (`LeftDrag` kind `"rigid"`, draw/select mode): Shift+mousedown
+    selects what's under the cursor (`handleSelectClick`, unless the grab lands on the
+    multi-selection) and `startRigidDrag` builds the movable set — the multi-selection, or
+    the single body / joint's body (always whole groups), or a lone free joint — a `Driver`
+    at the grab (a joint of the set, else a body-frame point like the sim body grab), and a
+    `SolveFreeze` naming **everything else** (all other bodies + free joints). Mousemove
+    only aims the driver (a grabbed joint's target grid-snaps; a body point follows the
+    cursor exactly); the **frame loop** runs `timedSolve("rigidDrag", …, freeze)` each
+    frame while the drag is live, and mouseup runs one final solve before `markDirty`.
+    Sim-like, so `solveSketchLive` is **not** called; vertex-handle grabs win over Shift
+    (reshape), and Shift+hover shows the sim `grab` cursor. `timedSolve` gained the
+    optional `freeze` pass-through parameter. Breaks stay invisible in draw mode (the
+    render input already gates them to sim).
+  - **Ground tool on bodies**: a Ground-tool click with no joint under the cursor toggles
+    `scene.toggleBodyGround` on the body there — grounding/ungrounding it, or its whole
+    permanent group. Joint grounding is unchanged and takes pick priority.
   - **Edit utilities**: `copySelection`/`pasteAt` (clipboard is a `SelectionClip` held in
     `main` — a multi-selection copies via `extractSelection` with everything internal to it,
     incl. cross-body pins and group membership; a single body via `extractBody`; paste lands
@@ -542,7 +601,10 @@ aborts the current placement.
   body-less anchor; a body can still rotate about a grounded joint). **Clicking an
   already-grounded joint removes its ground** (toggle; duplicate grounds from earlier versions
   are all cleared). Exception: a free joint serving as a world-fixed slider-rail endpoint keeps
-  its ground — the rail must stay anchored (`addSlider`'s invariant).
+  its ground — the rail must stay anchored (`addSlider`'s invariant). With **no joint under
+  the cursor**, clicking a **body** toggles grounding of the whole body — fixed position
+  *and* rotation in sim — and, through a grouped body, of its **whole group** (any member
+  grounded → all ungrounded, else all grounded).
 - **Slider** (`S`) — click two joints on the *same body* (a rail that moves with it), or two
   *free joints* (a world-fixed track — they get grounded automatically), to create a slider rail
   (riders are attached later via Connect). A free+body or cross-body pair restarts the draft.
@@ -590,12 +652,21 @@ Select mode (default, no tool armed):
   Dragging any selected element **moves the whole selection together**; Delete removes it
   all; a plain click elsewhere (or Esc) clears it. A single ungrouped body collapses back
   to a normal selection.
-- **Permanent groups**: with 2+ bodies multi-selected, **G** groups them permanently
-  (**Ctrl/Cmd+G** ungroups; grouping into an existing group merges). Groups are
+- **Permanent groups**: **Ctrl/Cmd+G** toggles grouping — with 2+ bodies multi-selected it
+  groups them permanently (grouping into an existing group merges); when the selection
+  already is exactly one group (or a single grouped body) it ungroups. Groups are
   selection-atomic — clicking any member selects the whole group — and show a faint dashed
   hull **while selected**. In draw mode they move/rotate/mirror/copy as one; in **sim they
-  are one rigid body** (see solver notes). With fewer than 2 bodies selected, G still arms
-  the Ground tool.
+  are one rigid body** (see solver notes).
+- **Rigid (Shift) drag**: hold **Shift** when starting a select-mode drag and the grabbed
+  object — a body (with its whole group), the body a grabbed joint sits on, a lone free
+  joint, or the whole multi-selection — moves **like in simulation** instead of being
+  translated: grounds hold exactly (a body pivots about its grounded joint; ground anchors
+  and grounded bodies never move), pins/sliders to the rest of the scene constrain the
+  motion, and **everything not being dragged stays frozen**. An open dotted pin from the
+  dragged object to the frozen world snaps closed as the drag pulls (assemble-on-drag).
+  The poses you release at become the new drawn layout (one undo step). Sketch constraints
+  are not applied during a rigid drag (sim-like); corner-handle reshaping wins over Shift.
 - `Delete` removes the selection: a body takes its joints/constraints with it; a slider keeps
   its joints; a joint detaches from any rail and any constraints referencing it go; a
   measurement just disappears (measurements are also cascade-removed with their elements).
@@ -631,8 +702,8 @@ Simulate mode:
   sim, so dragging-to-drive works first. Pressing play **phase-fits** every actuator/motor so the
   motion resumes smoothly from the current pose (the user can pause, drag a part somewhere new,
   and pressing play continues from there).
-- **Impossible assemblies** are flagged, not faked: grounds never move, the solvable parts still
-  solve, and every unsatisfiable pin/slider draws a **red dotted line** between the two points
+- **Impossible assemblies** are flagged, not faked: grounds (and grounded bodies) never move,
+  the solvable parts still solve, and every unsatisfiable pin/slider draws a **red dotted line** between the two points
   that can't meet (pulled as close as the assembly allows), with a red **"Assembly impossible"**
   banner. The joints involved in each break are also drawn **red** (red fill + red ring + slight
   size bump). A connected impossible piece does not disturb the parts that can be solved. The
@@ -807,6 +878,19 @@ Persistence:
   cross-body pin stays coincident); **shared-pivot rotation** rigidity; and the **mirror
   ref-remap fix** (vertex/edge refs follow their corners/edges through a mirror; a sketch
   solve right after mirroring — or after mirroring + dragging the group — is a no-op).
+- **grounded-bodies.ts** — grounded bodies/groups (20 checks): `toggleBodyGround` toggle
+  semantics (lone body on/off, whole-group grounding/ungrounding through any member); a
+  grounded body immovable under drag; a body pinned to one pivots about the pin while the
+  grounded body stays put; a rail on a grounded body is a fixed track (rider slides, clamps
+  at the end-stops); an unreachable pin between two grounded bodies reports a break with
+  neither moved; serialize/load v10 round-trip, pre-v10 files loading ungrounded, and
+  copy/paste carrying the flag per body.
+- **freeze-drag.ts** — scoped solves (`SolveFreeze`, the rigid-drag engine, 16 checks):
+  frozen bodies / free joints never move; the movable selection pivots about a pin to a
+  frozen body, keeps its ground anchors exactly, and a rider stays on a frozen rail; an
+  open pin from the selection to the frozen world snaps closed (assemble-on-drag); an open
+  pin **between two frozen bodies** is neither closed nor reported as a break — and the
+  same pin without a freeze is closed by a normal solve (the skip is freeze-only).
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from

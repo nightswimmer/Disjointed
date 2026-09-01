@@ -50,6 +50,13 @@ export interface Body {
   invMass: number;
   invInertia: number;
   color: string;
+  /**
+   * Grounded body: fixed in the world during simulation (the solver treats it as
+   * immovable, like a ground anchor — sacred, never disabled). Draw mode still edits
+   * and moves it freely. Grounding any member of a permanent group fixes the whole
+   * group (the group is rigid). Absent pre-v10 (loads as false).
+   */
+  grounded: boolean;
 }
 
 export interface Joint {
@@ -277,7 +284,7 @@ export interface SelectionClip {
   /** Paste reference: the mass-weighted centre of the copied bodies (a single body's
    *  own centroid), or the copied joints' average for a body-less clip. */
   center: Vec2;
-  bodies: { tmp: number; controlWorld: Vec2[]; radius: number; round: RoundMode; color: string }[];
+  bodies: { tmp: number; controlWorld: Vec2[]; radius: number; round: RoundMode; color: string; grounded: boolean }[];
   /** Copied joints: attached ones carry their body's tmp id, free ones null. */
   joints: { tmp: number; bodyTmp: number | null; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
@@ -291,7 +298,7 @@ export interface SelectionClip {
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target: number }[];
 }
 
-const FORMAT_VERSION = 9;
+const FORMAT_VERSION = 10;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -339,6 +346,7 @@ export class Scene {
       invMass: 1,
       invInertia: 1,
       color: PALETTE[this.bodies.length % PALETTE.length],
+      grounded: false,
     };
     this.bodies.push(body);
     this.rebuildBody(body);
@@ -1196,6 +1204,23 @@ export class Scene {
     return this.groups.length !== before;
   }
 
+  /**
+   * Toggle grounding on a body — and, when it belongs to a permanent group, on the whole
+   * group (one grounded member would fix the group anyway, since it's rigid; keeping the
+   * flags in step keeps the ground symbols honest). If any affected body is grounded,
+   * all are ungrounded; otherwise all are grounded. Returns whether anything changed.
+   */
+  toggleBodyGround(bodyId: number): boolean {
+    if (!this.getBody(bodyId)) return false;
+    const ids = this.groupOf(bodyId)?.bodyIds ?? [bodyId];
+    const bodies = ids
+      .map((id) => this.getBody(id))
+      .filter((b): b is Body => b !== undefined);
+    const on = !bodies.some((b) => b.grounded);
+    for (const b of bodies) b.grounded = on;
+    return true;
+  }
+
   /** Drop removed bodies from groups; a group left with fewer than 2 members dissolves. */
   private pruneGroups(): void {
     for (const g of this.groups) g.bodyIds = g.bodyIds.filter((b) => this.getBody(b));
@@ -1320,6 +1345,7 @@ export class Scene {
         radius: b.radius,
         round: b.round,
         color: b.color,
+        grounded: b.grounded,
       })),
       joints: copiedJoints.map((j) => ({ tmp: j.id, bodyTmp: j.bodyId, world: this.jointWorld(j) })),
       grounds,
@@ -1356,6 +1382,7 @@ export class Scene {
       );
       if (body.local.length < 3) return null;
       body.color = b.color; // paste keeps the source body's colour
+      body.grounded = b.grounded ?? false; // ...and whether it's grounded
       bodyIdMap.set(b.tmp, body.id);
     }
     const idMap = new Map<number, number>(); // joint tmp id → new joint id
@@ -1540,9 +1567,10 @@ export class Scene {
     this.bodies = data.bodies.map((b) => {
       const local = b.local.map((p) => vec(p.x, p.y));
       // Older files (< v5) have no control polygon: treat the saved polygon as a sharp control.
-      const src = b as Body & { controlLocal?: Vec2[]; radius?: number; round?: RoundMode };
+      const src = b as Body & { controlLocal?: Vec2[]; radius?: number; round?: RoundMode; grounded?: boolean };
       const controlLocal = src.controlLocal ? src.controlLocal.map((p) => vec(p.x, p.y)) : local.map((p) => vec(p.x, p.y));
-      return { ...b, pos: vec(b.pos.x, b.pos.y), local, controlLocal, radius: src.radius ?? 0, round: src.round ?? "fillet" };
+      // Grounded bodies arrived in v10; older files simply have none.
+      return { ...b, pos: vec(b.pos.x, b.pos.y), local, controlLocal, radius: src.radius ?? 0, round: src.round ?? "fillet", grounded: src.grounded ?? false };
     });
     this.joints = data.joints.map((j) => ({ ...j, local: vec(j.local.x, j.local.y) }));
     // Sliders: drop the legacy origin+dir form (no railA); migrate the earlier
