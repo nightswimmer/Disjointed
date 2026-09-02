@@ -737,6 +737,8 @@ document.getElementById("load-btn")!.addEventListener("click", () => fileInput.c
 // Copy/paste are keyboard-only (Ctrl/Cmd+C / V); no toolbar buttons.
 document.getElementById("mirror-h-btn")!.addEventListener("click", () => mirrorSelection("h"));
 document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorSelection("v"));
+document.getElementById("send-back-btn")!.addEventListener("click", () => reorderSelection("back"));
+document.getElementById("bring-front-btn")!.addEventListener("click", () => reorderSelection("front"));
 
 runBtn.addEventListener("click", () => setAnimating(!animating));
 autopauseBtn.addEventListener("click", () => setPauseOnImpossible(!pauseOnImpossible));
@@ -1830,6 +1832,20 @@ function mirrorSelection(axis: "h" | "v"): void {
   markDirty();
 }
 
+/** Send the selection (a body, or a whole multi-selection / group) to the back or front
+ *  of the z-order — e.g. push an imported reference body behind the mechanism so it stops
+ *  stealing clicks. */
+function reorderSelection(where: "back" | "front"): void {
+  if (mode !== "draw") return;
+  const ids = multiSel
+    ? [...multiSel.bodies]
+    : selection?.kind === "body"
+      ? [selection.id]
+      : [];
+  if (ids.length === 0) return;
+  if (scene.reorderBodies(ids, where)) markDirty();
+}
+
 /**
  * Begin a rotate (rotate tool). A control node of the already-selected body rotates that
  * body about the node. Otherwise the body under the cursor decides: a body of the current
@@ -2471,6 +2487,16 @@ window.addEventListener("keydown", (e) => {
     (selection || multiSel)
   ) {
     deleteSelection();
+    return;
+  }
+  // PageDown / PageUp reorder the selection in the z-order (send to back / bring to front).
+  if (
+    (e.key === "PageDown" || e.key === "PageUp") &&
+    mode === "draw" &&
+    (selection?.kind === "body" || multiSel)
+  ) {
+    reorderSelection(e.key === "PageDown" ? "back" : "front");
+    e.preventDefault();
     return;
   }
   // [ and ] adjust the selected body's corner radius (round / un-round it).

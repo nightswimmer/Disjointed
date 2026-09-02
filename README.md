@@ -109,6 +109,11 @@ unit — and in **Simulate mode it moves as a single rigid body**.
   a multi-selection / group reflects about the centre of its combined bounding box. Constraints
   and dimensions follow their corners/edges through the flip. Grouped in the toolbar next to
   **Rotate**.
+- **Send to back / Bring to front** (toolbar buttons next to Mirror, or **PageDown / PageUp**) —
+  move the selection to the bottom / top of the stacking order. Clicks always pick the topmost
+  body, so this also decides what a click lands on: send a big imported reference body to the
+  back and it stops covering — and stealing clicks from — the mechanism drawn over it. The
+  order is saved with the file.
 
 **Measurements.** The Measure tool (`D`) works in **both modes**, and each mode keeps its own
 set of measurements. What gets measured follows from the two references you pick:
@@ -231,8 +236,10 @@ point, at true scale — the file's `$INSUNITS` is converted into your working u
 file is assumed to already be in working units). Closed polylines (arc bulges included),
 circles, and loose lines/arcs that chain into closed loops all import; a loop **inside**
 another becomes a **hole** in it, so a plate with cut-outs arrives as *one* body. The imported
-shapes land multi-selected, ready to move or group. Dropping a `.json` file loads it as a
-scene, same as the Load button. (`dxf import test.dxf` in the repo is a small sample to try.)
+shapes land multi-selected, ready to move or group. If an import covers your mechanism, press
+**PageDown** (or the Send-to-back button) to push it behind everything. Dropping a `.json`
+file loads it as a scene, same as the Load button. (`dxf import test.dxf` in the repo is a
+small sample to try.)
 
 ### Grid & snapping
 The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**

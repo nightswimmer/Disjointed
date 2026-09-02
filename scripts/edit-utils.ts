@@ -169,5 +169,46 @@ const near = (a: Vec2, b: Vec2, tol = 1e-6) => dist(a, b) < tol;
   check("original driving dimension untouched", s.getMeasurement(dim.id)?.driving === true && s.getMeasurement(dim.id)?.target === 40);
 }
 
+// --- z-order: reorderBodies moves bodies to the back/front of the draw & pick order. ---
+{
+  const s = new Scene();
+  const square = (x: number) =>
+    [{ x, y: 0 }, { x: x + 40, y: 0 }, { x: x + 40, y: 40 }, { x, y: 40 }];
+  // Three overlapping bodies; the last-added one wins picks at a shared point.
+  const a = s.addBody(square(0));
+  const b = s.addBody(square(10));
+  const c = s.addBody(square(20));
+  const inAll = { x: 30, y: 20 }; // a point inside all three squares
+  check("newest body is picked on top", s.bodyAt(inAll)?.id === c.id);
+
+  check("sendToBack reports a change", s.reorderBodies([c.id], "back"));
+  check("sent-to-back body is first in draw order", s.bodies[0].id === c.id);
+  check("pick now falls through to the next body", s.bodyAt(inAll)?.id === b.id);
+  check("relative order of the rest is kept", s.bodies[1].id === a.id && s.bodies[2].id === b.id);
+
+  check("bringToFront reports a change", s.reorderBodies([a.id], "front"));
+  check("brought-to-front body is last in draw order", s.bodies[s.bodies.length - 1].id === a.id);
+  check("front body wins the pick again", s.bodyAt(inAll)?.id === a.id);
+
+  // No-ops report false: already at the target end, or every body moved at once.
+  check("re-sending the back body to back is a no-op", !s.reorderBodies([c.id], "back"));
+  check("reordering every body is a no-op", !s.reorderBodies([a.id, b.id, c.id], "front"));
+
+  // Group-aware: reordering one grouped member moves the whole group, order kept.
+  s.addGroup([a.id, b.id]);
+  check("grouped member drags its group to the back", s.reorderBodies([b.id], "back"));
+  check("group lands at the back in relative order",
+    s.bodies[0].id === b.id && s.bodies[1].id === a.id && s.bodies[2].id === c.id,
+    s.bodies.map((x) => x.id).join(","));
+
+  // The order survives save/load (it's just the array order — no format change).
+  s.reorderBodies([c.id], "back");
+  const order = s.bodies.map((x) => x.id).join(",");
+  const s2 = new Scene();
+  s2.load(JSON.parse(JSON.stringify(s.serialize())));
+  check("z-order survives save/load", s2.bodies.map((x) => x.id).join(",") === order,
+    `${order} -> ${s2.bodies.map((x) => x.id).join(",")}`);
+}
+
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

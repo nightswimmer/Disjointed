@@ -73,6 +73,12 @@
           <button id="mirror-v-btn" class="icon-btn" title="Mirror the selected body top↔bottom" aria-label="Mirror vertically">
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10" stroke-dasharray="2 2"/><path d="M6 8l4-4 4 4z" fill="currentColor" fill-opacity="0.18"/><path d="M6 12l4 4 4-4z" fill="currentColor" fill-opacity="0.18"/></svg>
           </button>
+          <button id="send-back-btn" class="icon-btn" title="Send the selected body / selection behind everything else (PageDown)" aria-label="Send to back">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><path d="M15.5 4.5v11M13.3 13.3l2.2 2.2 2.2-2.2"/></svg>
+          </button>
+          <button id="bring-front-btn" class="icon-btn" title="Bring the selected body / selection in front of everything else (PageUp)" aria-label="Bring to front">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1"/><path d="M15.5 15.5v-11M13.3 6.7l2.2-2.2 2.2 2.2"/></svg>
+          </button>
         </div>
         <div class="group" id="actuator-group">
           <button data-tool="linearActuator" class="tool-btn icon-btn" title="Create a linear actuator on a slider — auto-travels back and forth in animation (A)" aria-label="Linear actuator tool">

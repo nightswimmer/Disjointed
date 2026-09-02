@@ -1337,6 +1337,30 @@ export class Scene {
     return true;
   }
 
+  /**
+   * Move bodies to the back (start) or front (end) of the z-order. The `bodies` array *is*
+   * the z-order: it renders first-to-last (first = bottom) and hit-tests last-to-first
+   * (last = topmost wins the click), so one reorder fixes both drawing and picking. A
+   * grouped body moves with its whole group; moved bodies keep their relative order.
+   * Returns whether the order actually changed.
+   */
+  reorderBodies(bodyIds: number[], where: "back" | "front"): boolean {
+    const moved = new Set<number>();
+    for (const id of bodyIds) {
+      if (!this.getBody(id)) continue;
+      const g = this.groupOf(id);
+      if (g) g.bodyIds.forEach((b) => moved.add(b));
+      else moved.add(id);
+    }
+    if (moved.size === 0 || moved.size === this.bodies.length) return false;
+    const picked = this.bodies.filter((b) => moved.has(b.id));
+    const rest = this.bodies.filter((b) => !moved.has(b.id));
+    const next = where === "back" ? [...picked, ...rest] : [...rest, ...picked];
+    if (next.every((b, i) => b === this.bodies[i])) return false;
+    this.bodies = next;
+    return true;
+  }
+
   /** Drop removed bodies from groups; a group left with fewer than 2 members dissolves. */
   private pruneGroups(): void {
     for (const g of this.groups) g.bodyIds = g.bodyIds.filter((b) => this.getBody(b));

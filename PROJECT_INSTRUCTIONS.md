@@ -163,6 +163,12 @@ parallel-axis), and carried through mirror / rotate / scale / copy-paste / save-
 they have no editable handles, no measurement/sketch refs, the corner `radius` ignores them,
 and **picking + joint containment deliberately use the outer outline only** (so a joint can
 sit at the centre of a shaft hole, and clicking in a cut-out still selects the body).
+**Z-order reordering** (no format change): **Send to back / Bring to front** on the selected
+body or multi-selection — toolbar buttons in the edit group (layer-stack icons, the moving
+layer highlighted, with a down/up arrow) and **PageDown / PageUp**. The `bodies` array *is*
+the z-order (rendered first→last, hit-tested last→first), so one reorder fixes both drawing
+and picking — e.g. push a big imported DXF reference body behind the mechanism so it stops
+covering it and stealing its clicks. Group-aware, undoable, order persists in save/load.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -247,6 +253,12 @@ sit at the centre of a shaft hole, and clicking in a cut-out still selects the b
     (dissolves every group touched); `pruneGroups()` (drops removed bodies, dissolves
     < 2-member groups — called from `removeBody` and `load`). Groups make their members
     move together in draw mode (main.ts) and act as one rigid body in sim (solver.ts).
+  - **Z-order** (`reorderBodies(bodyIds, "back" | "front")`): the `bodies` array *is* the
+    z-order — rendered first→last (first = bottom), hit-tested last→first (`bodyAt` walks
+    backwards, so the last body wins the click) — so one stable partition of the array fixes
+    drawing and picking together. Group-aware (any id expands to its whole group), moved
+    bodies keep their relative order, returns whether the order actually changed. Array
+    order already survives `serialize()`/`load()`, so persistence is free (no format bump).
   - **Construction guidelines** (`guides: Guide[]`, a `Guide = { id, a, b }` — two world
     points defining an **infinite** line; drawing aids only, never simulated): `addGuide`
     (rejects spans < `GUIDE_MIN_SPAN`), `removeGuide` (cascades — prunes measurements and
@@ -662,6 +674,11 @@ sit at the centre of a shaft hole, and clicking in a cut-out still selects the b
     `scene.rotateBody` per body about the shared pivot + selected free joints orbiting it —
     a rigid rotation of the whole selection. Arming rotate keeps an existing single *or*
     multi selection. Copy/paste are also on `Ctrl/Cmd+C`/`V`; rotate on `R`.
+  - **Z-order** (`reorderSelection("back" | "front")`, draw mode): sends the selected body /
+    multi-selection (whole groups always) to the back or front of the drawing order via
+    `scene.reorderBodies`; `markDirty` only when the order actually changed. Wired to the
+    `#send-back-btn` / `#bring-front-btn` icon buttons in the edit toolbar group and to
+    **PageDown / PageUp** (`[`/`]` were taken by corner radius).
   - **Theme** (`#theme-btn`): a dark/light toggle that sets `data-theme` on `<html>` (CSS vars drive
     the chrome) and passes the matching `DARK_THEME`/`LIGHT_THEME` palette to the renderer; the
     choice persists in `localStorage` (`disjointed:theme`, separate from scene autosave).
@@ -804,7 +821,10 @@ Select mode (default, no tool armed):
   cursor (grid-snapped) and is selected. **Mirror H/V** (toolbar, grouped with **Rotate**)
   reflects a single body in place about its centroid, or a multi-selection / group about
   the centre of its combined bounding box (constraint refs are remapped, so mirrored
-  geometry keeps its constraints on the right corners/edges).
+  geometry keeps its constraints on the right corners/edges). **Send to back / Bring to
+  front** (toolbar buttons next to Mirror, or **PageDown / PageUp**) moves the selection to
+  the bottom / top of the drawing order — clicks pick the topmost body, so a big imported
+  reference body sent to the back stops covering the mechanism and stealing its clicks.
 
 Rotate tool (`R`, draw mode — a mode, not one-shot):
 - Drag a body to rotate it about its **centroid**; drag a **control node** of the already-selected
@@ -971,7 +991,10 @@ Persistence:
   **sketch constraints** — H/V edges, joint↔vertex coincident, H on an internal rail — captured
   and recreated on the new elements with resolvable refs, cross-body constraints excluded;
   the internal **driving dimension** copied with its target + translated label while a driven
-  reference dimension is left behind and the original stays untouched).
+  reference dimension is left behind and the original stays untouched). Also **z-order
+  reordering** (`reorderBodies`: the newest body picked on top; pick falling through after a
+  send-to-back; relative order kept; no-ops reported — already at the target end, or every
+  body moved at once; a grouped member dragging its whole group; order surviving save/load).
 - **actuators.ts** — the two new powered constraints end-to-end: `addLinearActuator` places its
   rider on the rail and registers it with the slider; `addMotor` rejects pivot==crank, free-joint
   pivots, and cross-body cranks. The solver's `anchors` parameter drives an actuator rider to
