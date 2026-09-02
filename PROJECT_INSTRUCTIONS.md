@@ -146,6 +146,23 @@ unsatisfiable H/V with a red flash), while drags pin the dragged geometry so gui
 it exactly; when a drag would break a constraint the solver falls back to a symmetric
 re-solve **that same frame**, so dragging can only move things along the directions the
 constraints leave free (a bound vertical guide's free point slides only vertically).
+**Working units + DXF import + bodies with holes** (serialization v12 + v13): a **unit
+dropdown** in the toolbar's grid group declares what one world unit means (mm / cm / m / in;
+default mm) — purely declarative (nothing moves on change), saved with the file, undoable;
+distance measurement labels show the unit suffix. **Drag-and-drop import onto the canvas**:
+a `.dxf` file imports as bodies at the drop point (a `.json` loads as a scene, same as the
+Load button). The importer (`src/dxf.ts`, hand-written ASCII DXF reader, zero deps) handles
+LWPOLYLINE / POLYLINE (bulges sampled), CIRCLE, and loose LINE/ARC segments auto-chained
+into closed loops; `$INSUNITS` converts coordinates into the working unit (a unitless file
+is taken as already in working units), y is flipped (DXF is y-up), and the batch arrives
+multi-selected. **Loops are nested by containment**: a loop inside another becomes a **hole**
+of it (an island inside a hole starts a new solid), so a plate with cut-outs imports as ONE
+body. Holes (`Body.holesLocal`, optional) are **baked geometry**: rendered as cut-outs
+(even-odd fill), subtracted from mass/centroid/inertia (composite properties via
+parallel-axis), and carried through mirror / rotate / scale / copy-paste / save-load — but
+they have no editable handles, no measurement/sketch refs, the corner `radius` ignores them,
+and **picking + joint containment deliberately use the outer outline only** (so a joint can
+sit at the centre of a shaft hole, and clicking in a cut-out still selects the body).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -175,6 +192,15 @@ constraints leave free (a bound vertical guide's free point slides only vertical
     the centroid shifts. A `grounded` flag (v10) fixes the body completely in simulation
     (see solver notes); `toggleBodyGround(bodyId)` toggles it — through a grouped body, on
     every member of the group at once (any-grounded → all off, else all on).
+    **Holes** (v13): optional `holesLocal: Vec2[][]` — baked inner cut-out loops in the local
+    frame (`addBody` takes an optional `holesWorld`; `bodyHolesWorld` resolves them).
+    `rebuildBody` computes **composite mass properties** (net area, area-weighted composite
+    centroid, inertia via per-loop moments + parallel-axis; falls back to outer-only if holes
+    would outweigh the outer). Holes ride `mirrorBody` (reflected + winding reversed),
+    `scaleBody`, rotate/move (local frame), and copy/paste (`SelectionClip.holesWorld`) — but
+    are **not** editable or referenceable (no handles, no vertex/edge refs, radius ignores
+    them), and `pointInBody`/`clampIntoBody`/`bodyAt` use the **outer outline only** by
+    design (joints may sit inside a hole, e.g. at a shaft's centre).
   - `Joint` = a point with `bodyId` + `local`. If `bodyId` is a body, `local` is the offset
     from that body's centroid; if `bodyId === null` it is a **free joint** and `local` is its
     own world position (the solver treats it as a movable point particle).
@@ -301,15 +327,20 @@ constraints leave free (a bound vertical guide's free point slides only vertical
     through to `MeasureInfo` for display. **`scaleBody(id, factor)`** scales a body
     uniformly about its centroid — control polygon, corner radius, attached joints, their
     ground anchors, and `bodyPoint` measurement refs all together.
+  - **Working unit** (`unit: Unit` on the scene, v12): `Unit = "mm"|"cm"|"m"|"in"` with
+    `UNIT_TO_MM` (both exported) — a declaration of what one world unit means; changing it
+    never moves geometry. Used for measurement display and DXF import conversion.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 11`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 13`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
     constraints or driving flags, pre-v9 files no groups, pre-v10 bodies load ungrounded,
-    pre-v11 files no guides —
+    pre-v11 files no guides, pre-v12 files default to `unit: "mm"`, pre-v13 bodies have no
+    holes —
     all load fine as-is; loaded groups are pruned against the loaded bodies). The
-    `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its colour.
+    `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its colour
+    and hole loops (`holesWorld`).
 - **solver.ts** — `solve(scene, driver, iterations, relax, anchors?, stats?): ConstraintBreak[]` (each
   `ConstraintBreak` carries `a`/`b`/`error` plus a `joints: number[]` list naming the joints
   involved — pin endpoints, the grounded joint, an unreachable slider rider, or the anchor's joint
@@ -398,6 +429,17 @@ constraints leave free (a bound vertical guide's free point slides only vertical
   Tarjan **bridge / biconnected-component decomposition** classifying bodies into loop cores
   (must be solved together) vs propagatable tree branches, with articulation bodies joining
   blocks. Labels are `#id`-based (bodies have no user-facing name).
+- **dxf.ts** — minimal **ASCII DXF reader** for the drag-and-drop import (no dependencies).
+  `parseDxf(text)` reads `$INSUNITS` from the HEADER (reported as mm-per-drawing-unit, null
+  when absent/unitless/unknown) and the ENTITIES section: LWPOLYLINE / POLYLINE+VERTEX
+  (closed → loops; vertex bulges sampled — bulge = tan(θ/4), positive = CCW — at ≤ 7.5° per
+  segment), CIRCLE (48-gon), LINE and ARC (sampled, always CCW start→end); open paths are
+  **chained end-to-end** (either direction, extent-relative tolerance) into closed loops.
+  Returns `{ loops, unitToMm, skippedPaths, skippedEntities }` in raw DXF coordinates (y-up;
+  the importer in main flips/scales/translates). `nestLoops(loops)` groups them even-odd
+  style into `{ outer, holes }` solids (parent = smallest enclosing loop; an island inside a
+  hole is a new solid). `loopSignedArea` exported for winding normalization. Binary DXF and
+  non-DXF input throw a friendly error.
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.05..20).
 - **renderer.ts** — **construction guidelines** (draw mode only) draw right after the grid:
@@ -408,7 +450,9 @@ constraints leave free (a bound vertical guide's free point slides only vertical
   stroke + slight size bump) so the stuck points stand out alongside the existing red dotted
   break lines. Draws under the camera transform in world space: world-locked grid
   (spacing = `gridStep`, drawn only when `gridVisible`),
-  bodies (selected/hovered highlighted), slider rails as bounded segments with end-caps,
+  bodies (selected/hovered highlighted; a body's **hole loops** are added as subpaths and
+  filled with the **even-odd rule**, so cut-outs show what's behind them, with the body
+  outline stroked on the hole rims too), slider rails as bounded segments with end-caps,
   ground symbols (per ground constraint, plus one at the **centroid of every grounded
   body** — each member of a grounded group carries the flag, so each shows its own),
   joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
@@ -431,7 +475,8 @@ constraints leave free (a bound vertical guide's free point slides only vertical
   **Measurements** are drawn last (annotations on top of everything): dashed extension lines,
   an arrowed dimension line or an angle arc (cyan accent `#46c2cb`; selected → theme ink),
   and the value as a constant-size pill + text rendered in **screen space** (via a transform
-  reset per label, so text stays legible at any zoom; distances 1-decimal, angles with `°`).
+  reset per label, so text stays legible at any zoom; distances 1-decimal **with the
+  scene's working-unit suffix** (e.g. `120.5 mm`), angles with `°`).
   The measure-tool overlay highlights picked references (ring around a point, soft thick
   stroke over a line; hover ref dashed/lighter) and draws the placement preview as a dashed
   measurement. Inputs: `measurements: MeasureInfo[]` (already resolved by main),
@@ -634,6 +679,17 @@ constraints leave free (a bound vertical guide's free point slides only vertical
     the grabbed control vertex; a whole-body move snaps whichever of the centroid / control
     vertices is nearest the grab point (`bodyDragAnchor`), stored as a fixed `anchorOffset` from
     the centroid (`dragAnchorWorld` reconstructs its live position).
+  - **Working units + DXF import**: the `#unit-select` dropdown writes `scene.unit`
+    (markDirty → saved/undoable) and re-syncs from the scene each frame (`syncUnitSelect`,
+    change-detected — load/undo can change the unit). Canvas `dragover`/`drop` handlers:
+    a dropped `.dxf` → `importDxfFile(file, eventWorld(e))`, a `.json` → `loadFromFile`,
+    anything else alerts. `importDxfFile` parses (`parseDxf`), converts by
+    `unitToMm / UNIT_TO_MM[scene.unit]` (factor 1 when the file is unitless), **flips y**,
+    centres the combined bbox at the (snapped) drop point, nests loops (`nestLoops`),
+    normalizes winding (outer positive, holes negative), creates one body per solid
+    (`addBody(outer, 0, "fillet", holes)`, coloured `defaultBodyColor`), selects the batch
+    via `setMulti`, and marks dirty. No closed shapes → an explanatory alert; unchainable
+    open paths → a post-import alert; unsupported entities → a console note.
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or shortcut —
@@ -798,6 +854,20 @@ Undo / redo (draw mode):
 - `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+Shift+Z` / `Ctrl/Cmd+Y` redo. Snapshot-based: every mutation
   records a (deduped) JSON snapshot of the drawn layout; undo/redo restore snapshots without
   recording new steps. History is seeded on startup and capped at `HISTORY_LIMIT` (100).
+
+Working units (toolbar grid group):
+- A **unit dropdown** (mm / cm / m / in, default mm) declares what one world unit means.
+  Declarative only — changing it moves nothing; distance measurements show the suffix, and
+  DXF import converts into it. Saved with the file (v12) and undoable.
+
+Import (drag-and-drop onto the canvas):
+- Drop a **`.dxf`** to import its closed outlines as bodies at the drop point (at true scale
+  via `$INSUNITS` + the working unit; a unitless file is assumed to be in working units).
+  Loops nested inside others become **holes** (one plate with cut-outs = one body); loose
+  lines/arcs are chained into loops; the imported batch arrives multi-selected. Open paths
+  that can't close are skipped with a notice. Drop a **`.json`** to load it as a scene.
+  `dxf import test.dxf` in the repo root is a hand-written sample (plate with two round
+  cut-outs, circle, LINE-triangle, ARC+LINE D-shape, mm units).
 
 Persistence:
 - **Save** downloads `mechanism-<timestamp>.json`; **Load** opens a `.json` via the file
@@ -972,6 +1042,16 @@ Persistence:
   solved by the free point); and the **drag fallback** (an infeasible anchored drag step
   followed by the symmetric solve restores V, keeps the drag's feasible component, joint
   untouched).
+- **dxf.ts (scripts)** — the DXF importer + units + holes end-to-end (46 checks): closed
+  LWPOLYLINE / old-style POLYLINE+VERTEX loops; bulge sampling exactly on the arc's circle
+  (positive bulge CCW); LINE chaining (unordered + reversed segments) and ARC+LINE chaining;
+  CIRCLE sampling + CCW winding; `$INSUNITS` (mm / inches / unitless / absent); dangling
+  open paths skipped + unsupported entities counted; non-DXF input rejected; the working
+  unit surviving serialize → load (v13) with a pre-v12 mm default; `nestLoops` (plate + 4
+  cut-outs → one solid, island-inside-a-hole → its own solid, disjoint loops separate); and
+  bodies with holes: net mass, composite centroid, reduced inertia, `pointInBody` true
+  inside a hole (joint placeable at a hole centre), holes round-tripping through save/load,
+  mirror reflecting the hole, copy/paste carrying it, scale scaling it, rotate riding it.
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
@@ -1093,6 +1173,12 @@ Persistence:
   multi-selected and moved, but not made group members); reshaping a grouped body's
   outline in draw mode is still per-body (groups constrain sim + move-together, not
   draw-mode shape editing).
+- **Hole follow-ups (tier 2, when needed)**: editable hole vertices (handles), measurements /
+  sketch constraints referencing hole geometry (needs a loop index in `MeasureRef`), a
+  hole-aware picking option (today clicking a cut-out deliberately still hits the body),
+  corner radius applied to hole loops. The v13 model/serialization already carries the
+  loops, so tier 2 is additive.
+- **DXF follow-ups**: SPLINE sampling, INSERT/block instancing, ellipses; DXF *export*.
 - More joint types as needed.
 - Joint containment covers placement + drags only (by choice): **reshaping** a body (corner
   handles, radius shrink, vertex removal) can still strand an already-placed joint outside the

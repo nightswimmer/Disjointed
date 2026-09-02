@@ -10,7 +10,11 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
 
 - **Body** — a rigid shape with rounded-able corners. It's defined by an editable **control
   polygon** plus a **corner radius**; the outline you see is derived from those, so you can
-  reshape it (drag corners) or round it any time.
+  reshape it (drag corners) or round it any time. A body can carry **holes** (inner cut-outs,
+  e.g. from a DXF import): they render hollow and are subtracted from the body's mass and
+  inertia, and they mirror / rotate / scale / copy with the body. Holes don't restrict where
+  joints can go — a joint can sit anywhere inside the outer outline, including dead-centre
+  of a shaft hole.
 - **Joint** — a point. Either **attached** to a body (rigid with it) or **free** (a body-less
   point). A free joint can be grounded to make an anchor without needing a body.
 - **Constraints**
@@ -217,6 +221,19 @@ these exist for dialing in complex closed-loop scenes where the animation occasi
 solvable assembly as impossible. The browser console logs rolling solve statistics while the
 animation runs.
 
+### Units & DXF import
+A **unit dropdown** in the toolbar's grid group declares what one world unit means — **mm, cm,
+m or in** (default mm). It's purely a declaration (changing it never moves geometry): distance
+measurements show the unit, and imports convert into it. The choice is saved with the file.
+
+**Drag-and-drop a `.dxf` file onto the canvas** to import its shapes as bodies at the drop
+point, at true scale — the file's `$INSUNITS` is converted into your working unit (a unitless
+file is assumed to already be in working units). Closed polylines (arc bulges included),
+circles, and loose lines/arcs that chain into closed loops all import; a loop **inside**
+another becomes a **hole** in it, so a plate with cut-outs arrives as *one* body. The imported
+shapes land multi-selected, ready to move or group. Dropping a `.json` file loads it as a
+scene, same as the Load button. (`dxf import test.dxf` in the repo is a small sample to try.)
+
 ### Grid & snapping
 The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**
 toggles snap-to-grid, and the number field (with a preset dropdown) sets the spacing — any value
@@ -232,7 +249,8 @@ and snapping are independent (you can snap to a hidden grid).
 - **Tab** — switch between Draw and Simulate mode.
 
 ### Save & load
-- **Save** downloads your mechanism as a `.json` file; **Load** opens one back up.
+- **Save** downloads your mechanism as a `.json` file; **Load** opens one back up (you can
+  also drag-and-drop a `.json` onto the canvas).
 - Your work is also auto-saved in the browser and restored automatically the next time you
   open the app.
 
@@ -245,7 +263,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups, grounded bodies, rigid-drag scoped solves, construction guidelines
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups, grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes
 ```
 
 ## How it works
@@ -268,6 +286,12 @@ line built from two grounded free joints. Body outlines are
 generated from a control polygon + corner radius (rounded corners via fillet or outward offset).
 The fillet rounds convex and concave (reflex) corners correctly, and splits each edge between its
 two corners so neighbouring fillets never overlap or fold — even on thin shapes at large radii.
+A body's **holes** are baked loops riding its frame: drawn with an even-odd fill and subtracted
+from the mass properties (net area, composite centroid, parallel-axis inertia), while picking and
+joint containment deliberately use the outer outline only.
+**DXF import** is a small dependency-free reader (`dxf.ts`): it samples arcs/bulges into
+polyline points, chains loose segments into closed loops, nests loops even-odd style into
+solids-with-holes, and converts units via the file's `$INSUNITS` and the document's working unit.
 **Actuators and motors** are layered on top of the same solver: while animation runs, each
 actuator/motor computes a world target for its joint(s) from its phase + speed, and the solver
 takes those targets as additional "moving grounds" — sacred just like a normal ground, so
@@ -298,7 +322,7 @@ and when a drag would need the constraints to give way, a symmetric re-solve run
 frame so the constraint visibly holds and the drag slides along the directions left free.
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `sketch.ts`,
-`view.ts` (camera),
+`dxf.ts` (DXF import), `view.ts` (camera),
 `renderer.ts`, `main.ts`, plus `analyzer.ts` — a standalone topology diagnostic (kinematic
 islands, degrees of freedom, loop / block decomposition) groundwork for future solver
 optimizations. Tests live in [`scripts/`](scripts/).

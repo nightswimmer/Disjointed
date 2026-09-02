@@ -15,6 +15,7 @@ import {
   dot,
   cross,
   len,
+  lenSq,
   normalize,
   distToLine,
   distToSegment,
@@ -46,6 +47,16 @@ export interface Body {
   round: RoundMode;
   /** Derived render/physics polygon, relative to the centroid — rebuilt from control + radius. */
   local: Vec2[];
+  /**
+   * Inner cut-outs: hole loops relative to the centroid, in the local frame (v13,
+   * absent = none). *Baked* geometry riding the body: holes render as cut-outs and are
+   * subtracted from mass/centroid/inertia, and they mirror/rotate/scale/copy with the
+   * body — but they have no editable handles, no vertex/edge refs (measurements and
+   * sketch constraints can't name them), the corner `radius` doesn't touch them, and
+   * picking + joint containment deliberately use the outer outline only (so a joint
+   * can sit at the centre of a shaft hole).
+   */
+  holesLocal?: Vec2[][];
   /** World position of the centroid (the body's local origin). */
   pos: Vec2;
   angle: number;
@@ -273,12 +284,26 @@ export interface MeasureInfo {
   arc?: { c: Vec2; r: number; a0: number; sweep: number };
 }
 
+/**
+ * The document's working unit: what one world unit means physically. Purely a
+ * declaration — no coordinate ever changes when the unit changes — but measurements
+ * display it and the DXF importer converts incoming files into it.
+ */
+export type Unit = "mm" | "cm" | "m" | "in";
+
+/** Millimetres per working unit (also used to convert DXF `$INSUNITS` on import). */
+export const UNIT_TO_MM: Record<Unit, number> = { mm: 1, cm: 10, m: 1000, in: 25.4 };
+
+const DEFAULT_UNIT: Unit = "mm";
+
 /** Serializable snapshot of an entire scene (for save / load / autosave). */
 export interface SceneData {
   version: number;
   bodies: Body[];
   joints: Joint[];
   constraints: Constraint[];
+  /** Working unit (1 world unit = 1 of these). Absent pre-v12 → "mm". */
+  unit?: Unit;
   /** Draw-mode and sim-mode measurements together (each carries its `mode`). Absent pre-v7. */
   measurements?: Measurement[];
   /** Draw-mode sketch constraints. Absent pre-v8. */
@@ -305,7 +330,7 @@ export interface SelectionClip {
   /** Paste reference: the mass-weighted centre of the copied bodies (a single body's
    *  own centroid), or the copied joints' average for a body-less clip. */
   center: Vec2;
-  bodies: { tmp: number; controlWorld: Vec2[]; radius: number; round: RoundMode; color: string; grounded: boolean }[];
+  bodies: { tmp: number; controlWorld: Vec2[]; holesWorld: Vec2[][]; radius: number; round: RoundMode; color: string; grounded: boolean }[];
   /** Copied joints: attached ones carry their body's tmp id, free ones null. */
   joints: { tmp: number; bodyTmp: number | null; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
@@ -319,7 +344,7 @@ export interface SelectionClip {
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target: number }[];
 }
 
-const FORMAT_VERSION = 11;
+const FORMAT_VERSION = 13;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -346,6 +371,8 @@ export class Scene {
   sketch: SketchConstraint[] = [];
   groups: BodyGroup[] = [];
   guides: Guide[] = [];
+  /** Working unit: 1 world unit = 1 of these (display + import conversion only). */
+  unit: Unit = DEFAULT_UNIT;
   private nextId = 1;
 
   private id(): number {
@@ -355,8 +382,9 @@ export class Scene {
   /**
    * Create a body from a control polygon (world coords). `radius` rounds it: `fillet`
    * rounds the corners in place (keeps concavity); `offset` grows the convex hull outward.
+   * `holesWorld` (optional) bakes inner cut-out loops into the body (see `Body.holesLocal`).
    */
-  addBody(worldVerts: Vec2[], radius = 0, round: RoundMode = "fillet"): Body {
+  addBody(worldVerts: Vec2[], radius = 0, round: RoundMode = "fillet", holesWorld?: Vec2[][]): Body {
     const body: Body = {
       id: this.id(),
       controlLocal: worldVerts.map((p) => vec(p.x, p.y)), // world for now; rebuild re-centers it
@@ -370,6 +398,7 @@ export class Scene {
       color: PALETTE[this.bodies.length % PALETTE.length],
       grounded: false,
     };
+    if (holesWorld?.length) body.holesLocal = holesWorld.map((loop) => loop.map((p) => vec(p.x, p.y)));
     this.bodies.push(body);
     this.rebuildBody(body);
     return body;
@@ -386,14 +415,52 @@ export class Scene {
       body.round === "offset"
         ? roundedConvexBody(ctrlWorld, body.radius)
         : filletPolygon(ctrlWorld, body.radius);
-    const centroid = polygonCentroid(finalWorld);
+    // Holes are baked outlines: the corner radius never touches them, they just ride
+    // the body's frame and subtract from the mass properties below.
+    const holesWorld = (body.holesLocal ?? []).map((loop) =>
+      loop.map((p) => add(body.pos, rotate(p, body.angle)))
+    );
+    // Composite mass properties: outer minus holes (each hole via its own centroid +
+    // parallel-axis shift). If bad data makes the holes outweigh the outer, fall back
+    // to the outer-only properties rather than a zero/negative mass.
+    const outerArea = Math.abs(polygonArea(finalWorld));
+    const outerC = polygonCentroid(finalWorld);
+    let area = outerArea;
+    let cx = outerArea * outerC.x;
+    let cy = outerArea * outerC.y;
+    const holeProps = holesWorld.map((loop) => {
+      const a = Math.abs(polygonArea(loop));
+      const c = polygonCentroid(loop);
+      return { a, c, i: polygonInertiaAboutCentroid(loop, c) };
+    });
+    for (const h of holeProps) {
+      area -= h.a;
+      cx -= h.a * h.c.x;
+      cy -= h.a * h.c.y;
+    }
+    let centroid: Vec2;
+    let inertia: number;
+    if (area > 1e-9) {
+      centroid = vec(cx / area, cy / area);
+      inertia =
+        polygonInertiaAboutCentroid(finalWorld, outerC) + outerArea * lenSq(sub(outerC, centroid));
+      for (const h of holeProps) inertia -= h.i + h.a * lenSq(sub(h.c, centroid));
+    } else {
+      area = outerArea;
+      centroid = outerC;
+      inertia = polygonInertiaAboutCentroid(finalWorld, outerC);
+    }
     const attached = this.joints.filter((j) => j.bodyId === body.id);
     const jointWorlds = attached.map((j) => this.jointWorld(j));
     body.pos = centroid;
     body.local = finalWorld.map((p) => rotate(sub(p, centroid), -body.angle));
     body.controlLocal = ctrlWorld.map((p) => rotate(sub(p, centroid), -body.angle));
-    body.invMass = 1 / Math.max(Math.abs(polygonArea(finalWorld)), 1);
-    body.invInertia = 1 / Math.max(polygonInertiaAboutCentroid(finalWorld, centroid), 1);
+    if (body.holesLocal)
+      body.holesLocal = holesWorld.map((loop) =>
+        loop.map((p) => rotate(sub(p, centroid), -body.angle))
+      );
+    body.invMass = 1 / Math.max(area, 1);
+    body.invInertia = 1 / Math.max(inertia, 1);
     attached.forEach((j, i) => {
       j.local = rotate(sub(jointWorlds[i], centroid), -body.angle);
     });
@@ -916,6 +983,8 @@ export class Scene {
     const body = this.getBody(bodyId);
     if (!body || !(factor > 0) || factor === 1) return;
     body.controlLocal = body.controlLocal.map((p) => scale(p, factor));
+    if (body.holesLocal)
+      body.holesLocal = body.holesLocal.map((loop) => loop.map((p) => scale(p, factor)));
     body.radius *= factor;
     const attached = this.joints.filter((j) => j.bodyId === bodyId);
     for (const j of attached) j.local = scale(j.local, factor);
@@ -957,6 +1026,13 @@ export class Scene {
   /** World-space control-polygon vertices (the editable corners) of a body. */
   bodyControlWorld(body: Body): Vec2[] {
     return body.controlLocal.map((p) => add(body.pos, rotate(p, body.angle)));
+  }
+
+  /** World-space hole loops of a body (empty when it has none). */
+  bodyHolesWorld(body: Body): Vec2[][] {
+    return (body.holesLocal ?? []).map((loop) =>
+      loop.map((p) => add(body.pos, rotate(p, body.angle)))
+    );
   }
 
   /** Whether a world point lies inside a body's (rounded) polygon. */
@@ -1132,6 +1208,7 @@ export class Scene {
     }
     // Reflect the control polygon in world space; reverse it to preserve the winding.
     const ctrlWorld = this.bodyControlWorld(body).map(reflect).reverse();
+    const holesWorld = this.bodyHolesWorld(body).map((loop) => loop.map(reflect).reverse());
     const attached = this.joints.filter((j) => j.bodyId === bodyId);
     const jointWorlds = new Map(attached.map((j) => [j.id, reflect(this.jointWorld(j))]));
     const owned = new Set(attached.map((j) => j.id));
@@ -1143,6 +1220,7 @@ export class Scene {
     // re-anchor joints to their now-reflected world positions.
     body.angle = 0;
     body.controlLocal = ctrlWorld.map((p) => sub(p, c));
+    if (body.holesLocal) body.holesLocal = holesWorld.map((loop) => loop.map((p) => sub(p, c)));
     for (const j of attached) j.local = sub(jointWorlds.get(j.id)!, c);
     this.rebuildBody(body);
     // The reversal renumbered the control polygon, so vertex/edge refs (sketch constraints
@@ -1461,6 +1539,7 @@ export class Scene {
       bodies: bodies.map((b) => ({
         tmp: b.id,
         controlWorld: this.bodyControlWorld(b).map(clone),
+        holesWorld: this.bodyHolesWorld(b),
         radius: b.radius,
         round: b.round,
         color: b.color,
@@ -1497,7 +1576,8 @@ export class Scene {
       const body = this.addBody(
         b.controlWorld.map((p) => add(p, offset)),
         b.radius,
-        b.round
+        b.round,
+        (b.holesWorld ?? []).map((loop) => loop.map((p) => add(p, offset)))
       );
       if (body.local.length < 3) return null;
       body.color = b.color; // paste keeps the source body's colour
@@ -1667,6 +1747,7 @@ export class Scene {
   serialize(): SceneData {
     return {
       version: FORMAT_VERSION,
+      unit: this.unit,
       bodies: this.bodies,
       joints: this.joints,
       constraints: this.constraints,
@@ -1687,14 +1768,25 @@ export class Scene {
     ) {
       throw new Error("Not a valid Disjointed file.");
     }
+    // The working unit arrived in v12; older files simply work in the default.
+    this.unit = data.unit && data.unit in UNIT_TO_MM ? data.unit : DEFAULT_UNIT;
     // Deep-clone so loaded data is independent of the parsed JSON object.
     this.bodies = data.bodies.map((b) => {
       const local = b.local.map((p) => vec(p.x, p.y));
       // Older files (< v5) have no control polygon: treat the saved polygon as a sharp control.
       const src = b as Body & { controlLocal?: Vec2[]; radius?: number; round?: RoundMode; grounded?: boolean };
       const controlLocal = src.controlLocal ? src.controlLocal.map((p) => vec(p.x, p.y)) : local.map((p) => vec(p.x, p.y));
+      // Hole loops arrived in v13; older files simply have none. Keep only valid loops.
+      const holesLocal = Array.isArray(src.holesLocal)
+        ? src.holesLocal
+            .filter((loop) => Array.isArray(loop) && loop.length >= 3)
+            .map((loop) => loop.map((p) => vec(p.x, p.y)))
+        : [];
       // Grounded bodies arrived in v10; older files simply have none.
-      return { ...b, pos: vec(b.pos.x, b.pos.y), local, controlLocal, radius: src.radius ?? 0, round: src.round ?? "fillet", grounded: src.grounded ?? false };
+      const out: Body = { ...b, pos: vec(b.pos.x, b.pos.y), local, controlLocal, radius: src.radius ?? 0, round: src.round ?? "fillet", grounded: src.grounded ?? false };
+      if (holesLocal.length) out.holesLocal = holesLocal;
+      else delete out.holesLocal;
+      return out;
     });
     this.joints = data.joints.map((j) => ({ ...j, local: vec(j.local.x, j.local.y) }));
     // Sliders: drop the legacy origin+dir form (no railA); migrate the earlier

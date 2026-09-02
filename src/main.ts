@@ -11,7 +11,10 @@ import {
   ResolvedMeasureRef,
   SketchConstraintKind,
   sameMeasureRef,
+  Unit,
+  UNIT_TO_MM,
 } from "./model";
+import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
 import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig } from "./solver";
 import {
   solveSketch, applyDrivingDimension, tryAddConstraint, autoConstrainBody, SketchBreak,
@@ -79,8 +82,21 @@ const sketchGroup = document.getElementById("sketch-group")!;
 const dimEditInput = document.getElementById("dim-edit") as HTMLInputElement;
 const sketchVisBtn = document.getElementById("sketch-vis-btn") as HTMLButtonElement;
 const measureVisBtn = document.getElementById("measure-vis-btn") as HTMLButtonElement;
+const unitSelect = document.getElementById("unit-select") as HTMLSelectElement;
 
 const scene = new Scene();
+
+// --- working units ---------------------------------------------------------
+// Declarative only: 1 world unit = 1 <unit>. Nothing moves when it changes — the
+// grid, measurements and DXF import just interpret world units through it. Part of
+// the scene data (saved / autosaved / undoable), so the swatch re-syncs each frame.
+unitSelect.addEventListener("change", () => {
+  scene.unit = unitSelect.value as Unit;
+  markDirty();
+});
+function syncUnitSelect(): void {
+  if (unitSelect.value !== scene.unit) unitSelect.value = scene.unit;
+}
 
 // --- theme (light/dark) --------------------------------------------------
 // Chrome is themed via a `data-theme` attribute on <html> (CSS vars); the canvas reads the
@@ -1028,6 +1044,80 @@ function restoreAutosave(): void {
     /* corrupt autosave — start empty */
   }
 }
+
+// --- DXF import (drag-and-drop) -------------------------------------------
+/**
+ * Import a DXF file's closed outlines as bodies, centred at `at` (world coords).
+ * Coordinates are flipped from DXF's y-up to the canvas's y-down frame and converted
+ * from the file's `$INSUNITS` into the document's working unit, so shapes arrive at
+ * true scale (a unitless file is taken to already be in working units). Each closed
+ * loop becomes one body; the batch lands multi-selected, ready to move or group.
+ */
+async function importDxfFile(file: File, at: Vec2): Promise<void> {
+  try {
+    const res = parseDxf(await file.text());
+    if (res.skippedEntities > 0)
+      console.info(`DXF import: ${res.skippedEntities} unsupported entit${res.skippedEntities === 1 ? "y" : "ies"} ignored.`);
+    if (!res.loops.length) {
+      window.alert(
+        "No closed shapes found in the DXF — only closed outlines (polylines, circles, or lines/arcs that chain into a loop) can become bodies."
+      );
+      return;
+    }
+    if (mode === "sim") setMode("draw");
+    const factor = res.unitToMm !== null ? res.unitToMm / UNIT_TO_MM[scene.unit] : 1;
+    // Scale into working units and flip y (DXF is y-up, the canvas world is y-down).
+    const loops = res.loops.map((loop) => loop.map((p) => vec(p.x * factor, -p.y * factor)));
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const loop of loops)
+      for (const p of loop) {
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+      }
+    const off = sub(snap(at), vec((minX + maxX) / 2, (minY + maxY) / 2));
+    // Nest the loops: a loop inside another becomes a hole of it (an island inside a
+    // hole starts a new solid), so a plate with cut-outs arrives as ONE body.
+    const solids = nestLoops(loops);
+    const bodyIds = new Set<number>();
+    for (const s of solids) {
+      const outer = s.outer.map((p) => add(p, off));
+      if (loopSignedArea(outer) < 0) outer.reverse(); // consistent winding for later corner rounding
+      const holes = s.holes.map((loop) => {
+        const h = loop.map((p) => add(p, off));
+        if (loopSignedArea(h) > 0) h.reverse(); // holes wound opposite the outer, by convention
+        return h;
+      });
+      const body = scene.addBody(outer, 0, "fillet", holes);
+      body.color = defaultBodyColor;
+      bodyIds.add(body.id);
+    }
+    setMulti(bodyIds, new Set());
+    markDirty();
+    if (res.skippedPaths > 0)
+      window.alert(
+        `Imported ${solids.length} shape${solids.length === 1 ? "" : "s"}; ` +
+          `${res.skippedPaths} open path${res.skippedPaths === 1 ? "" : "s"} couldn't be chained into a closed loop and ${res.skippedPaths === 1 ? "was" : "were"} skipped.`
+      );
+  } catch (err) {
+    window.alert(`Could not import ${file.name}: ${(err as Error).message}`);
+  }
+}
+
+// Drag-and-drop onto the canvas: a .dxf imports as bodies at the drop point; a .json
+// loads as a scene (same as the Load button).
+canvas.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+});
+canvas.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer?.files[0];
+  if (!file) return;
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".dxf")) void importDxfFile(file, eventWorld(e));
+  else if (name.endsWith(".json")) void loadFromFile(file);
+  else window.alert("Unsupported file type — drop a .dxf (imports as bodies) or a .json (loads a scene).");
+});
 
 // --- drawing-mode click handling ----------------------------------------
 function handleDrawClick(p: Vec2): void {
@@ -2865,6 +2955,7 @@ function frame(now?: number): void {
   }
   syncColorPicker();
   syncPropsPanel();
+  syncUnitSelect();
   if (sketchFlash && performance.now() >= sketchFlash.until) sketchFlash = null;
   render(ctx, {
     scene,

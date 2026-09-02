@@ -143,7 +143,15 @@
           <button id="snap-btn" class="icon-btn" title="Snap placement and dragging to the grid (toggle)" aria-label="Toggle snap to grid">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3v7a4 4 0 0 0 8 0V3"/><line x1="4" y1="3" x2="8" y2="3"/><line x1="12" y1="3" x2="16" y2="3"/><line x1="6" y1="10" x2="6" y2="12"/><line x1="14" y1="10" x2="14" y2="12"/></svg>
           </button>
-          <label class="select-label" title="Grid spacing in world units (1–200)">
+          <label class="select-label" title="Working units — what one world unit means; measurements display it and DXF import converts into it (saved with the file)">
+            <select id="unit-select" aria-label="Working units">
+              <option value="mm">mm</option>
+              <option value="cm">cm</option>
+              <option value="m">m</option>
+              <option value="in">in</option>
+            </select>
+          </label>
+          <label class="select-label" title="Grid spacing in working units (1–200)">
             <input id="grid-size" type="number" min="1" max="200" step="any" value="40" />
             <select id="grid-size-presets" title="Pick a preset grid size">
               <option value="" selected disabled hidden>·</option>

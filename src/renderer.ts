@@ -201,16 +201,22 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   const multiJoints = new Set(input.multiSelected?.joints ?? []);
   for (const body of scene.bodies) {
     const verts = scene.bodyWorldVerts(body);
+    const holes = scene.bodyHolesWorld(body);
     const isSelected = body.id === selectedBody || multiBodies.has(body.id);
     const isHover = body.id === input.hoverBody;
+    // Outer outline + hole loops as subpaths: even-odd fill leaves the holes empty.
     ctx.beginPath();
     verts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
     ctx.closePath();
+    for (const loop of holes) {
+      loop.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+    }
     ctx.fillStyle = body.color + (isSelected ? "55" : isHover ? "44" : "33");
-    ctx.fill();
+    ctx.fill("evenodd");
     ctx.strokeStyle = isSelected ? theme.ink : body.color;
     ctx.lineWidth = px(isSelected || isHover ? 3 : 2);
-    ctx.stroke();
+    ctx.stroke(); // strokes every subpath, so hole rims get the outline too
   }
 
   // Permanent groups: a faint dashed convex hull around a group's members, drawn only
@@ -547,14 +553,14 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     const paren = input.mode === "draw" && !info.driving;
     drawMeasurement(
       ctx, info, view, dpr, theme,
-      info.id === selectedMeasure, false, paren, !!input.flash?.has(info.id)
+      info.id === selectedMeasure, false, paren, !!input.flash?.has(info.id), input.scene.unit
     );
   }
   if (input.measureDraft) {
     const { refs, hover, preview } = input.measureDraft;
     if (hover) drawMeasureRefHighlight(ctx, hover, px, true);
     for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false);
-    if (preview) drawMeasurement(ctx, preview, view, dpr, theme, false, true, false, false);
+    if (preview) drawMeasurement(ctx, preview, view, dpr, theme, false, true, false, false, input.scene.unit);
   }
 }
 
@@ -578,12 +584,13 @@ const SKETCH_SYMBOL: Record<SketchConstraintKind, string> = {
 };
 
 /**
- * Compact value text: one decimal, trailing zero dropped; degrees get a ° suffix.
- * `paren` wraps the value in parentheses (a driven/reference dimension in draw mode).
+ * Compact value text: one decimal, trailing zero dropped; degrees get a ° suffix and
+ * distances the document's working unit. `paren` wraps the value in parentheses
+ * (a driven/reference dimension in draw mode).
  */
-function measureText(info: MeasureInfo, paren: boolean): string {
+function measureText(info: MeasureInfo, paren: boolean, unit: string): string {
   const v = Math.round(info.value * 10) / 10;
-  const t = info.kind === "angle" ? `${v}°` : `${v}`;
+  const t = info.kind === "angle" ? `${v}°` : `${v} ${unit}`;
   return paren ? `(${t})` : t;
 }
 
@@ -681,7 +688,8 @@ function drawMeasurement(
   selected: boolean,
   draft: boolean,
   paren: boolean,
-  flashed: boolean
+  flashed: boolean,
+  unit: string
 ): void {
   const s = view.scale;
   const px = (n: number) => n / s;
@@ -722,7 +730,7 @@ function drawMeasurement(
   }
 
   // Value label: a pill + text drawn in screen space so it stays legible at any zoom.
-  const text = measureText(info, paren);
+  const text = measureText(info, paren, unit);
   const sx = info.labelPos.x * s + view.tx;
   const sy = info.labelPos.y * s + view.ty;
   ctx.save();
