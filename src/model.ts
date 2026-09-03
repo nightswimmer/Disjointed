@@ -159,10 +159,14 @@ export type Constraint =
  * body** in simulation: the solver applies every impulse to the whole group about its
  * combined centroid, so the members never move relative to each other. A body belongs
  * to at most one group; groups need at least 2 members (smaller ones dissolve).
+ * `jointIds` (v14) are **free joints locked rigidly to the group**: they translate and
+ * rotate with it in simulation exactly like body material (the chassis anchor points of
+ * component instances are these). Absent in older files → none.
  */
 export interface BodyGroup {
   id: number;
   bodyIds: number[];
+  jointIds: number[];
 }
 
 // --- construction guidelines ------------------------------------------------
@@ -296,6 +300,65 @@ export const UNIT_TO_MM: Record<Unit, number> = { mm: 1, cm: 10, m: 1000, in: 25
 
 const DEFAULT_UNIT: Unit = "mm";
 
+// --- components (hierarchical design) ---------------------------------------
+
+/**
+ * A reusable component definition (v14): a complete sub-scene with its own coordinate
+ * frame, edited in its own context with every normal tool. Its sketch constraints,
+ * driving dimensions, measurements and guides live **only here** — they never expand
+ * into a parent context, so an instance carries the designed shapes without the
+ * design-time constraints. Grounding inside a definition means "fixed to the
+ * component's frame": on expansion the grounded material becomes one rigid chassis
+ * group per instance (never grounded to the world). A definition's data may itself
+ * contain instances of other definitions (a DAG — cycles are rejected).
+ */
+export interface ComponentDef {
+  id: number;
+  name: string;
+  data: SceneData;
+}
+
+/** One expanded element of a component instance: def-local src id → id in this context. */
+export interface InstanceMapEntry {
+  src: number;
+  id: number;
+}
+
+/** A body entry also caches the body's def-frame pose at the last expansion, so the
+ *  instance's placement transform can be re-derived when the definition changes. */
+export interface InstanceBodyEntry extends InstanceMapEntry {
+  defPos: Vec2;
+  defAngle: number;
+  /** Part of the rigid chassis (grounded in the definition) — pose follows the def rigidly. */
+  chassis: boolean;
+}
+
+/**
+ * A materialized instance of a component definition. The mapped elements are *real*
+ * bodies / joints / constraints of the owning context (the solver, renderer and
+ * hit-testing see nothing special); the maps carry the provenance that re-expansion
+ * uses to reconcile the instance when the definition changes. `anchorMap` names the
+ * free joints synthesized from the definition's joint-ground constraints (keyed by
+ * that ground constraint's def-local id); `groupId` is the rigid chassis group.
+ */
+export interface ComponentInstance {
+  id: number;
+  defId: number;
+  bodyMap: InstanceBodyEntry[];
+  jointMap: InstanceMapEntry[];
+  constraintMap: InstanceMapEntry[];
+  anchorMap: InstanceMapEntry[];
+  /** Groups recreated from the definition's own groups (src = def group id). */
+  groupMap: InstanceMapEntry[];
+  groupId: number | null;
+}
+
+/** A rigid placement mapping def-frame coordinates into the owning context. */
+export interface InstanceTransform {
+  pos: Vec2;
+  angle: number;
+}
+
 /** Serializable snapshot of an entire scene (for save / load / autosave). */
 export interface SceneData {
   version: number;
@@ -312,6 +375,10 @@ export interface SceneData {
   groups?: BodyGroup[];
   /** Construction guidelines. Absent pre-v11. */
   guides?: Guide[];
+  /** Component definitions (v14) — document-level, present only in the root snapshot. */
+  components?: ComponentDef[];
+  /** Component instances expanded into *this* context (v14). */
+  instances?: ComponentInstance[];
 }
 
 /**
@@ -336,15 +403,19 @@ export interface SelectionClip {
   grounds: { joint: number; anchor: Vec2 }[];
   sliders: { tmp: number; railA: number; railB: number; riders: number[] }[];
   pins: { a: number; b: number }[];
-  /** Permanent groups among the copied bodies (member body tmp ids). */
-  groups: number[][];
+  /** Powered constraints fully internal to the clip (slider/rider — body/joints — copied). */
+  actuators: { slider: number; rider: number; speed: number; profile: "triangle" | "sine" }[];
+  motors: { body: number; pivot: number; crank: number; speed: number }[];
+  /** Permanent groups among the copied members (body / free-joint tmp ids). */
+  groups: { bodies: number[]; joints: number[] }[];
   /** Fully-internal sketch constraints; refs carry the original ids, remapped on paste. */
   sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null }[];
-  /** Fully-internal draw-mode driving dimensions; refs carry the original ids. */
-  dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target: number }[];
+  /** Fully-internal draw-mode dimensions; refs carry the original ids. Driving ones carry
+   *  a `target`; driven (reference) ones travel only when the clip asks for them. */
+  dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
 }
 
-const FORMAT_VERSION = 13;
+const FORMAT_VERSION = 14;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -371,6 +442,10 @@ export class Scene {
   sketch: SketchConstraint[] = [];
   groups: BodyGroup[] = [];
   guides: Guide[] = [];
+  /** Component definitions — document-level (kept across context switches). */
+  components: ComponentDef[] = [];
+  /** Component instances expanded into this context. */
+  instances: ComponentInstance[] = [];
   /** Working unit: 1 world unit = 1 of these (display + import conversion only). */
   unit: Unit = DEFAULT_UNIT;
   private nextId = 1;
@@ -569,9 +644,10 @@ export class Scene {
         // itself rather than being pinned to one of the rail's endpoints.
         const nj = this.addJoint(body.id, w);
         this.attachSliderRider(slider.id, nj.id);
-      } else if (j.bodyId === null && !grounded) {
+      } else if (j.bodyId === null && !grounded && !this.groupOfJoint(j.id)) {
         // A loose free joint, or a free slider rider: absorb it. It now belongs to the new
         // body (angle 0 at creation); if it was a rider it stays one (rider ids are kept).
+        // A group-locked free joint is chassis material and stays independent (pinned below).
         j.bodyId = body.id;
         j.local = sub(w, body.pos);
       } else {
@@ -611,6 +687,9 @@ export class Scene {
       if (
         j &&
         j.bodyId === null &&
+        // A group-locked free joint is already anchored to its group — the rail rides
+        // the group instead of being world-fixed, so it must not be auto-grounded.
+        !this.groupOfJoint(id) &&
         !this.constraints.some((c) => c.kind === "ground" && c.joint === id)
       ) {
         this.addGround(id, this.jointWorld(j));
@@ -926,6 +1005,9 @@ export class Scene {
     }
     if (!this.resolveMeasureRef(refA) || (b && !this.resolveMeasureRef(b))) return null;
     if (b && sameMeasureRef(refA, b)) return null;
+    // Instance geometry is design-locked: its shape belongs to the component definition,
+    // so sketch constraints on it are rejected (edit the definition instead).
+    if (this.refInstanceOwned(refA) || (b && this.refInstanceOwned(b))) return null;
     const c: SketchConstraint = {
       kind,
       id: this.id(),
@@ -960,6 +1042,8 @@ export class Scene {
   setMeasurementDriving(id: number, target: number): boolean {
     const m = this.getMeasurement(id);
     if (!m || m.mode !== "draw" || !(target > 0)) return false;
+    // A dimension on instance geometry can't drive — the shape belongs to the definition.
+    if (this.refInstanceOwned(m.refA) || this.refInstanceOwned(m.refB)) return false;
     m.driving = true;
     m.target = target;
     return true;
@@ -1291,32 +1375,55 @@ export class Scene {
     return this.groups.find((g) => g.bodyIds.includes(bodyId));
   }
 
+  /** The group a free joint is locked to, or undefined. */
+  groupOfJoint(jointId: number): BodyGroup | undefined {
+    return this.groups.find((g) => g.jointIds.includes(jointId));
+  }
+
   /**
-   * Create a permanent group over `bodyIds`. Any existing group touching one of them is
-   * absorbed (grouping is a union — a body belongs to at most one group), so grouping a
-   * selection that includes grouped bodies merges everything into a single group.
-   * Returns the new group, or null when fewer than 2 distinct existing bodies remain.
+   * Create a permanent group over `bodyIds` plus (optionally) free joints locked to it.
+   * Any existing group touching one of the members is absorbed (grouping is a union — a
+   * member belongs to at most one group), so grouping a selection that includes grouped
+   * elements merges everything into a single group. Returns the new group, or null when
+   * fewer than 2 distinct existing members remain.
    */
-  addGroup(bodyIds: number[]): BodyGroup | null {
-    const members = new Set<number>();
+  addGroup(bodyIds: number[], jointIds: number[] = []): BodyGroup | null {
+    const bodies = new Set<number>();
+    const joints = new Set<number>();
+    const absorb = (g: BodyGroup): void => {
+      g.bodyIds.forEach((b) => bodies.add(b));
+      g.jointIds.forEach((j) => joints.add(j));
+    };
     for (const id of bodyIds) {
       if (!this.getBody(id)) continue;
       const existing = this.groupOf(id);
-      if (existing) existing.bodyIds.forEach((b) => members.add(b));
-      else members.add(id);
+      if (existing) absorb(existing);
+      else bodies.add(id);
     }
-    if (members.size < 2) return null;
-    this.groups = this.groups.filter((g) => !g.bodyIds.some((b) => members.has(b)));
-    const group: BodyGroup = { id: this.id(), bodyIds: [...members] };
+    for (const id of jointIds) {
+      const j = this.getJoint(id);
+      if (!j || j.bodyId !== null) continue; // only free joints can be group members
+      const existing = this.groupOfJoint(id);
+      if (existing) absorb(existing);
+      else joints.add(id);
+    }
+    if (bodies.size + joints.size < 2) return null;
+    this.groups = this.groups.filter(
+      (g) => !g.bodyIds.some((b) => bodies.has(b)) && !g.jointIds.some((j) => joints.has(j))
+    );
+    const group: BodyGroup = { id: this.id(), bodyIds: [...bodies], jointIds: [...joints] };
     this.groups.push(group);
     return group;
   }
 
-  /** Dissolve every group containing any of `bodyIds`. Returns whether anything changed. */
-  ungroup(bodyIds: number[]): boolean {
-    const hit = new Set(bodyIds);
+  /** Dissolve every group containing any of the given members. Returns whether anything changed. */
+  ungroup(bodyIds: number[], jointIds: number[] = []): boolean {
+    const hitB = new Set(bodyIds);
+    const hitJ = new Set(jointIds);
     const before = this.groups.length;
-    this.groups = this.groups.filter((g) => !g.bodyIds.some((b) => hit.has(b)));
+    this.groups = this.groups.filter(
+      (g) => !g.bodyIds.some((b) => hitB.has(b)) && !g.jointIds.some((j) => hitJ.has(j))
+    );
     return this.groups.length !== before;
   }
 
@@ -1361,10 +1468,14 @@ export class Scene {
     return true;
   }
 
-  /** Drop removed bodies from groups; a group left with fewer than 2 members dissolves. */
+  /** Drop removed bodies / non-free joints from groups; a group left with fewer than 2
+   *  members (bodies + joints combined) dissolves. */
   private pruneGroups(): void {
-    for (const g of this.groups) g.bodyIds = g.bodyIds.filter((b) => this.getBody(b));
-    this.groups = this.groups.filter((g) => g.bodyIds.length >= 2);
+    for (const g of this.groups) {
+      g.bodyIds = g.bodyIds.filter((b) => this.getBody(b));
+      g.jointIds = g.jointIds.filter((j) => this.getJoint(j)?.bodyId === null);
+    }
+    this.groups = this.groups.filter((g) => g.bodyIds.length + g.jointIds.length >= 2);
   }
 
   // --- construction guidelines ----------------------------------------------
@@ -1452,7 +1563,11 @@ export class Scene {
    * outside the selection is dropped. Permanent groups among the copied bodies travel
    * too. Returns null when nothing copyable is selected.
    */
-  extractSelection(bodyIds: number[], freeJointIds: number[] = []): SelectionClip | null {
+  extractSelection(
+    bodyIds: number[],
+    freeJointIds: number[] = [],
+    opts?: { drivenDims?: boolean }
+  ): SelectionClip | null {
     const bodies = [...new Set(bodyIds)]
       .map((id) => this.getBody(id))
       .filter((b): b is Body => b !== undefined);
@@ -1505,11 +1620,29 @@ export class Scene {
         pins.push({ a: c.jointA, b: c.jointB });
       }
     }
+    // Powered constraints travel when everything they reference does.
+    const clippedSliderIds = new Set(sliders.map((s) => s.tmp));
+    const actuators: SelectionClip["actuators"] = [];
+    const motors: SelectionClip["motors"] = [];
+    for (const c of this.constraints) {
+      if (c.kind === "linearActuator" && clippedSliderIds.has(c.sliderId) && owned.has(c.riderId)) {
+        actuators.push({ slider: c.sliderId, rider: c.riderId, speed: c.speed, profile: c.profile });
+      } else if (
+        c.kind === "motor" &&
+        bodyIdSet.has(c.bodyId) &&
+        owned.has(c.pivotJointId) &&
+        owned.has(c.crankJointId)
+      ) {
+        motors.push({ body: c.bodyId, pivot: c.pivotJointId, crank: c.crankJointId, speed: c.speed });
+      }
+    }
     // Permanent groups whose members were copied (at least 2 of them) travel with the clip.
-    const groups: number[][] = [];
+    const freeJointIdSet = new Set(freeJoints.map((j) => j.id));
+    const groups: SelectionClip["groups"] = [];
     for (const g of this.groups) {
-      const members = g.bodyIds.filter((id) => bodyIdSet.has(id));
-      if (members.length >= 2) groups.push(members);
+      const bodies2 = g.bodyIds.filter((id) => bodyIdSet.has(id));
+      const joints2 = g.jointIds.filter((id) => freeJointIdSet.has(id));
+      if (bodies2.length + joints2.length >= 2) groups.push({ bodies: bodies2, joints: joints2 });
     }
     // A ref is internal when its element travels with the clip: a copied joint, a copied
     // body's vertices/edges/frame, or the rail of a copied slider.
@@ -1542,19 +1675,17 @@ export class Scene {
     }
     const dims: SelectionClip["dims"] = [];
     for (const m of this.measurements) {
-      if (
-        m.mode === "draw" &&
-        m.driving &&
-        m.target !== undefined &&
-        internal(m.refA) &&
-        internal(m.refB)
-      ) {
+      const driving = m.driving === true && m.target !== undefined;
+      // Driving dimensions always travel (they're constraints); driven reference ones are
+      // annotations and travel only on request (component creation keeps them).
+      if (!driving && !opts?.drivenDims) continue;
+      if (m.mode === "draw" && internal(m.refA) && internal(m.refB)) {
         dims.push({
           refA: cloneMeasureRef(m.refA),
           refB: cloneMeasureRef(m.refB),
           labelOffset: clone(m.labelOffset),
           axis: m.axis,
-          target: m.target,
+          target: driving ? m.target : undefined,
         });
       }
     }
@@ -1573,6 +1704,8 @@ export class Scene {
       grounds,
       sliders,
       pins,
+      actuators,
+      motors,
       groups,
       sketch,
       dims,
@@ -1644,9 +1777,37 @@ export class Scene {
       const b = idMap.get(p.b);
       if (a !== undefined && b !== undefined) this.addPin(a, b);
     }
+    for (const a of clip.actuators ?? []) {
+      const slider = sliderIdMap.get(a.slider);
+      const rider = idMap.get(a.rider);
+      if (slider === undefined || rider === undefined) continue;
+      this.constraints.push({
+        kind: "linearActuator",
+        id: this.id(),
+        sliderId: slider,
+        riderId: rider,
+        speed: a.speed,
+        profile: a.profile,
+      });
+    }
+    for (const m of clip.motors ?? []) {
+      const body = bodyIdMap.get(m.body);
+      const pivot = idMap.get(m.pivot);
+      const crank = idMap.get(m.crank);
+      if (body === undefined || pivot === undefined || crank === undefined) continue;
+      this.constraints.push({
+        kind: "motor",
+        id: this.id(),
+        bodyId: body,
+        pivotJointId: pivot,
+        crankJointId: crank,
+        speed: m.speed,
+      });
+    }
     for (const g of clip.groups) {
-      const ids = g.map((t) => bodyIdMap.get(t)).filter((x): x is number => x !== undefined);
-      if (ids.length >= 2) this.addGroup(ids);
+      const bids = g.bodies.map((t) => bodyIdMap.get(t)).filter((x): x is number => x !== undefined);
+      const jids = g.joints.map((t) => idMap.get(t)).filter((x): x is number => x !== undefined);
+      if (bids.length + jids.length >= 2) this.addGroup(bids, jids);
     }
     // Recreate the clipped sketch constraints / driving dimensions on the new elements.
     // Everything they express is translation-invariant, so the pasted geometry already
@@ -1686,16 +1847,19 @@ export class Scene {
       const ra = remapRef(d.refA);
       const rb = remapRef(d.refB);
       if (!ra || !rb || !this.resolveMeasureRef(ra) || !this.resolveMeasureRef(rb)) continue;
-      this.measurements.push({
+      const m: Measurement = {
         id: this.id(),
         mode: "draw",
         refA: ra,
         refB: rb,
         labelOffset: clone(d.labelOffset),
         axis: d.axis,
-        driving: true,
-        target: d.target,
-      });
+      };
+      if (d.target !== undefined) {
+        m.driving = true;
+        m.target = d.target;
+      }
+      this.measurements.push(m);
     }
     return { bodyIds: [...bodyIdMap.values()], freeJointIds };
   }
@@ -1705,6 +1869,577 @@ export class Scene {
     return this.insertSelection(clip, at)?.bodyIds[0] ?? null;
   }
 
+  // --- components (definitions + materialized instances) ---------------------
+
+  getComponent(id: number): ComponentDef | undefined {
+    return this.components.find((c) => c.id === id);
+  }
+
+  /** The instance owning a body / joint / constraint of this context, or undefined. */
+  instanceOfBody(bodyId: number): ComponentInstance | undefined {
+    return this.instances.find((i) => i.bodyMap.some((e) => e.id === bodyId));
+  }
+
+  instanceOfJoint(jointId: number): ComponentInstance | undefined {
+    return this.instances.find(
+      (i) => i.jointMap.some((e) => e.id === jointId) || i.anchorMap.some((e) => e.id === jointId)
+    );
+  }
+
+  instanceOfConstraint(constraintId: number): ComponentInstance | undefined {
+    return this.instances.find((i) => i.constraintMap.some((e) => e.id === constraintId));
+  }
+
+  /** Whether a measurement/sketch reference names instance-owned geometry (whose shape is
+   *  locked — sketch constraints and driving dimensions on it are rejected). */
+  refInstanceOwned(ref: MeasureRef): boolean {
+    switch (ref.kind) {
+      case "joint":
+        return this.instanceOfJoint(ref.jointId) !== undefined;
+      case "vertex":
+      case "edge":
+      case "bodyPoint":
+        return this.instanceOfBody(ref.bodyId) !== undefined;
+      case "rail":
+        return this.instanceOfConstraint(ref.sliderId) !== undefined;
+      default:
+        return false;
+    }
+  }
+
+  /** Every def id a definition's expansion (transitively) uses — for cycle checks:
+   *  a def may not be instantiated into a context whose def it uses. */
+  componentUses(defId: number): Set<number> {
+    const used = new Set<number>();
+    const visit = (id: number): void => {
+      const def = this.getComponent(id);
+      if (!def) return;
+      for (const i of def.data.instances ?? []) {
+        if (!used.has(i.defId)) {
+          used.add(i.defId);
+          visit(i.defId);
+        }
+      }
+    };
+    visit(defId);
+    return used;
+  }
+
+  /** Centre of a definition's bounding box in def-frame coordinates (for placement). */
+  componentCenter(defId: number): Vec2 {
+    const def = this.getComponent(defId);
+    if (!def) return vec(0, 0);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const include = (p: Vec2): void => {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    };
+    for (const b of def.data.bodies) {
+      for (const l of b.local) include(add(b.pos, rotate(l, b.angle)));
+    }
+    for (const j of def.data.joints) {
+      if (j.bodyId === null) include(j.local);
+    }
+    return Number.isFinite(minX) ? vec((minX + maxX) / 2, (minY + maxY) / 2) : vec(0, 0);
+  }
+
+  /**
+   * Turn a selection into a new component definition and replace it with one instance
+   * placed exactly where the originals were. The definition's frame is the selection's
+   * current world coordinates. Everything internal to the selection travels into the
+   * definition — bodies (colour, grounded flag), joints, grounds, pins, sliders,
+   * actuators/motors, internal sketch constraints and dimensions (driving *and* driven).
+   * Anything reaching outside the selection (a pin to an uncopied body, a guide ref) is
+   * dropped, like copy/paste. Returns null when the selection is empty, has no body, or
+   * contains material already owned by another instance.
+   */
+  createComponentFromSelection(
+    name: string,
+    bodyIds: number[],
+    freeJointIds: number[] = []
+  ): { def: ComponentDef; instance: ComponentInstance } | null {
+    const bodies = [...new Set(bodyIds)].filter((id) => this.getBody(id));
+    const joints = [...new Set(freeJointIds)].filter((id) => this.getJoint(id)?.bodyId === null);
+    if (bodies.length === 0) return null;
+    if (bodies.some((id) => this.instanceOfBody(id)) || joints.some((id) => this.instanceOfJoint(id))) {
+      return null; // instance material belongs to its own definition
+    }
+    const clip = this.extractSelection(bodies, joints, { drivenDims: true });
+    if (!clip) return null;
+    const tmp = new Scene();
+    tmp.unit = this.unit;
+    if (!tmp.insertSelection(clip, clip.center)) return null; // zero offset: def frame = world
+    const defId = this.components.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+    const def: ComponentDef = { id: defId, name, data: tmp.serializeContext() };
+    this.components.push(def);
+    for (const id of bodies) this.removeBody(id);
+    for (const id of joints) if (this.getJoint(id)) this.removeJoint(id);
+    const instance = this.instantiateComponent(def.id, { pos: vec(0, 0), angle: 0 })!;
+    return { def, instance };
+  }
+
+  /** Expand one new instance of a definition into this context, placed by `t` (def frame
+   *  → context). Returns null for an unknown definition. */
+  instantiateComponent(defId: number, t: InstanceTransform): ComponentInstance | null {
+    const def = this.getComponent(defId);
+    if (!def) return null;
+    const inst = this.expandInstance(def, null, t);
+    this.instances.push(inst);
+    return inst;
+  }
+
+  /**
+   * Re-expand every instance whose definition is in `changed`, reconciling the expanded
+   * elements against the (new) definition: surviving elements keep their scene identity
+   * (ids, and — for mechanism parts — their current pose), chassis material snaps to the
+   * definition's rigid layout at the instance's current placement, new elements appear,
+   * removed ones cascade away. Returns whether anything was re-expanded.
+   */
+  reexpandInstances(changed: ReadonlySet<number>): boolean {
+    let did = false;
+    for (const inst of [...this.instances]) {
+      if (!changed.has(inst.defId)) continue;
+      const def = this.getComponent(inst.defId);
+      if (!def) {
+        this.removeInstance(inst.id);
+        did = true;
+        continue;
+      }
+      this.expandInstance(def, inst, this.instanceTransform(inst, def));
+      did = true;
+    }
+    if (did) this.pruneInstances();
+    return did;
+  }
+
+  /** Remove an instance and everything it expanded to. */
+  removeInstance(instanceId: number): void {
+    const inst = this.instances.find((i) => i.id === instanceId);
+    if (!inst) return;
+    // Detach the record first: removeBody/removeJoint prune instance maps as they go,
+    // so snapshot the member lists and work from those.
+    this.instances = this.instances.filter((i) => i.id !== instanceId);
+    const bodyIds = inst.bodyMap.map((e) => e.id);
+    const jointIds = [...inst.jointMap, ...inst.anchorMap].map((e) => e.id);
+    const conIds = inst.constraintMap.map((e) => e.id);
+    const gids = new Set(inst.groupMap.map((e) => e.id));
+    if (inst.groupId !== null) gids.add(inst.groupId);
+    for (const id of bodyIds) if (this.getBody(id)) this.removeBody(id);
+    for (const id of jointIds) if (this.getJoint(id)) this.removeJoint(id);
+    for (const id of conIds) this.removeConstraint(id);
+    this.groups = this.groups.filter((g) => !gids.has(g.id));
+  }
+
+  /** Dissolve an instance into plain elements: the record is dropped, the expanded
+   *  bodies/joints/constraints (and the chassis group, now an ordinary rigid group)
+   *  stay behind and stop following the definition. */
+  dissolveInstance(instanceId: number): void {
+    this.instances = this.instances.filter((i) => i.id !== instanceId);
+  }
+
+  /** Delete a definition. Refused (returns false) while any instance of it exists in this
+   *  context or inside any other definition's data. */
+  removeComponent(defId: number): boolean {
+    if (this.instances.some((i) => i.defId === defId)) return false;
+    for (const c of this.components) {
+      if (c.id !== defId && (c.data.instances ?? []).some((i) => i.defId === defId)) return false;
+    }
+    const before = this.components.length;
+    this.components = this.components.filter((c) => c.id !== defId);
+    return this.components.length !== before;
+  }
+
+  /** Public view of an instance's current placement (def frame → context). */
+  instancePlacement(instanceId: number): InstanceTransform | null {
+    const inst = this.instances.find((i) => i.id === instanceId);
+    const def = inst ? this.getComponent(inst.defId) : undefined;
+    return inst && def ? this.instanceTransform(inst, def) : null;
+  }
+
+  /** The instance's current placement (def frame → context), derived from a surviving
+   *  reference body's scene pose vs its cached def pose (chassis bodies preferred — they
+   *  move rigidly with the instance). Falls back to a surviving free joint (translation
+   *  only), then to identity. */
+  private instanceTransform(inst: ComponentInstance, def: ComponentDef): InstanceTransform {
+    const pick =
+      inst.bodyMap.find((e) => e.chassis && this.getBody(e.id)) ??
+      inst.bodyMap.find((e) => this.getBody(e.id));
+    if (pick) {
+      const b = this.getBody(pick.id)!;
+      const angle = b.angle - pick.defAngle;
+      return { pos: sub(b.pos, rotate(pick.defPos, angle)), angle };
+    }
+    const dJoint = new Map(def.data.joints.map((j) => [j.id, j]));
+    const dBody = new Map(def.data.bodies.map((b) => [b.id, b]));
+    for (const e of inst.jointMap) {
+      const j = this.getJoint(e.id);
+      const dj = dJoint.get(e.src);
+      if (!j || j.bodyId !== null || !dj) continue;
+      const dw = dj.bodyId === null
+        ? dj.local
+        : add(dBody.get(dj.bodyId)!.pos, rotate(dj.local, dBody.get(dj.bodyId)!.angle));
+      return { pos: sub(this.jointWorld(j), dw), angle: 0 };
+    }
+    return { pos: vec(0, 0), angle: 0 };
+  }
+
+  /**
+   * The expansion engine: materialize (or reconcile) one instance of `def` into this
+   * context at placement `t`. With `inst` given, elements are matched by their def-local
+   * src ids — surviving ones are updated in place (design fields from the def; poses of
+   * non-chassis parts kept as instance state), missing ones created, orphaned ones
+   * removed. Ground constraints inside the definition are **converted**, never expanded:
+   * a grounded body joins the rigid chassis group; a grounded free joint becomes a
+   * group-locked chassis point; a joint-ground on a non-grounded body becomes a pin to a
+   * synthesized chassis point (revolute to the component's frame). The def's own groups
+   * (user groups, nested chassis) are recreated as plain groups.
+   */
+  private expandInstance(
+    def: ComponentDef,
+    inst: ComponentInstance | null,
+    t: InstanceTransform
+  ): ComponentInstance {
+    const d = def.data;
+    const xf = (p: Vec2): Vec2 => add(t.pos, rotate(p, t.angle));
+    const dBody = new Map(d.bodies.map((b) => [b.id, b]));
+    const dJoint = new Map(d.joints.map((j) => [j.id, j]));
+    const defJointWorld = (j: Joint): Vec2 =>
+      j.bodyId === null
+        ? j.local
+        : add(dBody.get(j.bodyId)!.pos, rotate(j.local, dBody.get(j.bodyId)!.angle));
+
+    // Classify the definition's grounds: chassis bodies, chassis free joints, and
+    // joint-grounds on non-grounded bodies (each of those becomes a pinned anchor point).
+    const chassisBodySrc = new Set(d.bodies.filter((b) => b.grounded).map((b) => b.id));
+    const chassisJointSrc = new Set<number>();
+    const anchorSrcs: GroundConstraint[] = [];
+    for (const c of d.constraints) {
+      if (c.kind !== "ground") continue;
+      const j = dJoint.get(c.joint);
+      if (!j) continue;
+      if (j.bodyId === null) chassisJointSrc.add(j.id);
+      else if (!chassisBodySrc.has(j.bodyId)) anchorSrcs.push(c);
+    }
+
+    // --- bodies ---------------------------------------------------------------
+    const oldBodyEntries = new Map((inst?.bodyMap ?? []).map((e) => [e.src, e]));
+    const bodyIdMap = new Map<number, number>();
+    const bodyMap: InstanceBodyEntry[] = [];
+    for (const db of d.bodies) {
+      const chassis = chassisBodySrc.has(db.id);
+      const old = oldBodyEntries.get(db.id);
+      let sb = old ? this.getBody(old.id) : undefined;
+      if (sb) {
+        // Design comes from the def; pose is instance state (except chassis material,
+        // which follows the def's rigid layout at the instance's placement). The
+        // grounded flag is instance state too (grounding an instance happens outside).
+        sb.controlLocal = db.controlLocal.map((p) => vec(p.x, p.y));
+        sb.local = db.local.map((p) => vec(p.x, p.y));
+        sb.radius = db.radius;
+        sb.round = db.round;
+        if (db.holesLocal?.length) sb.holesLocal = db.holesLocal.map((l) => l.map((p) => vec(p.x, p.y)));
+        else delete sb.holesLocal;
+        sb.invMass = db.invMass;
+        sb.invInertia = db.invInertia;
+        sb.color = db.color;
+        if (chassis) {
+          sb.pos = xf(db.pos);
+          sb.angle = db.angle + t.angle;
+        }
+      } else {
+        sb = {
+          id: this.id(),
+          controlLocal: db.controlLocal.map((p) => vec(p.x, p.y)),
+          radius: db.radius,
+          round: db.round,
+          local: db.local.map((p) => vec(p.x, p.y)),
+          pos: xf(db.pos),
+          angle: db.angle + t.angle,
+          invMass: db.invMass,
+          invInertia: db.invInertia,
+          color: db.color,
+          grounded: false,
+        };
+        if (db.holesLocal?.length) sb.holesLocal = db.holesLocal.map((l) => l.map((p) => vec(p.x, p.y)));
+        this.bodies.push(sb);
+      }
+      bodyIdMap.set(db.id, sb.id);
+      bodyMap.push({ src: db.id, id: sb.id, defPos: vec(db.pos.x, db.pos.y), defAngle: db.angle, chassis });
+    }
+    // Orphaned bodies (their def source is gone) cascade away with their joints/constraints.
+    // The rebuilt map is installed first: removals prune instance maps as they go, and the
+    // record must never look empty mid-reconcile (pruneInstances would drop it).
+    const oldBodyList = inst?.bodyMap ?? [];
+    if (inst) inst.bodyMap = bodyMap;
+    for (const e of oldBodyList) {
+      if (!dBody.has(e.src) && this.getBody(e.id)) this.removeBody(e.id);
+    }
+
+    // --- joints ---------------------------------------------------------------
+    const oldJointEntries = new Map((inst?.jointMap ?? []).map((e) => [e.src, e]));
+    const jointIdMap = new Map<number, number>();
+    const jointMap: InstanceMapEntry[] = [];
+    for (const dj of d.joints) {
+      const old = oldJointEntries.get(dj.id);
+      let sj = old ? this.getJoint(old.id) : undefined;
+      const chassisPoint = dj.bodyId === null && chassisJointSrc.has(dj.id);
+      if (sj) {
+        if (dj.bodyId === null) {
+          if (sj.bodyId !== null) {
+            // The def detached this joint from a body — reset it to the def position.
+            sj.bodyId = null;
+            sj.local = xf(defJointWorld(dj));
+          } else if (chassisPoint) {
+            sj.local = xf(defJointWorld(dj)); // rigid to the chassis: follow the def
+          } // else: a mechanism point keeps its scene position (instance state)
+        } else {
+          const bid = bodyIdMap.get(dj.bodyId);
+          if (bid === undefined) {
+            this.removeJoint(sj.id);
+            sj = undefined;
+          } else {
+            sj.bodyId = bid;
+            sj.local = vec(dj.local.x, dj.local.y);
+          }
+        }
+      }
+      if (!sj) {
+        if (dj.bodyId === null) {
+          sj = { id: this.id(), bodyId: null, local: xf(defJointWorld(dj)) };
+        } else {
+          const bid = bodyIdMap.get(dj.bodyId);
+          if (bid === undefined) continue;
+          sj = { id: this.id(), bodyId: bid, local: vec(dj.local.x, dj.local.y) };
+        }
+        this.joints.push(sj);
+      }
+      jointIdMap.set(dj.id, sj.id);
+      jointMap.push({ src: dj.id, id: sj.id });
+    }
+    const oldJointList = inst?.jointMap ?? [];
+    if (inst) inst.jointMap = jointMap;
+    for (const e of oldJointList) {
+      if (!dJoint.has(e.src) && this.getJoint(e.id)) this.removeJoint(e.id);
+    }
+
+    // --- synthesized chassis anchors (one per joint-ground in the def) ---------
+    const oldAnchors = new Map((inst?.anchorMap ?? []).map((e) => [e.src, e]));
+    const anchorMap: InstanceMapEntry[] = [];
+    const anchorIds = new Map<number, number>(); // def ground id → scene anchor joint id
+    for (const g of anchorSrcs) {
+      const at = xf(g.anchor);
+      const old = oldAnchors.get(g.id);
+      let aj = old ? this.getJoint(old.id) : undefined;
+      if (aj && aj.bodyId === null) aj.local = vec(at.x, at.y);
+      else aj = this.addFreeJoint(at);
+      anchorMap.push({ src: g.id, id: aj.id });
+      anchorIds.set(g.id, aj.id);
+    }
+    const oldAnchorList = inst?.anchorMap ?? [];
+    if (inst) inst.anchorMap = anchorMap;
+    for (const e of oldAnchorList) {
+      if (!anchorIds.has(e.src) && this.getJoint(e.id)) this.removeJoint(e.id);
+    }
+
+    // --- constraints ------------------------------------------------------------
+    // Two passes: structural first (pins / sliders — grounds convert to anchor pins),
+    // then the powered constraints that reference sliders by id.
+    const oldCons = new Map((inst?.constraintMap ?? []).map((e) => [e.src, e]));
+    const constraintMap: InstanceMapEntry[] = [];
+    const conIdMap = new Map<number, number>(); // def constraint id → scene constraint id
+    const oldSceneCon = (src: number): Constraint | undefined => {
+      const e = oldCons.get(src);
+      return e ? this.constraints.find((x) => x.id === e.id) : undefined;
+    };
+    const keep = (src: number, id: number): void => {
+      constraintMap.push({ src, id });
+      conIdMap.set(src, id);
+    };
+    for (const dc of d.constraints) {
+      if (dc.kind === "ground") {
+        const aj = anchorIds.get(dc.id);
+        if (aj === undefined) continue; // chassis membership — no expanded constraint
+        const mj = jointIdMap.get(dc.joint);
+        if (mj === undefined) continue;
+        const sc = oldSceneCon(dc.id);
+        if (sc && sc.kind === "pin") {
+          sc.jointA = mj;
+          sc.jointB = aj;
+          keep(dc.id, sc.id);
+        } else {
+          keep(dc.id, this.addPin(mj, aj).id);
+        }
+      } else if (dc.kind === "pin") {
+        const a = jointIdMap.get(dc.jointA);
+        const b = jointIdMap.get(dc.jointB);
+        if (a === undefined || b === undefined) continue;
+        const sc = oldSceneCon(dc.id);
+        if (sc && sc.kind === "pin") {
+          sc.jointA = a;
+          sc.jointB = b;
+          keep(dc.id, sc.id);
+        } else {
+          keep(dc.id, this.addPin(a, b).id);
+        }
+      } else if (dc.kind === "slider") {
+        const a = jointIdMap.get(dc.railA);
+        const b = jointIdMap.get(dc.railB);
+        if (a === undefined || b === undefined) continue;
+        const riders = dc.riders
+          .map((r) => jointIdMap.get(r))
+          .filter((x): x is number => x !== undefined);
+        const sc = oldSceneCon(dc.id);
+        if (sc && sc.kind === "slider") {
+          sc.railA = a;
+          sc.railB = b;
+          sc.riders = riders;
+          keep(dc.id, sc.id);
+        } else {
+          // Created directly (not via addSlider): a def's world-fixed track means
+          // "fixed to the chassis", so its free rail joints must NOT be auto-grounded
+          // here — they're group-locked chassis points instead.
+          const ns: SliderConstraint = { kind: "slider", id: this.id(), railA: a, railB: b, riders };
+          this.constraints.push(ns);
+          keep(dc.id, ns.id);
+        }
+      }
+    }
+    for (const dc of d.constraints) {
+      if (dc.kind === "linearActuator") {
+        const rider = jointIdMap.get(dc.riderId);
+        const slider = conIdMap.get(dc.sliderId);
+        if (rider === undefined || slider === undefined) continue;
+        const sc = oldSceneCon(dc.id);
+        if (sc && sc.kind === "linearActuator") {
+          sc.sliderId = slider;
+          sc.riderId = rider;
+          sc.speed = dc.speed;
+          sc.profile = dc.profile;
+          keep(dc.id, sc.id);
+        } else {
+          const na: LinearActuatorConstraint = {
+            kind: "linearActuator",
+            id: this.id(),
+            sliderId: slider,
+            riderId: rider,
+            speed: dc.speed,
+            profile: dc.profile,
+          };
+          this.constraints.push(na);
+          keep(dc.id, na.id);
+        }
+      } else if (dc.kind === "motor") {
+        const body = bodyIdMap.get(dc.bodyId);
+        const pivot = jointIdMap.get(dc.pivotJointId);
+        const crank = jointIdMap.get(dc.crankJointId);
+        if (body === undefined || pivot === undefined || crank === undefined) continue;
+        const sc = oldSceneCon(dc.id);
+        if (sc && sc.kind === "motor") {
+          sc.bodyId = body;
+          sc.pivotJointId = pivot;
+          sc.crankJointId = crank;
+          sc.speed = dc.speed;
+          keep(dc.id, sc.id);
+        } else {
+          const nm: MotorConstraint = {
+            kind: "motor",
+            id: this.id(),
+            bodyId: body,
+            pivotJointId: pivot,
+            crankJointId: crank,
+            speed: dc.speed,
+          };
+          this.constraints.push(nm);
+          keep(dc.id, nm.id);
+        }
+      }
+    }
+    // Orphaned expanded constraints: anything previously mapped that wasn't kept.
+    const keptConIds = new Set(constraintMap.map((e) => e.id));
+    const oldConList = inst?.constraintMap ?? [];
+    if (inst) inst.constraintMap = constraintMap;
+    for (const e of oldConList) {
+      if (!keptConIds.has(e.id) && this.constraints.some((x) => x.id === e.id)) {
+        this.removeConstraint(e.id);
+      }
+    }
+
+    // --- groups -----------------------------------------------------------------
+    // The def's own groups (user groups; nested instances' chassis) are recreated as
+    // plain groups; then the chassis group locks the grounded material together.
+    const oldGroups = new Map((inst?.groupMap ?? []).map((e) => [e.src, e]));
+    const groupMap: InstanceMapEntry[] = [];
+    for (const dg of d.groups ?? []) {
+      const old = oldGroups.get(dg.id);
+      if (old) this.groups = this.groups.filter((g) => g.id !== old.id);
+      const bids = dg.bodyIds.map((x) => bodyIdMap.get(x)).filter((x): x is number => x !== undefined);
+      const jids = (dg.jointIds ?? []).map((x) => jointIdMap.get(x)).filter((x): x is number => x !== undefined);
+      if (bids.length + jids.length >= 2) {
+        const ng = this.addGroup(bids, jids);
+        if (ng) groupMap.push({ src: dg.id, id: ng.id });
+      }
+    }
+    const keptGroupIds = new Set(groupMap.map((e) => e.id));
+    for (const e of inst?.groupMap ?? []) {
+      if (!keptGroupIds.has(e.id)) this.groups = this.groups.filter((g) => g.id !== e.id);
+    }
+    if (inst?.groupId !== null && inst?.groupId !== undefined) {
+      this.groups = this.groups.filter((g) => g.id !== inst.groupId);
+    }
+    const chassisB = [...chassisBodySrc]
+      .map((x) => bodyIdMap.get(x))
+      .filter((x): x is number => x !== undefined);
+    const chassisJ = [
+      ...[...chassisJointSrc].map((x) => jointIdMap.get(x)).filter((x): x is number => x !== undefined),
+      ...anchorMap.map((e) => e.id),
+    ];
+    let groupId: number | null = null;
+    if (chassisB.length + chassisJ.length >= 2) {
+      groupId = this.addGroup(chassisB, chassisJ)?.id ?? null;
+    }
+
+    if (inst) {
+      inst.bodyMap = bodyMap;
+      inst.jointMap = jointMap;
+      inst.constraintMap = constraintMap;
+      inst.anchorMap = anchorMap;
+      inst.groupMap = groupMap;
+      inst.groupId = groupId;
+      return inst;
+    }
+    return {
+      id: this.id(),
+      defId: def.id,
+      bodyMap,
+      jointMap,
+      constraintMap,
+      anchorMap,
+      groupMap,
+      groupId,
+    };
+  }
+
+  /** Drop map entries whose elements are gone; an instance with nothing left dissolves. */
+  private pruneInstances(): void {
+    for (const inst of this.instances) {
+      inst.bodyMap = inst.bodyMap.filter((e) => this.getBody(e.id));
+      inst.jointMap = inst.jointMap.filter((e) => this.getJoint(e.id));
+      inst.anchorMap = inst.anchorMap.filter((e) => this.getJoint(e.id));
+      inst.constraintMap = inst.constraintMap.filter((e) =>
+        this.constraints.some((c) => c.id === e.id)
+      );
+      inst.groupMap = inst.groupMap.filter((e) => this.groups.some((g) => g.id === e.id));
+      if (inst.groupId !== null && !this.groups.some((g) => g.id === inst.groupId)) {
+        inst.groupId = null;
+      }
+    }
+    this.instances = this.instances.filter(
+      (i) => i.bodyMap.length + i.jointMap.length + i.anchorMap.length > 0
+    );
+  }
+
   /** Remove a body along with its joints, pruning the constraints that used them. */
   removeBody(id: number): void {
     const removed = new Set(this.joints.filter((j) => j.bodyId === id).map((j) => j.id));
@@ -1712,12 +2447,15 @@ export class Scene {
     this.joints = this.joints.filter((j) => j.bodyId !== id);
     this.pruneConstraints(removed);
     this.pruneGroups();
+    this.pruneInstances();
   }
 
-  /** Remove a single joint, pruning the constraints that used it. */
+  /** Remove a single joint, pruning the constraints (and group memberships) that used it. */
   removeJoint(id: number): void {
     this.joints = this.joints.filter((j) => j.id !== id);
     this.pruneConstraints(new Set([id]));
+    this.pruneGroups();
+    this.pruneInstances();
   }
 
   /**
@@ -1756,7 +2494,8 @@ export class Scene {
     this.pruneSketch();
   }
 
-  clear(): void {
+  /** Clear the current context's contents (component definitions are kept unless asked). */
+  clear(dropComponents = true): void {
     this.bodies = [];
     this.joints = [];
     this.constraints = [];
@@ -1764,11 +2503,23 @@ export class Scene {
     this.sketch = [];
     this.groups = [];
     this.guides = [];
+    this.instances = [];
+    if (dropComponents) this.components = [];
     this.nextId = 1;
   }
 
-  /** Plain-data snapshot of the scene; safe to JSON.stringify. */
+  /** Plain-data snapshot of the scene (current context + the document's component
+   *  definitions); safe to JSON.stringify. */
   serialize(): SceneData {
+    return {
+      ...this.serializeContext(),
+      components: this.components,
+    };
+  }
+
+  /** Snapshot of the current editing context only — no component definitions. Used when
+   *  the app switches between the root assembly and a component definition's sub-scene. */
+  serializeContext(): SceneData {
     return {
       version: FORMAT_VERSION,
       unit: this.unit,
@@ -1779,11 +2530,26 @@ export class Scene {
       sketch: this.sketch,
       groups: this.groups,
       guides: this.guides,
+      instances: this.instances,
     };
   }
 
-  /** Replace the scene's contents from a snapshot. Throws on malformed data. */
+  /** Replace the scene's contents from a snapshot, including the document's component
+   *  definitions. Throws on malformed data. */
   load(data: SceneData): void {
+    this.loadContext(data);
+    // Component definitions arrived in v14; older files simply have none. Deep-clone so
+    // the loaded document is independent of the parsed JSON object.
+    this.components = Array.isArray(data.components)
+      ? (JSON.parse(JSON.stringify(data.components)) as ComponentDef[]).filter(
+          (c) => c && typeof c.id === "number" && c.data && Array.isArray(c.data.bodies)
+        )
+      : [];
+  }
+
+  /** Replace the current context's contents from a snapshot, keeping the document's
+   *  component definitions untouched. Throws on malformed data. */
+  loadContext(data: SceneData): void {
     if (
       !data ||
       !Array.isArray(data.bodies) ||
@@ -1844,11 +2610,30 @@ export class Scene {
           refB: c.refB ? cloneMeasureRef(c.refB) : null,
         }))
       : [];
-    // Permanent groups arrived in v9; older files simply have none.
+    // Permanent groups arrived in v9 (free-joint members in v14); older files have none.
     this.groups = Array.isArray(data.groups)
-      ? data.groups.map((g) => ({ id: g.id, bodyIds: Array.isArray(g.bodyIds) ? g.bodyIds.slice() : [] }))
+      ? data.groups.map((g) => ({
+          id: g.id,
+          bodyIds: Array.isArray(g.bodyIds) ? g.bodyIds.slice() : [],
+          jointIds: Array.isArray(g.jointIds) ? g.jointIds.slice() : [],
+        }))
       : [];
-    this.pruneGroups(); // drop stale body ids / degenerate groups from hand-edited files
+    this.pruneGroups(); // drop stale member ids / degenerate groups from hand-edited files
+    // Component instances arrived in v14; older files simply have none.
+    this.instances = Array.isArray(data.instances)
+      ? (JSON.parse(JSON.stringify(data.instances)) as ComponentInstance[]).filter(
+          (i) => i && typeof i.id === "number" && typeof i.defId === "number"
+        )
+      : [];
+    for (const inst of this.instances) {
+      inst.bodyMap = Array.isArray(inst.bodyMap) ? inst.bodyMap : [];
+      inst.jointMap = Array.isArray(inst.jointMap) ? inst.jointMap : [];
+      inst.constraintMap = Array.isArray(inst.constraintMap) ? inst.constraintMap : [];
+      inst.anchorMap = Array.isArray(inst.anchorMap) ? inst.anchorMap : [];
+      inst.groupMap = Array.isArray(inst.groupMap) ? inst.groupMap : [];
+      inst.groupId = typeof inst.groupId === "number" ? inst.groupId : null;
+    }
+    this.pruneInstances();
     // Construction guidelines arrived in v11; older files simply have none.
     this.guides = Array.isArray(data.guides)
       ? data.guides
@@ -1863,6 +2648,7 @@ export class Scene {
       ...this.sketch.map((c) => c.id),
       ...this.groups.map((g) => g.id),
       ...this.guides.map((g) => g.id),
+      ...this.instances.map((i) => i.id),
     ];
     this.nextId = (ids.length ? Math.max(...ids) : 0) + 1;
   }
@@ -1903,6 +2689,53 @@ function pruneConstraint(c: Constraint, removed: Set<number>): Constraint | null
   if (removed.has(c.railA) || removed.has(c.railB)) return null;
   const riders = c.riders.filter((r) => !removed.has(r));
   return riders.length === c.riders.length ? c : { ...c, riders };
+}
+
+// --- component cascade helpers ----------------------------------------------
+
+/**
+ * Re-expand a stored context snapshot against the (updated) component definitions:
+ * every instance of a changed definition is reconciled in a scratch scene and the
+ * refreshed snapshot returned. Used for contexts that aren't currently loaded (the
+ * root assembly while a definition is being edited, ancestor definitions on the
+ * editing stack).
+ */
+export function reexpandData(
+  data: SceneData,
+  components: ComponentDef[],
+  changed: ReadonlySet<number>
+): SceneData {
+  if (!(data.instances ?? []).some((i) => changed.has(i.defId))) return data;
+  const tmp = new Scene();
+  tmp.loadContext(data);
+  tmp.components = components;
+  tmp.reexpandInstances(changed);
+  return tmp.serializeContext();
+}
+
+/**
+ * Propagate a definition change through the definition DAG: any definition whose data
+ * instantiates a changed definition is re-expanded (its stored data updated in place)
+ * and marked changed itself, until a fixpoint. Returns the full set of changed def ids —
+ * the caller then re-expands the live/root contexts against that set.
+ */
+export function cascadeComponentChange(
+  components: ComponentDef[],
+  changedIds: Iterable<number>
+): Set<number> {
+  const changed = new Set(changedIds);
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const def of components) {
+      if (changed.has(def.id)) continue;
+      if (!(def.data.instances ?? []).some((i) => changed.has(i.defId))) continue;
+      def.data = reexpandData(def.data, components, changed);
+      changed.add(def.id);
+      progress = true;
+    }
+  }
+  return changed;
 }
 
 // --- measurement geometry --------------------------------------------------

@@ -224,7 +224,7 @@ function relError(before: { off: Vec2; dAng: number }, after: { off: Vec2; dAng:
   const clip = scene.extractSelection([a.id, b.id], [free.id])!;
   check("multi clip captures both bodies", clip.bodies.length === 2, `${clip.bodies.length}`);
   check("multi clip keeps the cross-body pin", clip.pins.length === 1, `${clip.pins.length}`);
-  check("multi clip keeps the group", clip.groups.length === 1 && clip.groups[0].length === 2, `${clip.groups.length}`);
+  check("multi clip keeps the group", clip.groups.length === 1 && clip.groups[0].bodies.length === 2, `${clip.groups.length}`);
   check("multi clip carries the free joint", clip.joints.some((j) => j.bodyTmp === null), "free joint present");
 
   const res = scene.insertSelection(clip, { x: 400, y: 200 })!;

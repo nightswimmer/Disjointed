@@ -80,6 +80,14 @@
             <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1"/><path d="M15.5 15.5v-11M13.3 6.7l2.2-2.2 2.2 2.2"/></svg>
           </button>
         </div>
+        <div class="group" id="component-group">
+          <button id="make-comp-btn" class="icon-btn" title="Create a component from the selection — packs it into a reusable definition and replaces it with an instance" aria-label="Create component from selection">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="6" width="10" height="10" rx="2" fill="currentColor" fill-opacity="0.18"/><line x1="15.5" y1="2.5" x2="15.5" y2="7.5"/><line x1="13" y1="5" x2="18" y2="5"/></svg>
+          </button>
+          <button id="comp-panel-btn" class="icon-btn" title="Component browser — insert, edit, rename or delete component definitions" aria-label="Toggle component browser">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="6" height="6" rx="1.4" fill="currentColor" fill-opacity="0.18"/><rect x="11" y="3" width="6" height="6" rx="1.4"/><rect x="3" y="11" width="6" height="6" rx="1.4"/><rect x="11" y="11" width="6" height="6" rx="1.4" fill="currentColor" fill-opacity="0.18"/></svg>
+          </button>
+        </div>
         <div class="group" id="actuator-group">
           <button data-tool="linearActuator" class="tool-btn icon-btn" title="Create a linear actuator on a slider — auto-travels back and forth in animation (A)" aria-label="Linear actuator tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="2.3" fill="currentColor" stroke="none"/><path d="M6 10l-2-1.6M6 10l-2 1.6" /><path d="M14 10l2-1.6M14 10l2 1.6" /></svg>
@@ -203,6 +211,15 @@
       <div id="canvas-wrap">
         <canvas id="scene"></canvas>
         <div id="sim-error" class="hidden" role="alert"></div>
+        <!-- Component-editing breadcrumb: hidden at the root assembly; clicking a crumb
+             exits back to that context (Esc with nothing selected also exits one level). -->
+        <nav id="crumb-bar" class="hidden" aria-label="Component editing path"></nav>
+        <!-- Component browser: definitions with rename / insert / edit / delete. -->
+        <aside id="comp-panel" class="hidden" aria-label="Component browser">
+          <div id="comp-panel-head">Components</div>
+          <div id="comp-list"></div>
+          <div id="comp-panel-hint">Select bodies and use ⊞ to create a component. Double-click an instance to edit its definition.</div>
+        </aside>
         <!-- Inline value editor for a draw-mode dimension (double-click its label).
              Enter commits (drives the dimension); empty commits back to driven; Esc cancels. -->
         <input id="dim-edit" class="hidden" type="text" inputmode="decimal" autocomplete="off"

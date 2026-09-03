@@ -169,6 +169,28 @@ layer highlighted, with a down/up arrow) and **PageDown / PageUp**. The `bodies`
 the z-order (rendered first→last, hit-tested last→first), so one reorder fixes both drawing
 and picking — e.g. push a big imported DXF reference body behind the mechanism so it stops
 covering it and stealing its clicks. Group-aware, undoable, order persists in save/load.
+**Hierarchical components + groups with free-joint members** (serialization v14): reusable
+**component definitions** (each a full sub-scene edited in its own context, breadcrumb-
+navigated) placed as **materialized instances** — real bodies/joints/constraints in the
+owning context, tagged with provenance maps, so the solver/renderer/hit-testing needed no
+hierarchy concept. Grounding *inside* a definition means "fixed to the component frame" and
+is **converted** on expansion: grounded bodies + grounded free joints become one rigid
+**chassis group** per instance (never world-grounded); a joint-ground on a moving part
+becomes a pin to a synthesized group-locked point (revolute to the frame); the def's sketch
+constraints / dimensions / measurements / guides stay in the def (instances carry shapes,
+not design constraints — so instances rotate freely, which was the motivating pain with
+H/V constraints). Editing a definition **cascades** to every instance everywhere (other
+defs that use it included — defs form a DAG, cycles rejected) via a reconciling re-expansion
+that preserves each instance's placement, scene ids, and per-instance mechanism pose.
+Prerequisite feature (also user-facing): **groups now lock free joints as members**
+(`BodyGroup.jointIds`) — point masses riding the rigid composite; a ground on a locked joint
+pivots its group about it; two locked joints can define a group-riding slider track. UI:
+**⊞** create-component-from-selection, a **component browser** panel (rename / insert /
+edit / delete), double-click an instance to edit its def, Esc / breadcrumbs to exit,
+instance-atomic selection with a dashed hull, copy/paste of instances as new instances,
+Shift-drag poses an instance's internal mechanism. `SelectionClip` now also carries
+**actuators + motors** (an old backlog item, needed so components keep their powered
+constraints).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -247,12 +269,46 @@ covering it and stealing its clicks. Group-aware, undoable, order persists in sa
     pin shows as a dotted connector until sim closes it), and rounding a freehand body's
     corner after linking dissolves that link on the next drag (the control corner leaves the
     rounded outline, where a joint may not go).
-  - **Permanent groups** (`groups: BodyGroup[]`, a `BodyGroup` = `{ id, bodyIds }`): a body
-    belongs to at most one group; groups need ≥ 2 members. `groupOf(bodyId)`;
-    `addGroup(bodyIds)` (absorbs/merges any group touching the ids); `ungroup(bodyIds)`
-    (dissolves every group touched); `pruneGroups()` (drops removed bodies, dissolves
-    < 2-member groups — called from `removeBody` and `load`). Groups make their members
-    move together in draw mode (main.ts) and act as one rigid body in sim (solver.ts).
+  - **Permanent groups** (`groups: BodyGroup[]`, a `BodyGroup` = `{ id, bodyIds, jointIds }`,
+    v14): a member (body, or **free joint** locked to the group) belongs to at most one
+    group; groups need ≥ 2 members total. `groupOf(bodyId)` / `groupOfJoint(jointId)`;
+    `addGroup(bodyIds, jointIds?)` (absorbs/merges any group touching a member; attached
+    joints are skipped); `ungroup(bodyIds, jointIds?)`; `pruneGroups()` (drops removed /
+    absorbed members, dissolves < 2-member groups — called from `removeBody`, `removeJoint`
+    and `load`). Groups make their members move together in draw mode (main.ts) and act as
+    one rigid body in sim (solver.ts) — locked free joints ride the rigid motion like
+    welded points (this is what a component chassis is made of). `addSlider` does **not**
+    auto-ground a group-locked free rail joint (the rail rides the group instead), and
+    `buildBodyFromJoints` never absorbs one (it gets a pinned twin, like an anchor).
+  - **Components** (`components: ComponentDef[]` — document-level, kept across context
+    switches; `instances: ComponentInstance[]` — per context): a `ComponentDef` =
+    `{ id, name, data: SceneData }` (a full sub-scene in its own frame; may itself contain
+    instances of other defs — a DAG). A `ComponentInstance` carries provenance maps
+    (`bodyMap` — with each body's cached def-frame pose + `chassis` flag — `jointMap`,
+    `constraintMap`, `anchorMap` for the joints synthesized from def joint-grounds,
+    `groupMap` for groups recreated from the def's own groups, and `groupId` = the chassis
+    group). Key methods: `createComponentFromSelection(name, bodyIds, freeJointIds)` (packs
+    the selection — via `extractSelection` with `drivenDims: true` — into a new def and
+    replaces it with one instance in place), `instantiateComponent(defId, {pos, angle})`,
+    `reexpandInstances(changedDefIds)` (the reconciling re-expansion: surviving elements
+    keep scene ids; design fields — shape, colour, joint locals, constraint wiring — come
+    from the def; poses of non-chassis parts are **instance state** and are kept; chassis
+    poses snap to `T·defPose` where `T` = the instance placement derived from a chassis
+    body's scene pose vs its cached def pose), `removeInstance` / `dissolveInstance`
+    (explode to plain elements) / `removeComponent` (refused while instances exist
+    anywhere), `instanceOfBody/Joint/Constraint`, `refInstanceOwned(ref)` (used to reject
+    sketch constraints + driving dimensions on instance geometry — its shape belongs to
+    the def), `instancePlacement(id)`, `componentUses(defId)` (transitive, for cycle
+    guards), `componentCenter(defId)`. **Ground conversion** in `expandInstance`: def
+    grounded bodies → chassis members (flag stripped; the *instance's* grounded flag is
+    user state and survives re-expansion); def grounded free joints → group-locked chassis
+    points; def joint-grounds on non-grounded bodies → `addFreeJoint` at the anchor +
+    group-lock + pin (revolute to the frame); grounds are never expanded as grounds.
+    Exported helpers `reexpandData(data, components, changed)` (refresh a stored context
+    snapshot in a scratch Scene) and `cascadeComponentChange(components, changedIds)`
+    (fixpoint propagation through the def DAG). `serializeContext()` / `loadContext()`
+    are the component-editing variants of `serialize()` / `load()` (they leave
+    `components` untouched); `clear(dropComponents = true)`.
   - **Z-order** (`reorderBodies(bodyIds, "back" | "front")`): the `bodies` array *is* the
     z-order — rendered first→last (first = bottom), hit-tested last→first (`bodyAt` walks
     backwards, so the last body wins the click) — so one stable partition of the array fixes
@@ -343,16 +399,20 @@ covering it and stealing its clicks. Group-aware, undoable, order persists in sa
     `UNIT_TO_MM` (both exported) — a declaration of what one world unit means; changing it
     never moves geometry. Used for measurement display and DXF import conversion.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 13`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 14`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
     constraints or driving flags, pre-v9 files no groups, pre-v10 bodies load ungrounded,
     pre-v11 files no guides, pre-v12 files default to `unit: "mm"`, pre-v13 bodies have no
-    holes —
-    all load fine as-is; loaded groups are pruned against the loaded bodies). The
-    `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its colour
-    and hole loops (`holesWorld`).
+    holes, pre-v14 files have no components/instances and their groups get empty
+    `jointIds` —
+    all load fine as-is; loaded groups/instances are pruned against the loaded elements).
+    The `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its
+    colour and hole loops (`holesWorld`), pins/grounds/sliders internal to the selection,
+    **actuators + motors** (when their slider/body travels), groups (bodies + locked
+    joints), internal sketch constraints and dimensions (driving always; driven only for
+    component creation via `opts.drivenDims`).
 - **solver.ts** — `solve(scene, driver, iterations, relax, anchors?, stats?): ConstraintBreak[]` (each
   `ConstraintBreak` carries `a`/`b`/`error` plus a `joints: number[]` list naming the joints
   involved — pin endpoints, the grounded joint, an unreachable slider rider, or the anchor's joint
@@ -375,19 +435,30 @@ covering it and stealing its clicks. Group-aware, undoable, order persists in sa
   step-limited (`DRIVER_MAX_STEP` per sweep), so a weakly-constrained grab keeps residual ≈ 0
   and an unconditional early-exit would starve the drag to one pull per solve.
   **Permanent groups as rigid composites**: `solve` builds a per-call `groupCtx`
-  (body id → member list / group id, module-level since solve isn't reentrant); a grouped
-  body's host (`bodyHostAt`, used by `hostFor` / `driverHost` / `railHostFor`) carries the
-  group's **combined** mass, centroid, and inertia (parallel-axis), and `groupImpulse`
-  translates + rotates **all members about the combined centroid** — so pins, sliders,
-  grounds, the mouse driver, and motor/actuator anchors on any member move the whole group
-  as one rigid body. `projectGrounds` pools ground corrections **per rigid unit** (per
-  group, or per lone body) and translates all members together. `sameRigid(a, b)` (same
-  body or same group) makes **intra-group pins and riders inert**: skipped in the sweeps
-  and excluded from residuals/breaks (the group is rigid — they could only fight it).
-  **Grounded bodies** (`fixedBodies`, rebuilt per solve by `buildFixedBodies`): every
-  `grounded` body — expanded to whole groups — is an **immovable fixed host** in
-  `bodyHostAt` / `railHostFor` and skipped by `projectGrounds`; like ground anchors they
-  are sacred, so an unreachable pin/slider onto one is disabled and reported as a break.
+  (`RigidGroup` = member bodies + **locked free joints**, indexed by body id and joint id;
+  module-level since solve isn't reentrant); a grouped member's host (`bodyHostAt` /
+  `groupHostAt`, used by `hostFor` / `driverHost` / rails) carries the group's **combined**
+  mass, centroid, and inertia (parallel-axis; locked joints as point masses), and
+  `groupImpulse` translates + rotates **all members about the combined centroid** — locked
+  free joints included — so pins, sliders, grounds, the mouse driver, and motor/actuator
+  anchors on any member move the whole group as one rigid body. A **grounded locked joint**
+  behaves like a joint-ground on a body: its own ground uses the group host (the group
+  pivots about the anchor; `projectGrounds` pools the correction per group and translates
+  bodies *and* locked joints), while pins to it see a fixed point (`pinHostFor`).
+  `projectGrounds` pools ground corrections **per rigid unit** (per group, or per lone
+  body). `sameRigid(a, b)` compares **rigid-unit keys of joints** (same body, or members —
+  body or locked joint — of one group) and makes **intra-unit pins and riders inert**:
+  skipped in the sweeps and excluded from residuals/breaks (the unit is rigid — they could
+  only fight it). **Rails** go through `railInfo`: a rail is solvable when its two joints
+  are rigid to one unit — same body (as before) or same **group** (two locked free joints,
+  or mixes: a chassis track that moves with a component instance) — or when both are
+  grounded free joints (world-fixed track); the rail host is the body / group / immovable
+  line accordingly, and a fixed group makes its rails immovable lines.
+  **Grounded bodies** (`fixedBodies` + `fixedGroups`, rebuilt per solve by `buildFixed`):
+  every `grounded` body — expanded to whole groups, with the group's locked free joints
+  becoming immovable too — is an **immovable fixed host** in `bodyHostAt` / `railInfo` and
+  skipped by `projectGrounds`; like ground anchors they are sacred, so an unreachable
+  pin/slider onto one is disabled and reported as a break.
   **Scoped solves** (`SolveFreeze`, optional last param of `solve`): extra bodies / free
   joints held immovable for one call (frozen free joints join the `grounded` set; frozen
   bodies join `fixedBodies`) — the engine behind draw mode's rigid (Shift) drag. Unlike
@@ -679,6 +750,33 @@ covering it and stealing its clicks. Group-aware, undoable, order persists in sa
     `scene.reorderBodies`; `markDirty` only when the order actually changed. Wired to the
     `#send-back-btn` / `#bring-front-btn` icon buttons in the edit toolbar group and to
     **PageDown / PageUp** (`[`/`]` were taken by corner radius).
+  - **Component editing contexts** (`editPath: number[]` — def ids, outermost first; empty =
+    the root assembly): the live `Scene` always holds the **innermost context**; `rootData`
+    stashes the root snapshot while a def is open, ancestor defs live in `scene.components`.
+    **Every `markDirty` syncs**: `syncComponentContext()` stores the live context into its
+    def, runs `cascadeComponentChange` through the def DAG, and refreshes `rootData` — so
+    saves/autosaves/undo always see a consistent document and instances follow the def live.
+    `canonicalData()` returns the ROOT document (+ components); **history entries carry the
+    edit path** (`{snap, path}`), and `setDocument(doc, path)` re-enters the recorded context
+    on undo/redo (also used by load, which always opens at the root). `enterComponent(defId)`
+    (double-click an instance body, or ✎ in the panel; re-entering the top def is a no-op) /
+    `exitComponent(levels)` (breadcrumb clicks; **Esc with nothing armed/selected** exits one
+    level); per-context camera saved/restored; entering fits the view. **Component browser**
+    (`#comp-panel`, toggled by `#comp-panel-btn`): rename inline, **＋** arms `pendingInsert`
+    (next canvas click instantiates at the snapped point, centered via `componentCenter`;
+    cycle-guarded against `componentUses`), **✎** edits, **×** deletes (refused while
+    instances exist anywhere or the def is on `editPath`). `#make-comp-btn` packs the
+    selection (`makeComponentFromSelection`; refuses selections touching other instances).
+    **Instance interaction**: selection-atomic via `setMulti` (expands instances + groups —
+    including group `jointIds` — to a fixpoint; a lone instance body stays multi-selected so
+    it never grows edit handles); clicking an instance joint/body selects the whole instance;
+    Delete removes whole instances (`removeInstance`; deleting an instance-owned slider alone
+    is refused); copy/paste carries instances as **placements** (`clipboard = { clip,
+    instances: {defId, t}[], center }`) and pastes new instances; mirror refuses instance
+    material (v1); Ctrl+G refuses instance material; Ground tool on an instance body grounds
+    its **chassis group**; Shift-rigid-drag of a grabbed member moves the whole instance
+    sim-style (internal mechanism articulates). The breadcrumb bar (`#crumb-bar`) overlays
+    the canvas top-left. The `#component-group` toolbar group hides in sim, like the others.
   - **Theme** (`#theme-btn`): a dark/light toggle that sets `data-theme` on `<html>` (CSS vars drive
     the chrome) and passes the matching `DARK_THEME`/`LIGHT_THEME` palette to the renderer; the
     choice persists in `localStorage` (`disjointed:theme`, separate from scene autosave).
@@ -792,12 +890,24 @@ Select mode (default, no tool armed):
   Dragging any selected element **moves the whole selection together**; Delete removes it
   all; a plain click elsewhere (or Esc) clears it. A single ungrouped body collapses back
   to a normal selection.
-- **Permanent groups**: **Ctrl/Cmd+G** toggles grouping — with 2+ bodies multi-selected it
+- **Permanent groups**: **Ctrl/Cmd+G** toggles grouping — with 2+ members multi-selected
+  (bodies **and free joints**: joints become locked members that ride the group rigidly) it
   groups them permanently (grouping into an existing group merges); when the selection
-  already is exactly one group (or a single grouped body) it ungroups. Groups are
+  already is exactly one group (or a single grouped element) it ungroups. Groups are
   selection-atomic — clicking any member selects the whole group — and show a faint dashed
   hull **while selected**. In draw mode they move/rotate/mirror/copy as one; in **sim they
   are one rigid body** (see solver notes).
+- **Components**: select bodies (+ free joints) and press **⊞** to pack them into a
+  **component definition**, replaced in place by an **instance**. Instances are
+  selection-atomic (dashed hull while selected), design-locked (no handles / sketch
+  constraints; measurements allowed), drag/rotate/copy/delete as a unit (copies are new
+  instances), and Shift-drag poses their internal mechanism sim-style. **Double-click an
+  instance** (or ✎ in the component browser) to edit its definition in its own context —
+  breadcrumbs at the top-left, every tool available, changes **cascade to all instances
+  live**, Esc (idle) or a breadcrumb exits. Grounding inside a definition = "fixed to the
+  component frame" (the rigid chassis); grounding an instance's body in the assembly fixes
+  its chassis in the world. The **component browser** (toolbar toggle) renames / inserts /
+  edits / deletes definitions.
 - **Rigid (Shift) drag**: hold **Shift** when starting a select-mode drag and the grabbed
   object — a body (with its whole group), the body a grabbed joint sits on, a lone free
   joint, or the whole multi-selection — moves **like in simulation** instead of being
@@ -1038,6 +1148,28 @@ Persistence:
   cross-body pin stays coincident); **shared-pivot rotation** rigidity; and the **mirror
   ref-remap fix** (vertex/edge refs follow their corners/edges through a mirror; a sketch
   solve right after mirroring — or after mirroring + dragging the group — is a no-op).
+- **group-joints.ts** — free joints as group members (v14): membership management (accepts
+  free joints, rejects attached ones, merges through a shared joint, joints-only groups,
+  prune on removeJoint, < 2-member dissolve); rigid sim behaviour (a locked joint rides a
+  towed group exactly; a pin to it tows the whole group; a **grounded** locked joint makes
+  the group pivot about the anchor; a grounded member body fixes the joint); a rail of two
+  locked joints is a group-riding track (addSlider doesn't auto-ground them; riders slide
+  and follow the towed group); serialize/load round-trip + legacy files; copy/paste carries
+  group joints.
+- **components.ts** — hierarchical components end-to-end (~55 checks): creation from a
+  selection (def carries sketch/measurements/grounded flags; assembly carries neither;
+  instance replaces the originals exactly in place; sketch constraints on instance geometry
+  rejected); joint-ground conversion (synthesized chassis anchor + pin; grounding the
+  instance then dragging the arm pivots about the converted anchor exactly); multiple
+  instances (rotated placement; chassis rigid under tow; other instances untouched);
+  **cascade** (recolor/reshape/add/remove def bodies → every instance reconciles, surviving
+  scene ids kept, placement — translation *and* rotation — preserved, new def material
+  arrives in the instance's frame); **nested defs** (editing the inner def ripples through
+  the outer def to the root; componentUses DAG direction); powered constraints inside a
+  component (slider + actuator expand with no world grounds; anchors drive the rider along
+  the chassis track); removal / dissolve / removeComponent guards; serialize/load v14
+  round-trip, idempotent re-expansion after load, `reexpandData` on stored snapshots, and
+  pre-v14 files loading with no components.
 - **grounded-bodies.ts** — grounded bodies/groups (20 checks): `toggleBodyGround` toggle
   semantics (lone body on/off, whole-group grounding/ungrounding through any member); a
   grounded body immovable under drag; a body pinned to one pivots about the pin while the
@@ -1192,10 +1324,18 @@ Persistence:
   guides are deliberately invisible + unpickable in sim. If "level two joints through a
   guide" is ever wanted, constrain the joints directly (H on the point pair) — guide
   constraints never move geometry by design.
-- **Group follow-ups**: permanent groups contain bodies only (free joints can be
-  multi-selected and moved, but not made group members); reshaping a grouped body's
-  outline in draw mode is still per-body (groups constrain sim + move-together, not
-  draw-mode shape editing).
+- **Group follow-ups**: ~~groups contain bodies only~~ (done in v14 — free joints can be
+  locked members); reshaping a grouped body's outline in draw mode is still per-body
+  (groups constrain sim + move-together, not draw-mode shape editing).
+- **Component follow-ups (v1 scope decisions)**: no per-instance **mirroring** or scaling
+  (mirror inside the definition instead); no explicit "ports" (every instance joint is
+  connectable); editing an instance's actuator/motor speed at the assembly level works but
+  is overwritten by the next definition cascade (per-instance overrides would need an
+  override record); assembly measurements referencing an instance's *slider rail* survive
+  re-expansion (constraints are reconciled in place) but die if the def removes the slider;
+  a definition with nothing grounded has no chassis — its instance placement is derived
+  from the first body (fine, by design decision); the component browser is minimal (no
+  thumbnails / drag-to-place).
 - **Hole follow-ups (tier 2, when needed)**: editable hole vertices (handles), measurements /
   sketch constraints referencing hole geometry (needs a loop index in `MeasureRef`), a
   hole-aware picking option (today clicking a cut-out deliberately still hits the body),
@@ -1207,8 +1347,9 @@ Persistence:
   handles, radius shrink, vertex removal) can still strand an already-placed joint outside the
   new outline. If that bites, clamp stranded joints back in `rebuildBody`.
 - **Actuator / motor follow-ups**: editing speed/profile while in sim (selection clears on mode
-  change today, so the inline panel only appears in draw); copy/paste carrying actuators + motors
-  in the `SelectionClip` (today the body + its joints survive but the powered constraints don't).
+  change today, so the inline panel only appears in draw). ~~Copy/paste carrying actuators +
+  motors~~ (done in v14 — `SelectionClip` carries both, needed so components keep their
+  powered constraints).
 - **Auto-pause false positives — investigation in progress.** The "auto-pause on impossible"
   feature works for genuinely unreachable configurations, and a 3-frame debounce filters obvious
   solver chatter — but the animation still pauses on some borderline complex closed-loop scenes

@@ -219,17 +219,18 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.stroke(); // strokes every subpath, so hole rims get the outline too
   }
 
-  // Permanent groups: a faint dashed convex hull around a group's members, drawn only
-  // while the group is selected (groups are selection-atomic, so any selected member
-  // means the whole group is).
-  for (const g of scene.groups) {
-    if (!g.bodyIds.some((id) => multiBodies.has(id))) continue;
-    const pts: Vec2[] = [];
-    for (const id of g.bodyIds) {
-      const body = scene.getBody(id);
-      if (body) pts.push(...scene.bodyWorldVerts(body));
-    }
-    if (pts.length < 3) continue;
+  // Permanent groups: a faint dashed convex hull around a group's members (bodies +
+  // locked free joints), drawn only while the group is selected (groups are
+  // selection-atomic, so any selected member means the whole group is). Groups owned by
+  // a component instance (its chassis, or groups recreated from the definition) are
+  // skipped — the instance draws one hull for all of its material instead.
+  const instanceGroupIds = new Set<number>();
+  for (const inst of scene.instances) {
+    if (inst.groupId !== null) instanceGroupIds.add(inst.groupId);
+    for (const e of inst.groupMap) instanceGroupIds.add(e.id);
+  }
+  const drawHull = (pts: Vec2[]): void => {
+    if (pts.length < 3) return;
     const hull = convexHull(pts);
     ctx.save();
     ctx.globalAlpha = 0.45;
@@ -241,6 +242,38 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.closePath();
     ctx.stroke();
     ctx.restore();
+  };
+  for (const g of scene.groups) {
+    if (instanceGroupIds.has(g.id)) continue;
+    if (!g.bodyIds.some((id) => multiBodies.has(id)) && !g.jointIds.some((id) => multiJoints.has(id))) continue;
+    const pts: Vec2[] = [];
+    for (const id of g.bodyIds) {
+      const body = scene.getBody(id);
+      if (body) pts.push(...scene.bodyWorldVerts(body));
+    }
+    for (const id of g.jointIds) {
+      const j = scene.getJoint(id);
+      if (j) pts.push(scene.jointWorld(j));
+    }
+    drawHull(pts);
+  }
+  // Selected component instances: one dashed hull around everything the instance expanded.
+  for (const inst of scene.instances) {
+    const selected =
+      inst.bodyMap.some((e) => multiBodies.has(e.id)) ||
+      inst.jointMap.some((e) => multiJoints.has(e.id)) ||
+      inst.anchorMap.some((e) => multiJoints.has(e.id));
+    if (!selected) continue;
+    const pts: Vec2[] = [];
+    for (const e of inst.bodyMap) {
+      const body = scene.getBody(e.id);
+      if (body) pts.push(...scene.bodyWorldVerts(body));
+    }
+    for (const e of [...inst.jointMap, ...inst.anchorMap]) {
+      const j = scene.getJoint(e.id);
+      if (j && j.bodyId === null) pts.push(scene.jointWorld(j));
+    }
+    drawHull(pts);
   }
 
   // Slider rails (drawn under joints): a bounded segment between the two rail joints,
@@ -420,9 +453,13 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     const isDriver = input.driverJoint === j.id;
     const isBroken = brokenJoints.has(j.id);
     // A body-less joint reads as "loose" (muted dashed ring) only while unconstrained;
-    // once it rides a slider or defines a (grounded) rail it's anchored, so it renders
-    // like any constrained joint rather than a loose point.
-    const isFree = j.bodyId === null && !roles.slider.has(j.id) && !roles.rail.has(j.id);
+    // once it rides a slider, defines a (grounded) rail, or is locked to a group (a
+    // component chassis point) it's anchored, so it renders like any constrained joint.
+    const isFree =
+      j.bodyId === null &&
+      !roles.slider.has(j.id) &&
+      !roles.rail.has(j.id) &&
+      !scene.groupOfJoint(j.id);
 
     let fill = theme.jointFill;
     if (roles.pinned.has(j.id)) fill = "#4f9dff";

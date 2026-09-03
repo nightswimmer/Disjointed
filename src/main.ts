@@ -3,6 +3,8 @@ import {
   Scene,
   SceneData,
   SelectionClip,
+  ComponentInstance,
+  InstanceTransform,
   LinearActuatorConstraint,
   MotorConstraint,
   Measurement,
@@ -13,6 +15,8 @@ import {
   sameMeasureRef,
   Unit,
   UNIT_TO_MM,
+  cascadeComponentChange,
+  reexpandData,
 } from "./model";
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
 import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig } from "./solver";
@@ -83,8 +87,28 @@ const dimEditInput = document.getElementById("dim-edit") as HTMLInputElement;
 const sketchVisBtn = document.getElementById("sketch-vis-btn") as HTMLButtonElement;
 const measureVisBtn = document.getElementById("measure-vis-btn") as HTMLButtonElement;
 const unitSelect = document.getElementById("unit-select") as HTMLSelectElement;
+const makeCompBtn = document.getElementById("make-comp-btn") as HTMLButtonElement;
+const compPanelBtn = document.getElementById("comp-panel-btn") as HTMLButtonElement;
+const compPanel = document.getElementById("comp-panel")!;
+const compList = document.getElementById("comp-list")!;
+const crumbBar = document.getElementById("crumb-bar")!;
 
 const scene = new Scene();
+
+// --- component editing context ---------------------------------------------
+/**
+ * Component-editing context stack (def ids, outermost first). Empty = editing the root
+ * assembly. The live `scene` always holds the innermost context; `rootData` keeps the
+ * root context's snapshot while a definition is open (refreshed by every markDirty, so
+ * saves/undo always see a consistent document), and ancestor definitions' data lives in
+ * `scene.components` (kept fresh by the same cascade).
+ */
+let editPath: number[] = [];
+let rootData: SceneData | null = null;
+/** Camera saved per context depth, restored when exiting back to it. */
+const savedViews: { scale: number; tx: number; ty: number }[] = [];
+/** One-shot pending placement: the next canvas click drops an instance of this def. */
+let pendingInsert: number | null = null;
 
 // --- working units ---------------------------------------------------------
 // Declarative only: 1 world unit = 1 <unit>. Nothing moves when it changes — the
@@ -178,9 +202,14 @@ let driver: Driver | null = null;
 let solveBreaks: ConstraintBreak[] = [];
 /** Body poses saved when entering simulation, restored when leaving. */
 let savedPoses: Map<number, { pos: Vec2; angle: number }> | null = null;
-/** Last selection copied with Ctrl+C (one body, or a multi-selection / permanent group,
- *  with everything internal to it); pasted at the cursor with Ctrl+V. */
-let clipboard: SelectionClip | null = null;
+/** Last selection copied with Ctrl+C: plain material as a `SelectionClip`, plus any
+ *  copied component instances as placements (pasting creates new instances of the same
+ *  definitions); pasted at the cursor with Ctrl+V. */
+let clipboard: {
+  clip: SelectionClip | null;
+  instances: { defId: number; t: InstanceTransform }[];
+  center: Vec2;
+} | null = null;
 /**
  * Active rotate (rotate tool): turning `bodyIds` (plus any multi-selected free `jointIds`)
  * about a fixed `pivot`. `grabAngle` is the first body's angle at grab; `prevPointer` /
@@ -398,10 +427,40 @@ function bodyDragAnchor(bodyId: number, grab: Vec2): Vec2 {
  * single selection, an empty set clears everything. Otherwise `multiSel` is set and the
  * single `selection` cleared (they're mutually exclusive).
  */
+/** Add every member of a component instance (bodies + its free joints) to a selection. */
+function addInstanceMembers(inst: ComponentInstance, bodies: Set<number>, joints: Set<number>): void {
+  for (const e of inst.bodyMap) bodies.add(e.id);
+  for (const e of [...inst.jointMap, ...inst.anchorMap]) {
+    if (scene.getJoint(e.id)?.bodyId === null) joints.add(e.id);
+  }
+}
+
 function setMulti(bodies: Set<number>, joints: Set<number>): void {
-  for (const id of [...bodies]) {
-    const g = scene.groupOf(id);
-    if (g) for (const b of g.bodyIds) bodies.add(b);
+  // Selection-atomic units expand: groups (bodies + locked free joints) and component
+  // instances (everything they expanded). Repeat until stable — an instance member can
+  // pull in a group and vice versa.
+  let grew = true;
+  while (grew) {
+    const before = bodies.size + joints.size;
+    for (const id of [...bodies]) {
+      const g = scene.groupOf(id);
+      if (g) {
+        for (const b of g.bodyIds) bodies.add(b);
+        for (const j of g.jointIds) joints.add(j);
+      }
+      const inst = scene.instanceOfBody(id);
+      if (inst) addInstanceMembers(inst, bodies, joints);
+    }
+    for (const id of [...joints]) {
+      const g = scene.groupOfJoint(id);
+      if (g) {
+        for (const b of g.bodyIds) bodies.add(b);
+        for (const j of g.jointIds) joints.add(j);
+      }
+      const inst = scene.instanceOfJoint(id);
+      if (inst) addInstanceMembers(inst, bodies, joints);
+    }
+    grew = bodies.size + joints.size > before;
   }
   for (const id of [...bodies]) if (!scene.getBody(id)) bodies.delete(id);
   for (const id of [...joints]) {
@@ -413,12 +472,14 @@ function setMulti(bodies: Set<number>, joints: Set<number>): void {
     multiSel = null;
     return;
   }
-  if (bodies.size === 1 && joints.size === 0) {
+  // A single ungrouped, non-instance body / free joint collapses to a normal selection
+  // (instance material stays multi-selected so it never grows edit handles).
+  if (bodies.size === 1 && joints.size === 0 && !scene.instanceOfBody([...bodies][0])) {
     multiSel = null;
     selection = { kind: "body", id: [...bodies][0] };
     return;
   }
-  if (bodies.size === 0 && joints.size === 1) {
+  if (bodies.size === 0 && joints.size === 1 && !scene.instanceOfJoint([...joints][0])) {
     multiSel = null;
     selection = { kind: "joint", id: [...joints][0] };
     return;
@@ -440,27 +501,37 @@ function toggleMultiAt(p: Vec2): boolean {
     const j = scene.getJoint(selection.id);
     if (j && j.bodyId === null) joints.add(j.id);
   }
-  const toggleBody = (id: number): void => {
-    const g = scene.groupOf(id);
-    const ids = g ? g.bodyIds : [id];
-    const on = ids.some((x) => bodies.has(x));
-    for (const x of ids) {
-      if (on) bodies.delete(x);
-      else bodies.add(x);
+  // A unit = a lone element, a whole group, or a whole instance — toggled together.
+  const unitOf = (bodyId: number | null, jointId: number | null): { b: number[]; j: number[] } => {
+    const ub = new Set<number>();
+    const uj = new Set<number>();
+    const inst = bodyId !== null ? scene.instanceOfBody(bodyId) : jointId !== null ? scene.instanceOfJoint(jointId) : undefined;
+    if (inst) addInstanceMembers(inst, ub, uj);
+    const g = bodyId !== null ? scene.groupOf(bodyId) : jointId !== null ? scene.groupOfJoint(jointId) : undefined;
+    if (g) {
+      g.bodyIds.forEach((x) => ub.add(x));
+      g.jointIds.forEach((x) => uj.add(x));
     }
+    if (ub.size + uj.size === 0) {
+      if (bodyId !== null) ub.add(bodyId);
+      if (jointId !== null) uj.add(jointId);
+    }
+    return { b: [...ub], j: [...uj] };
+  };
+  const toggleUnit = (bodyId: number | null, jointId: number | null): void => {
+    const u = unitOf(bodyId, jointId);
+    const on = u.b.some((x) => bodies.has(x)) || u.j.some((x) => joints.has(x));
+    for (const x of u.b) (on ? bodies.delete(x) : bodies.add(x));
+    for (const x of u.j) (on ? joints.delete(x) : joints.add(x));
   };
   const j = scene.jointAt(p, pickRadius());
   if (j) {
-    if (j.bodyId === null) {
-      if (joints.has(j.id)) joints.delete(j.id);
-      else joints.add(j.id);
-    } else {
-      toggleBody(j.bodyId);
-    }
+    if (j.bodyId === null) toggleUnit(null, j.id);
+    else toggleUnit(j.bodyId, null);
   } else {
     const b = scene.bodyAt(p);
     if (!b) return false;
-    toggleBody(b.id);
+    toggleUnit(b.id, null);
   }
   setMulti(bodies, joints);
   return true;
@@ -535,7 +606,12 @@ function startRigidDrag(grab: Vec2): boolean {
   const joints = new Set<number>();
   const addBodyWithGroup = (id: number): void => {
     const g = scene.groupOf(id);
-    for (const b of g ? g.bodyIds : [id]) bodies.add(b);
+    if (g) {
+      g.bodyIds.forEach((b) => bodies.add(b));
+      g.jointIds.forEach((jt) => joints.add(jt)); // locked free joints ride the group
+    } else {
+      bodies.add(id);
+    }
   };
   if (multiSel && multiHitAt(grab)) {
     multiSel.bodies.forEach((id) => bodies.add(id));
@@ -545,8 +621,17 @@ function startRigidDrag(grab: Vec2): boolean {
   } else if (selection?.kind === "joint") {
     const j = scene.getJoint(selection.id);
     if (!j) return false;
-    if (j.bodyId !== null) addBodyWithGroup(j.bodyId);
-    else joints.add(j.id);
+    if (j.bodyId !== null) {
+      addBodyWithGroup(j.bodyId);
+    } else {
+      const g = scene.groupOfJoint(j.id);
+      if (g) {
+        g.bodyIds.forEach((b) => bodies.add(b));
+        g.jointIds.forEach((jt) => joints.add(jt));
+      } else {
+        joints.add(j.id);
+      }
+    }
   } else {
     return false;
   }
@@ -593,12 +678,26 @@ function applyBoxSelect(): void {
   setMulti(bodies, joints);
 }
 
-/** With 2+ bodies multi-selected: make (or extend) a permanent group over them. */
+/** Whether the current selection contains component-instance material (grouping,
+ *  ungrouping and mirroring don't apply to it — edit the definition instead). */
+function selectionTouchesInstance(): boolean {
+  if (multiSel) {
+    for (const id of multiSel.bodies) if (scene.instanceOfBody(id)) return true;
+    for (const id of multiSel.joints) if (scene.instanceOfJoint(id)) return true;
+  }
+  if (selection?.kind === "body" && scene.instanceOfBody(selection.id)) return true;
+  if (selection?.kind === "joint" && scene.instanceOfJoint(selection.id)) return true;
+  return false;
+}
+
+/** With 2+ members multi-selected: make (or extend) a permanent group over them
+ *  (free joints become locked group members). */
 function groupSelection(): void {
-  if (mode !== "draw" || !multiSel || multiSel.bodies.size < 2) return;
-  const g = scene.addGroup([...multiSel.bodies]);
+  if (mode !== "draw" || !multiSel) return;
+  if (multiSel.bodies.size + multiSel.joints.size < 2) return;
+  const g = scene.addGroup([...multiSel.bodies], [...multiSel.joints]);
   if (!g) return;
-  multiSel = { bodies: new Set(g.bodyIds), joints: multiSel.joints };
+  multiSel = { bodies: new Set(g.bodyIds), joints: new Set(g.jointIds) };
   markDirty();
 }
 
@@ -606,24 +705,35 @@ function groupSelection(): void {
 function ungroupSelection(): void {
   if (mode !== "draw") return;
   const ids: number[] = [];
-  if (multiSel) ids.push(...multiSel.bodies);
+  const jids: number[] = [];
+  if (multiSel) {
+    ids.push(...multiSel.bodies);
+    jids.push(...multiSel.joints);
+  }
   if (selection?.kind === "body") ids.push(selection.id);
-  if (ids.length && scene.ungroup(ids)) markDirty();
+  if (selection?.kind === "joint") jids.push(selection.id);
+  if ((ids.length || jids.length) && scene.ungroup(ids, jids)) markDirty();
 }
 
 /**
- * Ctrl+G: group / ungroup toggle. A multi-selection of 2+ bodies becomes a permanent
- * group (merging any groups it touches) — unless it already is exactly one group,
- * which dissolves instead. With fewer bodies selected (a single grouped body counts,
- * since groups are selection-atomic) it ungroups; otherwise it's a no-op.
+ * Ctrl+G: group / ungroup toggle. A multi-selection of 2+ members (bodies and free
+ * joints) becomes a permanent group (merging any groups it touches) — unless it already
+ * is exactly one group, which dissolves instead. With fewer members selected (a single
+ * grouped element counts, since groups are selection-atomic) it ungroups; otherwise
+ * it's a no-op. Component-instance material is excluded — its grouping belongs to the
+ * definition.
  */
 function toggleGroupSelection(): void {
-  if (mode !== "draw") return;
-  if (multiSel && multiSel.bodies.size >= 2) {
-    const first = scene.groupOf([...multiSel.bodies][0]);
+  if (mode !== "draw" || selectionTouchesInstance()) return;
+  if (multiSel && multiSel.bodies.size + multiSel.joints.size >= 2) {
+    const first =
+      multiSel.bodies.size > 0
+        ? scene.groupOf([...multiSel.bodies][0])
+        : scene.groupOfJoint([...multiSel.joints][0]);
     const isOneGroup =
       first !== undefined &&
-      [...multiSel.bodies].every((id) => scene.groupOf(id)?.id === first.id);
+      [...multiSel.bodies].every((id) => scene.groupOf(id)?.id === first.id) &&
+      [...multiSel.joints].every((id) => scene.groupOfJoint(id)?.id === first.id);
     if (isOneGroup) ungroupSelection();
     else groupSelection();
     return;
@@ -693,7 +803,7 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · [ and ] round corners · Delete to remove.",
+  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
@@ -727,9 +837,12 @@ document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((btn) => {
 });
 document.getElementById("clear-btn")!.addEventListener("click", () => {
   if (mode === "sim") return;
-  scene.clear();
+  // In a definition context, clear only that definition's content (the document's
+  // component list survives); at the root, clear the whole document.
+  scene.clear(editPath.length === 0);
   resetTransient();
   markDirty();
+  updateCompPanel();
 });
 document.getElementById("fit-btn")!.addEventListener("click", fitView);
 document.getElementById("save-btn")!.addEventListener("click", saveToFile);
@@ -865,6 +978,7 @@ function setMode(next: Mode): void {
   colorGroup.classList.toggle("hidden", mode === "sim");
   actuatorGroup.classList.toggle("hidden", mode === "sim");
   sketchGroup.classList.toggle("hidden", mode === "sim");
+  document.getElementById("component-group")!.classList.toggle("hidden", mode === "sim");
   runBtn.classList.toggle("hidden", mode === "draw");
   autopauseBtn.classList.toggle("hidden", mode === "draw");
   animIterCtrl.classList.toggle("hidden", mode === "draw");
@@ -925,6 +1039,7 @@ function resetTransient(): void {
   boxSelect = null;
   driver = null;
   rotateDrag = null;
+  pendingInsert = null;
 }
 
 // --- persistence (save / load / autosave) --------------------------------
@@ -932,11 +1047,11 @@ const AUTOSAVE_KEY = "disjointed:autosave:v1";
 let autosaveTimer: number | undefined;
 
 /**
- * Canonical snapshot to persist: the drawn layout. In simulation we serialize
- * the pre-sim poses (savedPoses), so a simulated configuration is never saved.
+ * Snapshot of the *current editing context* (drawn layout: in simulation the pre-sim
+ * poses are restored, so a simulated configuration is never captured).
  */
-function canonicalData(): SceneData {
-  const data = scene.serialize();
+function contextData(): SceneData {
+  const data = scene.serializeContext();
   if (savedPoses) {
     for (const b of data.bodies) {
       const s = savedPoses.get(b.id);
@@ -947,6 +1062,30 @@ function canonicalData(): SceneData {
     }
   }
   return data;
+}
+
+/**
+ * While a component definition is being edited: store the live context into its def,
+ * cascade the change through every definition that uses it, and refresh the stashed
+ * root context — so the document stays consistent on every mutation and instances
+ * everywhere follow the definition ("cascade update").
+ */
+function syncComponentContext(): void {
+  if (editPath.length === 0) return;
+  const def = scene.getComponent(editPath[editPath.length - 1]);
+  if (!def) return;
+  def.data = contextData();
+  const changed = cascadeComponentChange(scene.components, [def.id]);
+  if (rootData) rootData = reexpandData(rootData, scene.components, changed);
+}
+
+/**
+ * Canonical document to persist: the ROOT context plus the component definitions. In a
+ * definition context the root snapshot is `rootData` (kept fresh by markDirty's sync).
+ */
+function canonicalData(): SceneData {
+  const root = editPath.length === 0 ? contextData() : (rootData as SceneData);
+  return { ...root, components: scene.components };
 }
 
 /** Debounced autosave of the drawn layout to localStorage. */
@@ -963,29 +1102,49 @@ function scheduleAutosave(): void {
 
 // --- undo / redo (snapshot history of the drawn layout) ------------------
 const HISTORY_LIMIT = 100;
-const history: string[] = []; // JSON snapshots; history[historyIndex] is the current state
+/** JSON document snapshots + the editing path they were taken in. */
+const history: { snap: string; path: number[] }[] = [];
 let historyIndex = -1;
 
 /** Record the current state as a history step (deduped) and drop the redo branch. */
 function pushHistory(): void {
   const snap = JSON.stringify(canonicalData());
-  if (historyIndex >= 0 && history[historyIndex] === snap) return; // nothing actually changed
+  const cur = history[historyIndex];
+  if (cur && cur.snap === snap && cur.path.length === editPath.length && cur.path.every((d, i) => d === editPath[i])) {
+    return; // nothing actually changed
+  }
   history.splice(historyIndex + 1); // discard any redo entries past the current point
-  history.push(snap);
+  history.push({ snap, path: [...editPath] });
   if (history.length > HISTORY_LIMIT) history.shift();
   historyIndex = history.length - 1;
 }
 
-/** A scene mutation occurred: record an undo step and schedule an autosave. */
+/** A scene mutation occurred: sync any open component definition (cascading the change
+ *  everywhere), record an undo step and schedule an autosave. */
 function markDirty(): void {
+  syncComponentContext();
   pushHistory();
   scheduleAutosave();
+  updateCompPanel();
 }
 
-/** Restore a history snapshot without recording a new step. */
-function loadSnapshot(snap: string): void {
-  scene.load(JSON.parse(snap) as SceneData);
+/** Load a whole document and re-enter the given editing path (root when empty). */
+function setDocument(doc: SceneData, path: number[]): void {
+  scene.load(doc); // validates; loads the root context + component definitions
+  editPath = [];
+  rootData = null;
+  savedViews.length = 0;
+  for (const defId of path) {
+    const def = scene.getComponent(defId);
+    if (!def) break;
+    if (editPath.length === 0) rootData = scene.serializeContext();
+    editPath.push(defId);
+    savedViews.push({ ...view });
+    scene.loadContext(def.data);
+  }
   resetTransient(); // selection / drafts may reference ids that no longer exist
+  updateCrumbBar();
+  updateCompPanel();
   scheduleAutosave();
 }
 
@@ -993,13 +1152,15 @@ function loadSnapshot(snap: string): void {
 function undo(): void {
   if (mode !== "draw" || historyIndex <= 0) return;
   historyIndex--;
-  loadSnapshot(history[historyIndex]);
+  const e = history[historyIndex];
+  setDocument(JSON.parse(e.snap) as SceneData, e.path);
 }
 
 function redo(): void {
   if (mode !== "draw" || historyIndex >= history.length - 1) return;
   historyIndex++;
-  loadSnapshot(history[historyIndex]);
+  const e = history[historyIndex];
+  setDocument(JSON.parse(e.snap) as SceneData, e.path);
 }
 
 function saveToFile(): void {
@@ -1023,14 +1184,13 @@ async function loadFromFile(file: File): Promise<void> {
   }
 }
 
-/** Replace the scene with loaded data, returning to a clean draw-mode state. */
+/** Replace the scene with loaded data, returning to a clean draw-mode state at the root. */
 function applyLoadedScene(data: SceneData): void {
   // Leave simulation first (restores the current scene's poses, clears savedPoses)
   // so it can't run against the bodies we're about to replace.
   if (mode === "sim") setMode("draw");
   savedPoses = null;
-  scene.load(data); // validates; throws on bad data
-  resetTransient();
+  setDocument(data, []); // validates; throws on bad data — loading always opens the root
   view.scale = 1;
   view.tx = 0;
   view.ty = 0;
@@ -1046,6 +1206,214 @@ function restoreAutosave(): void {
     /* corrupt autosave — start empty */
   }
 }
+
+// --- components: editing contexts, browser panel, instance placement -------
+
+/** Select a whole instance (multi-selection of everything it expanded). */
+function selectInstance(inst: ComponentInstance): void {
+  const bodies = new Set<number>();
+  const joints = new Set<number>();
+  addInstanceMembers(inst, bodies, joints);
+  setMulti(bodies, joints);
+}
+
+/** Enter a definition's own editing context (all normal tools work inside it). */
+function enterComponent(defId: number): void {
+  const def = scene.getComponent(defId);
+  if (!def) return;
+  if (editPath[editPath.length - 1] === defId) return; // already editing this definition
+  if (mode === "sim") setMode("draw");
+  syncComponentContext(); // store whatever definition we're leaving behind
+  if (editPath.length === 0) rootData = scene.serializeContext();
+  editPath.push(defId);
+  savedViews.push({ ...view });
+  scene.loadContext(def.data);
+  resetTransient();
+  fitView();
+  updateCrumbBar();
+  updateCompPanel();
+  pushHistory(); // a context switch is an undo step (undo returns to the parent)
+}
+
+/** Exit `levels` definition contexts (all changes cascade to every instance). */
+function exitComponent(levels = 1): void {
+  if (editPath.length === 0) return;
+  if (mode === "sim") setMode("draw");
+  for (let k = 0; k < levels && editPath.length > 0; k++) {
+    syncComponentContext(); // def.data updated + cascaded; rootData refreshed
+    editPath.pop();
+    const v = savedViews.pop();
+    const parentData =
+      editPath.length === 0 ? rootData! : scene.getComponent(editPath[editPath.length - 1])!.data;
+    scene.loadContext(parentData);
+    if (editPath.length === 0) rootData = null;
+    if (v) {
+      view.scale = v.scale;
+      view.tx = v.tx;
+      view.ty = v.ty;
+    }
+  }
+  resetTransient();
+  updateCrumbBar();
+  updateCompPanel();
+  pushHistory();
+}
+
+function updateCrumbBar(): void {
+  crumbBar.classList.toggle("hidden", editPath.length === 0);
+  crumbBar.innerHTML = "";
+  if (editPath.length === 0) return;
+  const names = ["Assembly", ...editPath.map((id) => scene.getComponent(id)?.name ?? `#${id}`)];
+  names.forEach((name, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = "▸";
+      crumbBar.appendChild(sep);
+    }
+    if (i === names.length - 1) {
+      const cur = document.createElement("span");
+      cur.className = "crumb-current";
+      cur.textContent = name;
+      crumbBar.appendChild(cur);
+    } else {
+      const btn = document.createElement("button");
+      btn.className = "crumb";
+      btn.textContent = name;
+      btn.title = `Back to ${name}`;
+      btn.addEventListener("click", () => exitComponent(editPath.length - i));
+      crumbBar.appendChild(btn);
+    }
+  });
+}
+
+// --- component browser panel -------------------------------------------------
+let compPanelVisible = false;
+
+function setCompPanelVisible(on: boolean): void {
+  compPanelVisible = on;
+  compPanel.classList.toggle("hidden", !on);
+  compPanelBtn.classList.toggle("active", on);
+  if (on) updateCompPanel();
+}
+
+function updateCompPanel(): void {
+  if (!compPanelVisible) return;
+  compList.innerHTML = "";
+  if (scene.components.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "comp-empty";
+    empty.textContent = "No components yet.";
+    compList.appendChild(empty);
+    return;
+  }
+  for (const def of scene.components) {
+    const row = document.createElement("div");
+    row.className = "comp-row";
+    const name = document.createElement("input");
+    name.className = "comp-name";
+    name.value = def.name;
+    name.title = "Component name — click to rename";
+    name.addEventListener("change", () => {
+      const v = name.value.trim();
+      if (v && v !== def.name) {
+        def.name = v;
+        markDirty();
+        updateCrumbBar();
+      } else {
+        name.value = def.name;
+      }
+    });
+    const mkBtn = (label: string, title: string, cls: string, onClick: () => void): HTMLButtonElement => {
+      const b = document.createElement("button");
+      b.className = `comp-btn ${cls}`.trim();
+      b.textContent = label;
+      b.title = title;
+      b.addEventListener("click", onClick);
+      return b;
+    };
+    row.appendChild(name);
+    row.appendChild(mkBtn("＋", "Insert an instance — then click the canvas to place it", "", () => startInsertInstance(def.id)));
+    row.appendChild(mkBtn("✎", "Edit this component's definition", "", () => enterComponent(def.id)));
+    row.appendChild(mkBtn("×", "Delete this component (refused while instances of it exist)", "danger", () => deleteComponentUI(def.id)));
+    compList.appendChild(row);
+  }
+}
+
+/** Pack the current selection into a new component definition (replaced by an instance). */
+function makeComponentFromSelection(): void {
+  if (mode !== "draw") return;
+  const bodies = multiSel ? [...multiSel.bodies] : selection?.kind === "body" ? [selection.id] : [];
+  const joints = multiSel ? [...multiSel.joints] : [];
+  if (bodies.length === 0) {
+    window.alert("Select the bodies (and free joints) that should form the component first.");
+    return;
+  }
+  if (selectionTouchesInstance()) {
+    window.alert("The selection contains component instances — a component can't be built over another instance's material.");
+    return;
+  }
+  const name = `Component ${scene.components.length + 1}`;
+  const res = scene.createComponentFromSelection(name, bodies, joints);
+  if (!res) return;
+  selectInstance(res.instance);
+  markDirty();
+  setCompPanelVisible(true);
+}
+
+/** Arm a one-shot instance placement: the next draw-mode canvas click drops it there. */
+function startInsertInstance(defId: number): void {
+  if (mode === "sim") setMode("draw");
+  disarmTool();
+  pendingInsert = defId;
+  canvas.style.cursor = "copy";
+  const def = scene.getComponent(defId);
+  hintEl.textContent = `Click the canvas to place an instance of “${def?.name ?? "?"}” — Esc cancels.`;
+}
+
+/** Handle a canvas click while an instance placement is pending. Returns whether it hit. */
+function placePendingInsert(p: Vec2): boolean {
+  if (pendingInsert === null) return false;
+  const defId = pendingInsert;
+  pendingInsert = null;
+  updateHint();
+  canvas.style.cursor = defaultCursor();
+  // Cycle guard: a definition can't be instantiated into a context it (transitively) uses.
+  const ctxDef = editPath[editPath.length - 1];
+  if (ctxDef !== undefined && (defId === ctxDef || scene.componentUses(defId).has(ctxDef))) {
+    window.alert("That would make the component contain itself (circular reference).");
+    return true;
+  }
+  const at = snap(p);
+  const inst = scene.instantiateComponent(defId, {
+    pos: sub(at, scene.componentCenter(defId)),
+    angle: 0,
+  });
+  if (inst) {
+    selectInstance(inst);
+    markDirty();
+  }
+  return true;
+}
+
+/** Delete a definition from the browser (refused while any instance of it exists, or
+ *  while the definition itself is open for editing). */
+function deleteComponentUI(defId: number): void {
+  if (editPath.includes(defId)) {
+    window.alert("This component is being edited — close its context first.");
+    return;
+  }
+  const usedInRoot = rootData ? (rootData.instances ?? []).some((i) => i.defId === defId) : false;
+  if (usedInRoot || !scene.removeComponent(defId)) {
+    window.alert("This component still has instances — delete (or dissolve) them first.");
+    return;
+  }
+  markDirty();
+  updateCompPanel();
+}
+
+makeCompBtn.addEventListener("click", makeComponentFromSelection);
+compPanelBtn.addEventListener("click", () => setCompPanelVisible(!compPanelVisible));
 
 // --- DXF import (drag-and-drop) -------------------------------------------
 /**
@@ -1220,8 +1588,17 @@ function handleDrawClick(p: Vec2): void {
       }
       // No joint under the cursor: ground/unground the body there — and, if it belongs
       // to a permanent group, the whole group (a grounded body is fixed in simulation).
+      // Grounding any body of a component instance grounds the instance's chassis (the
+      // group its grounded-in-def material forms), which is what "fix this instance"
+      // means — internal mechanism parts keep moving.
       const b = scene.bodyAt(p);
-      if (b && scene.toggleBodyGround(b.id)) placed = true;
+      if (b) {
+        const inst = scene.instanceOfBody(b.id);
+        const chassisGroup =
+          inst && inst.groupId !== null ? scene.groups.find((g) => g.id === inst.groupId) : undefined;
+        const target = chassisGroup?.bodyIds[0] ?? b.id;
+        if (scene.toggleBodyGround(target)) placed = true;
+      }
       break;
     }
     case "slider": {
@@ -1688,6 +2065,18 @@ function handleSelectClick(p: Vec2): void {
   }
   const j = scene.jointAt(p, pickRadius());
   if (j) {
+    // A joint owned by a component instance selects the whole instance (its material is
+    // atomic); a free joint locked to a group selects the whole group.
+    const inst = scene.instanceOfJoint(j.id);
+    if (inst) {
+      selectInstance(inst);
+      return;
+    }
+    const g = j.bodyId === null ? scene.groupOfJoint(j.id) : undefined;
+    if (g) {
+      setMulti(new Set(g.bodyIds), new Set(g.jointIds));
+      return;
+    }
     selection = { kind: "joint", id: j.id };
     return;
   }
@@ -1716,10 +2105,16 @@ function handleSelectClick(p: Vec2): void {
   }
   const body = scene.bodyAt(p);
   if (body) {
+    // Instance material is selection-atomic: clicking any member selects the instance.
+    const inst = scene.instanceOfBody(body.id);
+    if (inst) {
+      selectInstance(inst);
+      return;
+    }
     const g = scene.groupOf(body.id);
     if (g) {
       // A grouped body is selection-atomic: clicking any member selects the whole group.
-      setMulti(new Set(g.bodyIds), new Set());
+      setMulti(new Set(g.bodyIds), new Set(g.jointIds));
       return;
     }
     selection = { kind: "body", id: body.id };
@@ -1775,17 +2170,44 @@ function selectedBodyEdgeAt(p: Vec2): { index: number; point: Vec2 } | null {
   return best;
 }
 
-/** Delete the currently selected element and its dependent features. */
+/** Delete the currently selected element and its dependent features. Instance material
+ *  deletes as whole instances (their records go with their elements). */
 function deleteSelection(): void {
   if (multiSel) {
-    for (const id of multiSel.bodies) scene.removeBody(id);
-    for (const id of multiSel.joints) scene.removeJoint(id);
+    const instIds = new Set<number>();
+    for (const id of multiSel.bodies) {
+      const inst = scene.instanceOfBody(id);
+      if (inst) instIds.add(inst.id);
+    }
+    for (const id of multiSel.joints) {
+      const inst = scene.instanceOfJoint(id);
+      if (inst) instIds.add(inst.id);
+    }
+    for (const iid of instIds) scene.removeInstance(iid);
+    for (const id of multiSel.bodies) if (scene.getBody(id)) scene.removeBody(id);
+    for (const id of multiSel.joints) if (scene.getJoint(id)) scene.removeJoint(id);
     multiSel = null;
     selection = null;
     markDirty();
     return;
   }
   if (!selection) return;
+  if (selection.kind === "body" || selection.kind === "joint") {
+    const inst =
+      selection.kind === "body"
+        ? scene.instanceOfBody(selection.id)
+        : scene.instanceOfJoint(selection.id);
+    if (inst) {
+      scene.removeInstance(inst.id);
+      selection = null;
+      markDirty();
+      return;
+    }
+  }
+  if (selection.kind === "slider" && scene.instanceOfConstraint(selection.id)) {
+    window.alert("This slider belongs to a component instance — edit the definition, or delete the whole instance.");
+    return;
+  }
   if (selection.kind === "body") scene.removeBody(selection.id);
   else if (selection.kind === "joint") scene.removeJoint(selection.id);
   else if (selection.kind === "measure") scene.removeMeasurement(selection.id);
@@ -1796,24 +2218,89 @@ function deleteSelection(): void {
   markDirty();
 }
 
-/** Copy the selection (a body, or a whole multi-selection / group) to the clipboard. */
+/** Copy the selection (bodies / groups / free joints, plus whole component instances) to
+ *  the clipboard. Instance material copies as instance *placements* — pasting creates new
+ *  instances of the same definitions. */
 function copySelection(): void {
   if (mode !== "draw") return;
-  if (multiSel) {
-    clipboard = scene.extractSelection([...multiSel.bodies], [...multiSel.joints]);
-  } else if (selection?.kind === "body") {
-    clipboard = scene.extractSelection([selection.id]);
+  const bodies = multiSel ? [...multiSel.bodies] : selection?.kind === "body" ? [selection.id] : [];
+  const joints = multiSel ? [...multiSel.joints] : [];
+  if (bodies.length === 0 && joints.length === 0) return;
+  const instIds = new Set<number>();
+  const plainBodies = bodies.filter((id) => {
+    const inst = scene.instanceOfBody(id);
+    if (inst) {
+      instIds.add(inst.id);
+      return false;
+    }
+    return true;
+  });
+  const plainJoints = joints.filter((id) => {
+    const inst = scene.instanceOfJoint(id);
+    if (inst) {
+      instIds.add(inst.id);
+      return false;
+    }
+    return true;
+  });
+  const clip =
+    plainBodies.length || plainJoints.length
+      ? scene.extractSelection(plainBodies, plainJoints)
+      : null;
+  const instances: { defId: number; t: InstanceTransform }[] = [];
+  for (const iid of instIds) {
+    const inst = scene.instances.find((i) => i.id === iid);
+    const t = scene.instancePlacement(iid);
+    if (inst && t) instances.push({ defId: inst.defId, t });
   }
+  if (!clip && instances.length === 0) return;
+  // Paste reference: the combined bounding-box centre of everything copied.
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const include = (q: Vec2): void => {
+    minX = Math.min(minX, q.x);
+    minY = Math.min(minY, q.y);
+    maxX = Math.max(maxX, q.x);
+    maxY = Math.max(maxY, q.y);
+  };
+  for (const id of bodies) {
+    const b = scene.getBody(id);
+    if (b) scene.bodyWorldVerts(b).forEach(include);
+  }
+  for (const id of joints) {
+    const j = scene.getJoint(id);
+    if (j) include(scene.jointWorld(j));
+  }
+  const center = Number.isFinite(minX) ? vec((minX + maxX) / 2, (minY + maxY) / 2) : vec(0, 0);
+  clipboard = { clip, instances, center };
 }
 
 /** Paste the clipboard so its centre lands at `at` (grid-snapped), then select the copy. */
 function pasteAt(at: Vec2 | null): void {
   if (mode !== "draw" || !clipboard) return;
   const drop = snap(at ?? screenToWorld(view, vec(canvas.clientWidth / 2, canvas.clientHeight / 2)));
-  const res = scene.insertSelection(clipboard, drop);
-  if (res) {
+  const offset = sub(drop, clipboard.center);
+  const bodies = new Set<number>();
+  const joints = new Set<number>();
+  if (clipboard.clip) {
+    const res = scene.insertSelection(clipboard.clip, add(clipboard.clip.center, offset));
+    if (res) {
+      res.bodyIds.forEach((id) => bodies.add(id));
+      res.freeJointIds.forEach((id) => joints.add(id));
+    }
+  }
+  for (const entry of clipboard.instances) {
+    // Cycle guard: skip instances whose definition would contain the context being edited.
+    const ctxDef = editPath[editPath.length - 1];
+    if (ctxDef !== undefined && (entry.defId === ctxDef || scene.componentUses(entry.defId).has(ctxDef))) continue;
+    const inst = scene.instantiateComponent(entry.defId, {
+      pos: add(entry.t.pos, offset),
+      angle: entry.t.angle,
+    });
+    if (inst) addInstanceMembers(inst, bodies, joints);
+  }
+  if (bodies.size || joints.size) {
     // A single pasted body collapses to a normal selection; a fragment stays multi-selected.
-    setMulti(new Set(res.bodyIds), new Set(res.freeJointIds));
+    setMulti(bodies, joints);
     markDirty();
   }
 }
@@ -1822,6 +2309,10 @@ function pasteAt(at: Vec2 | null): void {
  *  group about the centre of its combined bounding box. */
 function mirrorSelection(axis: "h" | "v"): void {
   if (mode !== "draw") return;
+  if (selectionTouchesInstance()) {
+    window.alert("Component instances can't be mirrored yet — mirror inside the definition instead.");
+    return;
+  }
   if (multiSel) {
     scene.mirrorBodies([...multiSel.bodies], [...multiSel.joints], axis);
     markDirty();
@@ -2055,6 +2546,7 @@ canvas.addEventListener("mousedown", (e) => {
 
   if (e.button !== 0) return;
   if (mode === "draw") {
+    if (placePendingInsert(world)) return; // pending component-instance placement
     if (tool === "rotate") {
       startRotate(world);
     } else if (tool === null) {
@@ -2364,6 +2856,14 @@ canvas.addEventListener("dblclick", (e) => {
       openDimEditor(ml);
       return;
     }
+    // Double-click a component instance to open its definition for editing.
+    const b = scene.bodyAt(eventWorld(e));
+    const inst = b ? scene.instanceOfBody(b.id) : undefined;
+    if (inst) {
+      leftDrag = null; // cancel the drag the double-click's mousedowns started
+      enterComponent(inst.defId);
+      return;
+    }
   }
   // Select mode, body selected: double-click edits the control polygon. On a vertex →
   // remove it (kept ≥ 3); on an edge → add a node at the click point (grid-snapped).
@@ -2467,8 +2967,13 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.key === "Escape") {
     // Abort the current placement / drag and return to the mode's normal state
-    // (in sim this also disarms the measure tool).
+    // (in sim this also disarms the measure tool). With nothing armed or selected
+    // while editing a component definition, Esc steps back out one level.
+    const idle =
+      tool === null && selection === null && multiSel === null && pendingInsert === null &&
+      draftBody.length === 0 && jointDraftIds.length === 0 && !leftDrag && !rotateDrag;
     disarmTool();
+    if (idle && mode === "draw" && editPath.length > 0) exitComponent(1);
     return;
   }
   if (e.key === "Enter" && mode === "draw" && tool === "body") {

@@ -31,9 +31,19 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
     speed, sine = smooth ease). Off-animation it behaves like any other rider — draggable, pinnable.
   - **Motor** — a pivot + crank pair on one body; the crank pin orbits the pivot at a configurable
     angular speed (Hz) when animation runs. Off-animation the body behaves normally.
-- **Group** — a permanent set of bodies that acts as **one object**: selected, moved, rotated,
-  mirrored and copied together in Draw mode, and simulated as a **single rigid body** (nothing
-  inside a group can move relative to the rest). Made and dissolved with `Ctrl+G` (a toggle).
+- **Group** — a permanent set of bodies **and free joints** that acts as **one object**:
+  selected, moved, rotated, mirrored and copied together in Draw mode, and simulated as a
+  **single rigid body** (nothing inside a group can move relative to the rest — locked free
+  joints ride the group like welded points). Made and dissolved with `Ctrl+G` (a toggle).
+- **Component** — a reusable sub-mechanism designed in its **own editing context** and placed
+  as **instances**. Editing the definition **cascades to every instance**. Grounding something
+  *inside* a definition means "fixed to the component's frame": on placement that material
+  becomes one rigid **chassis** (never world-grounded), a joint-ground becomes a **revolute to
+  the frame**, and the definition's sketch constraints, dimensions and measurements stay inside
+  the definition — instances carry the designed shapes without design-time constraints, so an
+  instance can be placed at any rotation. Non-grounded parts keep moving relative to each
+  other: components can contain working mechanisms (pins, sliders, actuators, motors), and
+  definitions can nest instances of other components.
 - **Guideline** — an **infinite construction line** through two points (Draw mode only; it
   never takes part in simulation). Placement, dragging and drawing snap onto guidelines in
   preference to the grid, and guidelines participate in sketch constraints and measurements
@@ -176,6 +186,32 @@ through two points — CAD-style scaffolding for laying out a mechanism:
 - Guidelines are drawing aids only: they're invisible (and unpickable) in Simulate mode,
   never affect the simulation, and don't travel with copy/paste.
 
+**Components** (Draw mode). Design once, place many:
+
+- **Create**: select the bodies (and free joints) that should form the component and press the
+  **⊞ button** — the selection is packed into a **definition** and replaced by one **instance**
+  in place. Everything internal travels into the definition: joints, pins, grounds, sliders,
+  actuators/motors, sketch constraints, dimensions and measurements. The definition's
+  constraints **don't exist outside it** — instances show the designed shapes only.
+- **Instances are atomic**: clicking any part selects the whole instance (dashed outline);
+  drag / rotate / copy / delete act on it whole, and pasting a copied instance creates a new
+  instance of the same definition. Shapes are **design-locked** — no corner handles, no sketch
+  constraints on instance geometry (measurements are fine). **Shift-drag** a member to pose the
+  instance's internal mechanism rigidly, exactly like simulating it.
+- **Grounding in a definition = the chassis**: grounded bodies and grounded free joints become
+  one rigid cluster per instance; a joint-ground on a moving part becomes a pivot fixed to that
+  chassis. Ground an instance in the assembly (Ground tool on any of its bodies) to fix its
+  chassis in the world — the internal mechanism keeps working.
+- **Edit the definition**: double-click any instance (or use ✎ in the **component browser**,
+  the panel behind the grid-of-squares toolbar button). A **breadcrumb bar** shows where you
+  are (`Assembly ▸ Leg ▸ Foot` — definitions can nest); every tool works inside, including
+  Simulate. Changes **cascade live to every instance everywhere** — placements and each
+  instance's current mechanism pose are preserved. Click a breadcrumb (or press **Esc** with
+  nothing selected) to go back out.
+- The **component browser** lists definitions: rename inline, **＋** inserts an instance (click
+  the canvas to place it), **✎** edits, **×** deletes (refused while instances exist).
+  Circular references are rejected.
+
 **Body colour.** A colour swatch in the toolbar sets the active colour: with **nothing selected**
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
 and editing it recolours the body.
@@ -270,7 +306,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups, grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, hierarchical components
 ```
 
 ## How it works
@@ -306,7 +342,21 @@ pins/sliders propagate the imposed motion through the whole assembly.
 **Permanent groups** are rigid composites in the solver: a grouped body's "host" carries the
 group's combined mass, centroid and inertia, and every impulse translates + rotates **all**
 members about the combined centroid — so pins, sliders, grounds, drags and motors on any member
-move the group as one body, and constraints *between* members of one group are inert.
+move the group as one body, and constraints *between* members of one group are inert. Groups can
+also lock **free joints** as members (point masses riding the rigid motion): a ground on a locked
+joint pivots the whole group about it, and a rail between two locked joints is a track that moves
+with the group.
+**Components** are *materialized*: placing an instance expands the definition into real bodies,
+joints and constraints tagged with provenance (def-local id → scene id), so the solver, renderer
+and hit-testing need no hierarchy concept at all. Grounds inside a definition are *converted* on
+expansion — grounded material becomes one rigid chassis group per instance, and a joint-ground
+becomes a pin to a synthesized group-locked point (a revolute to the component's frame). Editing
+a definition re-expands each instance by **reconciling** against the provenance maps: surviving
+elements keep their scene ids (and, for moving parts, their current poses — instance state),
+chassis material snaps to the definition's rigid layout at the instance's current placement
+(derived from a chassis body's pose vs its cached def-frame pose), and added/removed definition
+elements appear/disappear. Definitions can contain instances of other definitions (a DAG); a
+change cascades through the definition graph and then into every open context.
 **Grounded bodies** are the degenerate case: an immovable host (zero mass and inertia), sacred
 like a ground anchor — grounding any member fixes its whole group.
 **Rigid (Shift) drags** reuse the same solver with a per-call *freeze scope*: everything outside

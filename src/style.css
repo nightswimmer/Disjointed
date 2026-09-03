@@ -365,3 +365,129 @@ input[type="color"]#body-color::-webkit-color-swatch {
   cursor: crosshair;
   touch-action: none;
 }
+
+/* --- components: breadcrumb bar + browser panel ---------------------------- */
+
+/* Breadcrumb overlay while editing a component definition (top-left of the canvas). */
+#crumb-bar {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  font-size: 13px;
+  user-select: none;
+}
+#crumb-bar.hidden {
+  display: none;
+}
+#crumb-bar .crumb {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+#crumb-bar .crumb:hover {
+  background: var(--control-hover);
+}
+#crumb-bar .crumb-current {
+  color: var(--text);
+  padding: 2px 4px;
+  font-weight: 600;
+}
+#crumb-bar .crumb-sep {
+  color: var(--text-dim);
+}
+
+/* Component browser panel (top-right of the canvas). */
+#comp-panel {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 2;
+  width: 240px;
+  max-height: calc(100% - 20px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  overflow: hidden;
+  font-size: 13px;
+  user-select: none;
+}
+#comp-panel.hidden {
+  display: none;
+}
+#comp-panel-head {
+  padding: 8px 10px 6px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--panel-border);
+}
+#comp-list {
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+#comp-list .comp-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--panel-border);
+}
+#comp-list .comp-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  padding: 2px 4px;
+}
+#comp-list .comp-name:hover {
+  border-color: var(--panel-border);
+}
+#comp-list .comp-name:focus {
+  border-color: var(--accent);
+  outline: none;
+  background: var(--control);
+}
+#comp-list .comp-btn {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 4px;
+  background: var(--control);
+  color: var(--text);
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+#comp-list .comp-btn:hover {
+  background: var(--control-hover);
+}
+#comp-list .comp-btn.danger:hover {
+  background: #a33;
+  color: #fff;
+}
+#comp-list .comp-empty {
+  padding: 10px;
+  color: var(--text-dim);
+}
+#comp-panel-hint {
+  padding: 6px 10px 8px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  border-top: 1px solid var(--panel-border);
+}
