@@ -157,12 +157,12 @@ into closed loops; `$INSUNITS` converts coordinates into the working unit (a uni
 is taken as already in working units), y is flipped (DXF is y-up), and the batch arrives
 multi-selected. **Loops are nested by containment**: a loop inside another becomes a **hole**
 of it (an island inside a hole starts a new solid), so a plate with cut-outs imports as ONE
-body. Holes (`Body.holesLocal`, optional) are **baked geometry**: rendered as cut-outs
-(even-odd fill), subtracted from mass/centroid/inertia (composite properties via
-parallel-axis), and carried through mirror / rotate / scale / copy-paste / save-load — but
-they have no editable handles, no measurement/sketch refs, the corner `radius` ignores them,
-and **picking + joint containment deliberately use the outer outline only** (so a joint can
-sit at the centre of a shaft hole, and clicking in a cut-out still selects the body).
+body. Holes render as cut-outs (even-odd fill), subtract from mass/centroid/inertia
+(composite properties via parallel-axis), and ride mirror / rotate / scale / copy-paste /
+save-load; **picking + joint containment deliberately use the outer outline only** (so a
+joint can sit at the centre of a shaft hole, and clicking in a cut-out still selects the
+body). Originally baked loops — since **v16 holes are editable outlines** with their own
+control polygon, rounding and measurement/sketch refs (see the v15/v16 paragraph below).
 **Z-order reordering** (no format change): **Send to back / Bring to front** on the selected
 body or multi-selection — toolbar buttons in the edit group (layer-stack icons, the moving
 layer highlighted, with a down/up arrow) and **PageDown / PageUp**. The `bodies` array *is*
@@ -191,6 +191,28 @@ instance-atomic selection with a dashed hull, copy/paste of instances as new ins
 Shift-drag poses an instance's internal mechanism. `SelectionClip` now also carries
 **actuators + motors** (an old backlog item, needed so components keep their powered
 constraints).
+**Per-corner radii + parametric DXF corners (v15) and editable holes (v16)**: every outline
+corner can override the body-wide radius (`Body.radii`, null = default). A selected body
+shows a **round radius handle** on each corner (at the fillet arc's midpoint, pushed to a
+min screen offset when sharp; the squares still move vertices — nearest handle wins): drag
+it along the bisector to round just that corner, drop it on the vertex for sharp,
+double-click it to clear back to the outline default; `[`/`]` still set the body-wide
+default (overridden corners keep their override). Offset-mode outlines take per-point
+margins (a 1-point disk resizes by its rim handle). Arc sampling is unified at
+**7.5°/segment** everywhere (fillet 24/180°, offset 48/circle — matching the DXF importer).
+The **DXF importer reconstructs fillets**: a bulge arc sweeping < 180° and tangent to its
+straight neighbours imports as a sharp control corner + per-corner radius (so imported
+rounded corners stay parametric/editable); a CIRCLE imports as a 1-point offset disk;
+non-tangent / ≥ 180° arcs stay sampled as before. **Holes are now first-class editable
+outlines** (`Body.holes`: control polygon + radius / radii / round each; `holesLocal` is
+derived): holes get the same vertex squares, radius handles, and double-click node
+add/remove as the outer outline (double-clicking a hole's last removable node deletes the
+whole hole, refs cascading); hole corners/edges are measurement + sketch-constraint
+references (`MeasureRef.hole`) and full sketch-solver variables, the joint↔node stick-link
+works on hole vertices, and circular DXF cut-outs arrive as resizable disk holes. Mirror
+remaps hole refs within their own outline, scale / copy-paste / components / save-load all
+carry hole shapes, and legacy (≤ v15) baked hole loops load as radius-0 editable holes.
+Picking + joint containment still deliberately use the outer outline only.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -202,33 +224,50 @@ constraints).
   point-to-line distance; `distToSegment` (point to a clamped segment);
   `closestPointOnPolygon` (nearest point on a closed polygon's boundary — used to clamp
   joints inside their body); `convexHull`;
-  `roundedConvexBody` (hull + outward rounded offset = Minkowski sum with a disk, sampled
-  adaptively to `margin`); `filletPolygon` (round a polygon's corners in place with tangent
-  arcs — convex and concave/reflex corners). The fillet runs in passes: per-corner desired
+  `roundedConvexBody` (hull + outward rounded offset = Minkowski sum with disks; `margin`
+  is uniform or **per-point** — the hull of different-size circles; 48 facets per circle);
+  `filletPolygon` (round a polygon's corners in place with tangent arcs — convex and
+  concave/reflex corners; `radius` is uniform or a **per-corner array**, ≤ 0 keeps a corner
+  sharp; default sampling 24 segments per 180° = 7.5°/segment, matching the DXF importer).
+  The fillet runs in passes: per-corner desired
   tangent length, a **shared-edge budget** (each edge split between its two corners in
   proportion to demand so neighbouring fillets can't overlap), an **opposite-edge clamp**
   (a few relaxation passes shrink any corner whose inscribed circle would poke through a
   non-adjacent edge — stops thin shapes folding at large radii), then arc emission. The
   fillet centre is always on the bisector of the two edge directions, which is the correct
   tangent side for both convex (into the body) and reflex (into the notch) corners.
+  `filletCornerArcs` exposes each corner's solved arc (centre, actual radius, sweep)
+  without sampling — the editor places the per-corner radius handles exactly on the arcs.
 - **model.ts** — `Scene` owning:
   - `Body` = rigid shape defined by an **editable control polygon** (`controlLocal`) + a
-    corner `radius` + a `round` mode (`"fillet"` rounds corners in place; `"offset"` grows the
-    hull outward). The render/physics polygon `local` is **derived** from these. Pose is `pos`
+    corner `radius` + optional per-corner overrides `radii: (number | null)[]` (v15;
+    parallel to `controlLocal`, null = use `radius`, present only while ≥ 1 override) + a
+    `round` mode (`"fillet"` rounds corners in place; `"offset"` grows the
+    hull outward — with `radii`, offset takes per-point margins). The render/physics polygon
+    `local` is **derived** from these. Pose is `pos`
     (world centroid) + `angle`. `invMass`/`invInertia` from the derived polygon's area / second
     moment. `rebuildBody` regenerates `local`/centroid/mass and re-anchors attached joints when
     the centroid shifts. A `grounded` flag (v10) fixes the body completely in simulation
     (see solver notes); `toggleBodyGround(bodyId)` toggles it — through a grouped body, on
     every member of the group at once (any-grounded → all off, else all on).
-    **Holes** (v13): optional `holesLocal: Vec2[][]` — baked inner cut-out loops in the local
-    frame (`addBody` takes an optional `holesWorld`; `bodyHolesWorld` resolves them).
-    `rebuildBody` computes **composite mass properties** (net area, area-weighted composite
-    centroid, inertia via per-loop moments + parallel-axis; falls back to outer-only if holes
-    would outweigh the outer). Holes ride `mirrorBody` (reflected + winding reversed),
-    `scaleBody`, rotate/move (local frame), and copy/paste (`SelectionClip.holesWorld`) — but
-    are **not** editable or referenceable (no handles, no vertex/edge refs, radius ignores
-    them), and `pointInBody`/`clampIntoBody`/`bodyAt` use the **outer outline only** by
-    design (joints may sit inside a hole, e.g. at a shaft's centre).
+    **Holes** (v16): optional `holes: BodyHole[]` — each an **editable outline** exactly like
+    the outer shape: `{ controlLocal, radius, radii?, round? }` in the body's local frame
+    (`round: "offset"` with one control point = a perfect circular hole). `holesLocal`
+    (parallel, present iff `holes` is) holds the **derived** sampled loops that the renderer
+    and mass properties consume — `rebuildBody` re-derives them (`deriveHoleOutline`) and
+    re-centers hole controls alongside the outer polygon. `addBody` takes `holesWorld?:
+    HoleSpec[]` (a plain loop → radius-0 control polygon, or `{ control, radius?, radii?,
+    round? }`). `rebuildBody` computes **composite mass properties** (net area, area-weighted
+    composite centroid, inertia via per-loop moments + parallel-axis; falls back to
+    outer-only if holes would outweigh the outer). Holes ride `mirrorBody` (controls
+    reflected + winding and radii reversed, refs remapped per-outline), `scaleBody`
+    (controls + radius/radii), rotate/move (local frame), copy/paste
+    (`SelectionClip.bodies[].holes` carries the shapes) and component expansion.
+    `removeBodyHole(bodyId, hole)` deletes one hole, dropping its refs and shifting later
+    holes' refs down. `pointInBody`/`clampIntoBody`/`bodyAt` still use the **outer outline
+    only** by design (joints may sit inside a hole, e.g. at a shaft's centre). Legacy
+    (v13–v15) files carry only baked `holesLocal` loops — they load as radius-0 editable
+    holes with identical geometry.
   - `Joint` = a point with `bodyId` + `local`. If `bodyId` is a body, `local` is the offset
     from that body's centroid; if `bodyId === null` it is a **free joint** and `local` is its
     own world position (the solver treats it as a movable point particle).
@@ -255,16 +294,20 @@ constraints).
     new joint **attached to that slider as its own rider** (the body connects to the slider track,
     not pinned to a rail endpoint). Editing: `moveBodyVertex`,
     `insertBodyVertex` (add a control vertex),
-    `removeBodyVertex` (drop one, kept ≥ 3), `setBodyRadius`, `moveJoint`, `moveBody` — shape
-    edits go through `rebuildBody`, so attached joints stay anchored. **Joint containment**:
+    `removeBodyVertex` (drop one, kept ≥ 3 — ≥ 1 for an offset disk hole), `setBodyRadius`
+    (the outline-wide default), `setBodyCornerRadius(bodyId, index, r | null)` (per-corner
+    override / clear), `bodyCornerRadii` (effective per-corner list), `moveJoint`, `moveBody`
+    — every vertex/radius method takes an optional trailing `hole` index (null/absent = the
+    outer outline; `bodyHoleControlWorld(body, hi)` gives a hole's world control vertices),
+    and shape edits go through `rebuildBody`, so attached joints stay anchored. **Joint containment**:
     `pointInBody` / `clampIntoBody` test/clamp a world point against a body's rounded outline;
     `moveJoint` (via the private `shiftJoint`) clamps an attached joint's target inside its
     body, so a drag can't take it outside (free joints are unclamped; ground anchors follow).
     **Node ↔ joint link** (`VERTEX_LINK_EPS = 1e-6`): `moveBodyVertex` carries any joint of
     that body exactly coincident with the moved control vertex (moved *after* the rebuild, so
     every other joint stays anchored); `moveJoint` on a joint coincident with a control vertex
-    delegates to `moveBodyVertex` — so the link is bidirectional and coincidence-based (no
-    stored mapping; survives save/load, copy/paste, mirror, rotate). Edge cases: only the
+    — outer **or hole** (v16) — delegates to `moveBodyVertex` — so the link is bidirectional
+    and coincidence-based (no stored mapping; survives save/load, copy/paste, mirror, rotate). Edge cases: only the
     body's *own* joints follow a node (a pinned twin's partner on another body stays put — the
     pin shows as a dotted connector until sim closes it), and rounding a freehand body's
     corner after linking dissolves that link on the next drag (the control corner leaves the
@@ -365,7 +408,9 @@ constraints).
   - **Measurements** (`measurements: Measurement[]` on the scene): a `Measurement` =
     `{ id, mode: "draw"|"sim", refA, refB, labelOffset, axis }`. A `MeasureRef` is a **point**
     (`joint` id / body `vertex` index / `bodyPoint` = a local offset fixed in a body's frame)
-    or a **line** (slider `rail` id / body control-polygon `edge` index). `resolveMeasureRef`
+    or a **line** (slider `rail` id / body control-polygon `edge` index). Vertex/edge refs
+    carry an optional `hole` index (v16) naming one of the body's hole outlines instead of
+    the outer one (a 1-point disk hole has vertex refs but no edge refs). `resolveMeasureRef`
     re-resolves a ref to world geometry every frame; `measureInfo(m)` computes the display —
     kind (`distance`/`angle`), value (world units / degrees), label position, arrowed
     dimension segment or arc, and dashed extension segments (`MeasureInfo`). Point+point uses
@@ -399,17 +444,20 @@ constraints).
     `UNIT_TO_MM` (both exported) — a declaration of what one world unit means; changing it
     never moves geometry. Used for measurement display and DXF import conversion.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 14`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 16`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
     constraints or driving flags, pre-v9 files no groups, pre-v10 bodies load ungrounded,
     pre-v11 files no guides, pre-v12 files default to `unit: "mm"`, pre-v13 bodies have no
     holes, pre-v14 files have no components/instances and their groups get empty
-    `jointIds` —
+    `jointIds`, pre-v15 bodies have no per-corner `radii`, and pre-v16 files carry only
+    baked `holesLocal` loops (loaded as radius-0 editable holes; v16 loads sanitize `holes`
+    and **re-derive** `holesLocal` from the controls, so the two can never disagree) —
     all load fine as-is; loaded groups/instances are pruned against the loaded elements).
     The `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its
-    colour and hole loops (`holesWorld`), pins/grounds/sliders internal to the selection,
+    colour, per-corner `radii`, and **hole shapes** (`bodies[].holes`: world control +
+    radius/radii/round each), pins/grounds/sliders internal to the selection,
     **actuators + motors** (when their slider/body travels), groups (bodies + locked
     joints), internal sketch constraints and dimensions (driving always; driven only for
     component creation via `opts.drivenDims`).
@@ -519,7 +567,13 @@ constraints).
   segment), CIRCLE (48-gon), LINE and ARC (sampled, always CCW start→end); open paths are
   **chained end-to-end** (either direction, extent-relative tolerance) into closed loops.
   Returns `{ loops, unitToMm, skippedPaths, skippedEntities }` in raw DXF coordinates (y-up;
-  the importer in main flips/scales/translates). `nestLoops(loops)` groups them even-odd
+  the importer in main flips/scales/translates). Each loop is a **`DxfLoop`**: the sampled
+  `pts`, plus **`fillet`** — a reconstruction of the loop as a sparse control polygon +
+  per-corner radii (`reconstructFillets`: a closed polyline's bulge arc sweeping < 180° and
+  **tangent to the straight segments on both sides** (±0.01 rad) is replaced by the corner
+  where those segments meet, carrying the arc's radius; non-fillet arcs stay sampled inline;
+  null when no arc converts) — and **`circle`** (`{ c, r }` when the loop is a CIRCLE
+  entity, importable as a parametric disk). `nestLoops(loops)` groups sampled loops even-odd
   style into `{ outer, holes }` solids (parent = smallest enclosing loop; an island inside a
   hole is a new solid). `loopSignedArea` exported for winding normalization. Binary DXF and
   non-DXF input throw a friendly error.
@@ -799,11 +853,16 @@ constraints).
     change-detected — load/undo can change the unit). Canvas `dragover`/`drop` handlers:
     a dropped `.dxf` → `importDxfFile(file, eventWorld(e))`, a `.json` → `loadFromFile`,
     anything else alerts. `importDxfFile` parses (`parseDxf`), converts by
-    `unitToMm / UNIT_TO_MM[scene.unit]` (factor 1 when the file is unitless), **flips y**,
-    centres the combined bbox at the (snapped) drop point, nests loops (`nestLoops`),
-    normalizes winding (outer positive, holes negative), creates one body per solid
-    (`addBody(outer, 0, "fillet", holes)`, coloured `defaultBodyColor`), selects the batch
-    via `setMulti`, and marks dirty. No closed shapes → an explanatory alert; unchainable
+    `unitToMm / UNIT_TO_MM[scene.unit]` (factor 1 when the file is unitless), **flips y**
+    (fillet controls / radii and circles transform alongside the sampled pts), centres the
+    combined bbox at the (snapped) drop point, nests loops (`nestLoops` on the sampled pts,
+    with a pts→`DxfLoop` map to recover each loop's arc metadata), and creates one body per
+    solid, coloured `defaultBodyColor`: an outer **circle** → a 1-point offset disk body; an
+    outer with a **fillet reconstruction** → `addBody(control, 0, "fillet", holes, radii)`
+    (winding normalized with control + radii reversed together); else the sampled outline as
+    before. Holes go through the same map: a circle cut-out → a parametric **disk hole**, a
+    reconstructed one → `{ control, radii }`, else the sampled loop (winding normalized).
+    The batch is selected via `setMulti` and marked dirty. No closed shapes → an explanatory alert; unchainable
     open paths → a post-import alert; unsupported entities → a console note.
 
 ### Interaction model
@@ -852,14 +911,16 @@ to **Select** mode. `Esc` aborts the current placement.
   the *same body* for the **crank pin** (a cross-body second click restarts the draft at that
   joint). Creates a `motor` constraint that spins the body during animation. Default speed 0.25 Hz.
 - **Measure** (`D`, also available in sim mode — sim keeps its own set) — click two references
-  (joint, body corner, slider rail, body edge, or a point on a body), then click where the value
+  (joint, body corner, slider rail, body edge — **hole corners/edges included** (v16) — or a
+  point on a body), then click where the value
   should sit. Point+point: the label spot picks horizontal / vertical / direct. Point+line:
   perpendicular distance to the infinite line. Line+line: distance while parallel, angle
   otherwise (dynamic; the label's sector picks θ vs 180−θ). Values update live in sim.
 - **Sketch constraints** (draw mode only): **Coincident** (`O`) — two points (joints, body
-  corners, guide points). **Horizontal**
+  corners — hole corners included — guide points). **Horizontal**
   (`H`) / **Vertical** (`V`) — one edge/rail/guideline, or two points. **Parallel** (`P`) /
-  **Perpendicular** (`T`) — two lines (edges/rails/guidelines); **Equal length** (`E`) —
+  **Perpendicular** (`T`) — two lines (edges/rails/guidelines — hole edges included);
+  **Equal length** (`E`) —
   two edges/rails (guidelines rejected — no length). The geometry solves to
   satisfy the constraint the moment it's placed; an unsatisfiable one is rejected (conflicting
   items flash red). Badges are click-to-select, Delete to remove.
@@ -878,11 +939,18 @@ Select mode (default, no tool armed):
   selected body or joint. An attached joint **can't leave its body**: dragging it past the edge
   clamps it to the outline (it slides along the edge). A joint sitting exactly on a control
   node (as in a joint-built body) is **stuck to that node** — dragging either one moves both,
-  reshaping the body. A selected body shows **corner handles** — drag one to reshape it
-  (`moveBodyVertex`, carrying any joint stuck to that node); **`[` / `]`** decrease / increase
-  its corner radius (round/un-round).
-  **Double-click** an edge of the selected body to add a control node there (`insertBodyVertex`,
-  grid-snapped), or a node to remove it (`removeBodyVertex`, kept ≥ 3). Clicking on/near the
+  reshaping the body. A selected body shows **corner handles on the outer outline and every
+  hole** — square handles move vertices (`moveBodyVertex`, carrying any joint stuck to that
+  node) and **round radius handles** sit on each corner's fillet arc (drag along the bisector
+  to set that corner's radius via `setBodyCornerRadius`; onto the vertex = sharp;
+  double-click = back to the outline default; on an offset outline the handle rides the
+  point's circle — a disk hole resizes by its rim). The nearest handle wins the grab.
+  **`[` / `]`** decrease / increase the body-wide default radius (overridden corners keep
+  their override).
+  **Double-click** an edge of the selected body — outer or hole — to add a control node there
+  (`insertBodyVertex`, grid-snapped), or a node to remove it (`removeBodyVertex`, kept ≥ 3 —
+  ≥ 1 for a disk hole); double-clicking a **hole's last removable node deletes the whole
+  hole** (`removeBodyHole`, refs cascading). Clicking on/near the
   selected body's control polygon keeps it selected (so an edge double-click isn't lost).
 - **Multi-selection**: **Ctrl/Cmd+click** toggles bodies (and free joints) in and out of a
   multi-selection; **box select** — left-drag on empty space — selects every body fully
@@ -995,9 +1063,14 @@ Import (drag-and-drop onto the canvas):
   via `$INSUNITS` + the working unit; a unitless file is assumed to be in working units).
   Loops nested inside others become **holes** (one plate with cut-outs = one body); loose
   lines/arcs are chained into loops; the imported batch arrives multi-selected. Open paths
-  that can't close are skipped with a notice. Drop a **`.json`** to load it as a scene.
+  that can't close are skipped with a notice. **Rounded corners stay parametric**: a corner
+  arc tangent to its neighbouring straight segments imports as a sharp control corner with a
+  per-corner fillet radius (editable with the radius handles), and circles — standalone or
+  cut-outs — import as 1-point offset disks (resize by the rim handle). Non-tangent or
+  ≥ 180° arcs stay sampled points. Drop a **`.json`** to load it as a scene.
   `dxf import test.dxf` in the repo root is a hand-written sample (plate with two round
-  cut-outs, circle, LINE-triangle, ARC+LINE D-shape, mm units).
+  cut-outs, circle, LINE-triangle, ARC+LINE D-shape, mm units); `Maze Base.dxf` is a real
+  CAD export whose plate + 4 holes reconstruct fully (4 control corners each).
 
 Persistence:
 - **Save** downloads `mechanism-<timestamp>.json`; **Load** opens a `.json` via the file
@@ -1094,6 +1167,16 @@ Persistence:
   joints stay unclamped) and the **node ↔ joint link** (moving a joint-built body's node carries
   its joint while the others stay anchored; moving the joint carries the node; a grounded linked
   joint keeps its anchor in step; a non-node joint moves without reshaping the body).
+  **Per-corner radii (v15)**: array-radius `filletPolygon` rounds only named corners (others
+  exactly sharp); per-point `roundedConvexBody` margins; `setBodyCornerRadius` override +
+  clear semantics (all-null array dropped); insert/remove shifting the override with its
+  corner; mirror reversing it onto the renumbered corner; scale scaling it; save/load and
+  copy/paste round-trips. **Editable holes (v16)**: holes become shapes (+ derived loops), a
+  1-point offset hole derives as a true circle, hole edits change mass but not the outer
+  outline, hole vertex/edge refs resolve + track edits, insert/remove remap only same-hole
+  refs, per-corner hole radii, mirror remapping hole refs within their own outline,
+  copy/paste + save/load round-trips, legacy baked holes loading as radius-0 editable holes,
+  and `removeBodyHole` cascading refs + shifting later holes' refs.
 - **edit-utils.ts** — `rotateBody` (90° about the centroid carries the joint + ground anchor; a
   pivot node stays fixed), `mirrorBody` (joint reflected, centroid + area preserved), and
   copy/paste (`extractBody`/`insertBody`: independent offset duplicate, joints/grounds/sliders
@@ -1126,7 +1209,9 @@ Persistence:
   driving; rejects (conflicting dims leave the scene byte-identical, angle dims and
   sim-mode dims can't drive, non-positive targets); `tryAddConstraint` rollback;
   `autoConstrainBody` H/V inference (diagonals left alone); cascade removal + vertex/edge
-  index remapping; serialize/load v8 round-trip + pre-v8 files.
+  index remapping; serialize/load v8 round-trip + pre-v8 files. **Hole geometry (v16)**:
+  a horizontal constraint on a hole edge solves by reshaping the hole (outer outline
+  untouched), and joint ↔ hole-corner coincident solves to coincidence.
 - **measurements.ts** — axis selection from label placement (h / v / direct zones);
   point-point values + dimension-line geometry + preview parity; label move re-deriving the
   axis; values and label positions tracking moving geometry; point-line using the infinite
@@ -1197,12 +1282,15 @@ Persistence:
   solved by the free point); and the **drag fallback** (an infeasible anchored drag step
   followed by the symmetric solve restores V, keeps the drag's feasible component, joint
   untouched).
-- **dxf.ts (scripts)** — the DXF importer + units + holes end-to-end (46 checks): closed
+- **dxf.ts (scripts)** — the DXF importer + units + holes end-to-end: closed
   LWPOLYLINE / old-style POLYLINE+VERTEX loops; bulge sampling exactly on the arc's circle
-  (positive bulge CCW); LINE chaining (unordered + reversed segments) and ARC+LINE chaining;
+  (positive bulge CCW); **fillet reconstruction** (a rounded rectangle reconstructs to its 4
+  sharp corners with radius 5, regenerating the exact shape; a half-circle arc and
+  non-tangent arcs don't reconstruct; arc-free loops report null; CIRCLE reports centre +
+  radius); LINE chaining (unordered + reversed segments) and ARC+LINE chaining;
   CIRCLE sampling + CCW winding; `$INSUNITS` (mm / inches / unitless / absent); dangling
   open paths skipped + unsupported entities counted; non-DXF input rejected; the working
-  unit surviving serialize → load (v13) with a pre-v12 mm default; `nestLoops` (plate + 4
+  unit surviving serialize → load with a pre-v12 mm default; `nestLoops` (plate + 4
   cut-outs → one solid, island-inside-a-hole → its own solid, disjoint loops separate); and
   bodies with holes: net mass, composite centroid, reduced inertia, `pointInBody` true
   inside a hole (joint placeable at a hole centre), holes round-tripping through save/load,

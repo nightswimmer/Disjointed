@@ -38,23 +38,88 @@ export const VERTEX_LINK_EPS = 1e-6;
 /** How a body's `radius` shapes it: round the corners in place, or offset the hull outward. */
 export type RoundMode = "fillet" | "offset";
 
+/**
+ * One editable hole outline (v16): a control polygon + rounding, exactly like the
+ * body's outer shape. Lives in the body's local frame (relative to the centroid).
+ */
+export interface BodyHole {
+  /** Editable control polygon of the hole, relative to the centroid, local frame. */
+  controlLocal: Vec2[];
+  /** Corner radius (fillet) or outward margin (offset mode) — the hole's default. */
+  radius: number;
+  /** Per-corner radius overrides, parallel to `controlLocal` (null = use `radius`). */
+  radii?: (number | null)[];
+  /**
+   * "offset" derives the hole as the rounded hull of its control points (one point =
+   * a perfect circular hole); default "fillet" rounds the polygon's corners in place.
+   */
+  round?: RoundMode;
+}
+
+/**
+ * A hole passed to `addBody` (world coords): a plain sampled loop (becomes a radius-0
+ * hole control polygon) or a control polygon + rounding.
+ */
+export type HoleSpec =
+  | Vec2[]
+  | { control: Vec2[]; radius?: number; radii?: (number | null)[]; round?: RoundMode };
+
+/** Effective per-corner radii of a hole (overrides over its default), or the default. */
+function holeRadii(h: BodyHole): number | number[] {
+  if (!h.radii) return h.radius;
+  return h.controlLocal.map((_, i) => {
+    const r = h.radii![i];
+    return typeof r === "number" ? r : h.radius;
+  });
+}
+
+/** Derive a hole's sampled outline from its control polygon (in the control's frame). */
+function deriveHoleOutline(control: Vec2[], h: BodyHole): Vec2[] {
+  const radii = holeRadii(h);
+  return h.round === "offset" ? roundedConvexBody(control, radii) : filletPolygon(control, radii);
+}
+
+/** Deep copy of a body's hole shapes. */
+function cloneBodyHoles(holes: BodyHole[]): BodyHole[] {
+  return holes.map((h) => {
+    const out: BodyHole = {
+      controlLocal: h.controlLocal.map((p) => vec(p.x, p.y)),
+      radius: h.radius,
+    };
+    if (h.radii) out.radii = [...h.radii];
+    if (h.round) out.round = h.round;
+    return out;
+  });
+}
+
 export interface Body {
   id: number;
   /** Editable control polygon (the corners), relative to the centroid, in the local frame. */
   controlLocal: Vec2[];
   /** Corner radius (fillet) or outward margin (offset) applied to the control polygon. 0 = sharp. */
   radius: number;
+  /**
+   * Per-corner radius overrides, parallel to `controlLocal` (v15): a number overrides
+   * `radius` for that corner (0 = sharp), `null` means "use the body default". Present
+   * only while at least one corner is overridden; absent = every corner uses `radius`.
+   */
+  radii?: (number | null)[];
   round: RoundMode;
   /** Derived render/physics polygon, relative to the centroid — rebuilt from control + radius. */
   local: Vec2[];
   /**
-   * Inner cut-outs: hole loops relative to the centroid, in the local frame (v13,
-   * absent = none). *Baked* geometry riding the body: holes render as cut-outs and are
-   * subtracted from mass/centroid/inertia, and they mirror/rotate/scale/copy with the
-   * body — but they have no editable handles, no vertex/edge refs (measurements and
-   * sketch constraints can't name them), the corner `radius` doesn't touch them, and
-   * picking + joint containment deliberately use the outer outline only (so a joint
-   * can sit at the centre of a shaft hole).
+   * Inner cut-outs (v16): editable hole outlines, each a control polygon + rounding
+   * like the body's outer shape. Holes render as cut-outs, subtract from
+   * mass/centroid/inertia, mirror/rotate/scale/copy with the body, and their control
+   * vertices/edges are first-class measurement + sketch-constraint references
+   * (`MeasureRef.hole`). Picking + joint containment still use the outer outline only
+   * (so a joint can sit at the centre of a shaft hole). Present iff `holesLocal` is.
+   */
+  holes?: BodyHole[];
+  /**
+   * Derived sampled hole loops (parallel to `holes`), relative to the centroid, in the
+   * local frame — rebuilt from each hole's control + radius, like `local` is from the
+   * outer control polygon. What the renderer / mass properties consume.
    */
   holesLocal?: Vec2[][];
   /** World position of the centroid (the body's local origin). */
@@ -202,10 +267,10 @@ export type MeasureAxis = "direct" | "h" | "v";
  */
 export type MeasureRef =
   | { kind: "joint"; jointId: number } // point: a joint
-  | { kind: "vertex"; bodyId: number; index: number } // point: a body control vertex
+  | { kind: "vertex"; bodyId: number; index: number; hole?: number } // point: a control vertex (of hole `hole`, or the outer outline)
   | { kind: "bodyPoint"; bodyId: number; local: Vec2 } // point: fixed in a body's frame
   | { kind: "rail"; sliderId: number } // line: a slider rail
-  | { kind: "edge"; bodyId: number; index: number } // line: control edge index → index+1
+  | { kind: "edge"; bodyId: number; index: number; hole?: number } // line: control edge index → index+1 (of hole `hole`, or the outer)
   | { kind: "guidePoint"; guideId: number; which: "a" | "b" } // point: a guideline defining point
   | { kind: "guideLine"; guideId: number }; // line: a construction guideline (infinite)
 
@@ -397,7 +462,17 @@ export interface SelectionClip {
   /** Paste reference: the mass-weighted centre of the copied bodies (a single body's
    *  own centroid), or the copied joints' average for a body-less clip. */
   center: Vec2;
-  bodies: { tmp: number; controlWorld: Vec2[]; holesWorld: Vec2[][]; radius: number; round: RoundMode; color: string; grounded: boolean }[];
+  bodies: {
+    tmp: number;
+    controlWorld: Vec2[];
+    /** Hole shapes in world coords (control polygon + rounding each). */
+    holes: { control: Vec2[]; radius: number; radii?: (number | null)[]; round?: RoundMode }[];
+    radius: number;
+    radii?: (number | null)[];
+    round: RoundMode;
+    color: string;
+    grounded: boolean;
+  }[];
   /** Copied joints: attached ones carry their body's tmp id, free ones null. */
   joints: { tmp: number; bodyTmp: number | null; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
@@ -415,7 +490,7 @@ export interface SelectionClip {
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
 }
 
-const FORMAT_VERSION = 14;
+const FORMAT_VERSION = 16;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -457,9 +532,18 @@ export class Scene {
   /**
    * Create a body from a control polygon (world coords). `radius` rounds it: `fillet`
    * rounds the corners in place (keeps concavity); `offset` grows the convex hull outward.
-   * `holesWorld` (optional) bakes inner cut-out loops into the body (see `Body.holesLocal`).
+   * `holesWorld` (optional) adds editable hole outlines — each either a plain loop
+   * (becomes a radius-0 hole control polygon) or a control polygon + rounding
+   * (see `HoleSpec` / `Body.holes`).
+   * `radii` (optional) seeds per-corner overrides, one per vertex (see `Body.radii`).
    */
-  addBody(worldVerts: Vec2[], radius = 0, round: RoundMode = "fillet", holesWorld?: Vec2[][]): Body {
+  addBody(
+    worldVerts: Vec2[],
+    radius = 0,
+    round: RoundMode = "fillet",
+    holesWorld?: HoleSpec[],
+    radii?: (number | null)[]
+  ): Body {
     const body: Body = {
       id: this.id(),
       controlLocal: worldVerts.map((p) => vec(p.x, p.y)), // world for now; rebuild re-centers it
@@ -473,7 +557,24 @@ export class Scene {
       color: PALETTE[this.bodies.length % PALETTE.length],
       grounded: false,
     };
-    if (holesWorld?.length) body.holesLocal = holesWorld.map((loop) => loop.map((p) => vec(p.x, p.y)));
+    if (radii && radii.length === worldVerts.length && radii.some((r) => r !== null)) {
+      body.radii = radii.map((r) => (typeof r === "number" ? Math.max(0, r) : null));
+    }
+    if (holesWorld?.length) {
+      // World coords for now; rebuild re-centers them into the local frame.
+      body.holes = holesWorld.map((h) => {
+        if (Array.isArray(h)) return { controlLocal: h.map((p) => vec(p.x, p.y)), radius: 0 };
+        const hole: BodyHole = {
+          controlLocal: h.control.map((p) => vec(p.x, p.y)),
+          radius: Math.max(0, h.radius ?? 0),
+        };
+        if (h.round) hole.round = h.round;
+        if (h.radii && h.radii.length === h.control.length && h.radii.some((r) => r !== null)) {
+          hole.radii = h.radii.map((r) => (typeof r === "number" ? Math.max(0, r) : null));
+        }
+        return hole;
+      });
+    }
     this.bodies.push(body);
     this.rebuildBody(body);
     return body;
@@ -486,15 +587,17 @@ export class Scene {
    */
   private rebuildBody(body: Body): void {
     const ctrlWorld = body.controlLocal.map((p) => add(body.pos, rotate(p, body.angle)));
+    const radii = body.radii ? this.bodyCornerRadii(body) : body.radius;
     const finalWorld =
       body.round === "offset"
-        ? roundedConvexBody(ctrlWorld, body.radius)
-        : filletPolygon(ctrlWorld, body.radius);
-    // Holes are baked outlines: the corner radius never touches them, they just ride
-    // the body's frame and subtract from the mass properties below.
-    const holesWorld = (body.holesLocal ?? []).map((loop) =>
-      loop.map((p) => add(body.pos, rotate(p, body.angle)))
+        ? roundedConvexBody(ctrlWorld, radii)
+        : filletPolygon(ctrlWorld, radii);
+    // Holes derive exactly like the outer outline: each hole's sampled loop comes from
+    // its own control polygon + rounding, then subtracts from the mass properties below.
+    const holeCtrlWorld = (body.holes ?? []).map((h) =>
+      h.controlLocal.map((p) => add(body.pos, rotate(p, body.angle)))
     );
+    const holesWorld = (body.holes ?? []).map((h, hi) => deriveHoleOutline(holeCtrlWorld[hi], h));
     // Composite mass properties: outer minus holes (each hole via its own centroid +
     // parallel-axis shift). If bad data makes the holes outweigh the outer, fall back
     // to the outer-only properties rather than a zero/negative mass.
@@ -530,10 +633,17 @@ export class Scene {
     body.pos = centroid;
     body.local = finalWorld.map((p) => rotate(sub(p, centroid), -body.angle));
     body.controlLocal = ctrlWorld.map((p) => rotate(sub(p, centroid), -body.angle));
-    if (body.holesLocal)
+    if (body.holes?.length) {
+      body.holes.forEach((h, hi) => {
+        h.controlLocal = holeCtrlWorld[hi].map((p) => rotate(sub(p, centroid), -body.angle));
+      });
       body.holesLocal = holesWorld.map((loop) =>
         loop.map((p) => rotate(sub(p, centroid), -body.angle))
       );
+    } else {
+      delete body.holes;
+      delete body.holesLocal;
+    }
     body.invMass = 1 / Math.max(area, 1);
     body.invInertia = 1 / Math.max(inertia, 1);
     attached.forEach((j, i) => {
@@ -542,56 +652,142 @@ export class Scene {
   }
 
   /**
-   * Move a control vertex of a body by a world-space delta, then rebuild its shape.
-   * A joint of this body sitting exactly on the vertex is *stuck* to it and carried
-   * along (a body built from joints keeps its joints and control nodes together);
-   * all other attached joints stay anchored in world space as usual.
+   * Move a control vertex of a body (or of its hole `hole`) by a world-space delta,
+   * then rebuild its shape. A joint of this body sitting exactly on the vertex is
+   * *stuck* to it and carried along (a body built from joints keeps its joints and
+   * control nodes together); all other attached joints stay anchored in world space.
    */
-  moveBodyVertex(bodyId: number, index: number, delta: Vec2): void {
+  moveBodyVertex(bodyId: number, index: number, delta: Vec2, hole?: number | null): void {
     const body = this.getBody(bodyId);
-    if (!body || index < 0 || index >= body.controlLocal.length) return;
-    const vw = add(body.pos, rotate(body.controlLocal[index], body.angle));
+    const ctrl = body ? this.controlListOf(body, hole) : null;
+    if (!body || !ctrl || index < 0 || index >= ctrl.length) return;
+    const vw = add(body.pos, rotate(ctrl[index], body.angle));
     const linked = this.joints.filter(
       (j) => j.bodyId === bodyId && dist(this.jointWorld(j), vw) < VERTEX_LINK_EPS
     );
-    body.controlLocal[index] = add(body.controlLocal[index], rotate(delta, -body.angle));
+    ctrl[index] = add(ctrl[index], rotate(delta, -body.angle));
     this.rebuildBody(body); // keeps every joint anchored...
     for (const j of linked) this.shiftJoint(j, delta); // ...then the stuck ones follow
   }
 
+  /** The control polygon `hole` names: the hole's, or the outer one when null/absent. */
+  private controlListOf(body: Body, hole?: number | null): Vec2[] | null {
+    if (hole === null || hole === undefined) return body.controlLocal;
+    return body.holes?.[hole]?.controlLocal ?? null;
+  }
+
   /**
-   * Insert a new control vertex at `index` (world position → local), then rebuild.
-   * Used to add a node on a polygon edge: pass the index it should occupy (i.e. the
-   * later endpoint of the clicked edge).
+   * Insert a new control vertex at `index` (world position → local) into the body's
+   * outer outline or its hole `hole`, then rebuild. Used to add a node on a polygon
+   * edge: pass the index it should occupy (i.e. the later endpoint of the clicked edge).
    */
-  insertBodyVertex(bodyId: number, index: number, worldPos: Vec2): void {
+  insertBodyVertex(bodyId: number, index: number, worldPos: Vec2, hole?: number | null): void {
     const body = this.getBody(bodyId);
-    if (!body) return;
-    const clamped = Math.min(Math.max(index, 0), body.controlLocal.length);
-    body.controlLocal.splice(clamped, 0, rotate(sub(worldPos, body.pos), -body.angle));
-    this.shiftMeasureIndices(bodyId, clamped, 1);
+    const ctrl = body ? this.controlListOf(body, hole) : null;
+    if (!body || !ctrl) return;
+    const clamped = Math.min(Math.max(index, 0), ctrl.length);
+    ctrl.splice(clamped, 0, rotate(sub(worldPos, body.pos), -body.angle));
+    const radii = hole === null || hole === undefined ? body.radii : body.holes![hole].radii;
+    if (radii) radii.splice(clamped, 0, null); // the new corner uses the outline default
+    this.shiftMeasureIndices(bodyId, clamped, 1, hole ?? null);
     this.rebuildBody(body);
   }
 
   /**
-   * Remove a control vertex, then rebuild. No-op if it would leave fewer than 3
-   * vertices (the minimum to define a polygon) or the index is out of range.
+   * Remove a control vertex from the outer outline or hole `hole`, then rebuild.
+   * No-op if it would leave fewer than 3 vertices (1 for an offset-mode hole, which
+   * is a disk) or the index is out of range.
    */
-  removeBodyVertex(bodyId: number, index: number): void {
+  removeBodyVertex(bodyId: number, index: number, hole?: number | null): void {
     const body = this.getBody(bodyId);
-    if (!body || body.controlLocal.length <= 3) return;
-    if (index < 0 || index >= body.controlLocal.length) return;
-    body.controlLocal.splice(index, 1);
-    this.shiftMeasureIndices(bodyId, index, -1);
+    const ctrl = body ? this.controlListOf(body, hole) : null;
+    if (!body || !ctrl) return;
+    const holeShape = hole === null || hole === undefined ? null : body.holes![hole];
+    const min = holeShape?.round === "offset" ? 1 : 3;
+    if (ctrl.length <= min || index < 0 || index >= ctrl.length) return;
+    ctrl.splice(index, 1);
+    const shape: { radii?: (number | null)[] } = holeShape ?? body;
+    if (shape.radii) {
+      shape.radii.splice(index, 1);
+      if (!shape.radii.some((r) => r !== null)) delete shape.radii;
+    }
+    this.shiftMeasureIndices(bodyId, index, -1, hole ?? null);
     this.rebuildBody(body);
   }
 
-  /** Set a body's corner radius / margin (clamped ≥ 0), then rebuild its shape. */
-  setBodyRadius(bodyId: number, radius: number): void {
+  /**
+   * Remove a whole hole from a body, then rebuild. Measurements / sketch constraints
+   * on the hole (and index remaps for later holes' refs) cascade.
+   */
+  removeBodyHole(bodyId: number, hole: number): void {
+    const body = this.getBody(bodyId);
+    if (!body || !body.holes || hole < 0 || hole >= body.holes.length) return;
+    body.holes.splice(hole, 1);
+    body.holesLocal?.splice(hole, 1);
+    // Drop refs on the removed hole; shift refs on later holes down by one.
+    const gone = (ref: MeasureRef | null): boolean =>
+      !!ref && (ref.kind === "vertex" || ref.kind === "edge") && ref.bodyId === bodyId && ref.hole === hole;
+    const shift = (ref: MeasureRef | null): void => {
+      if (ref && (ref.kind === "vertex" || ref.kind === "edge") && ref.bodyId === bodyId && ref.hole !== undefined && ref.hole > hole) ref.hole--;
+    };
+    this.measurements = this.measurements.filter((m) => !gone(m.refA) && !gone(m.refB));
+    this.sketch = this.sketch.filter((c) => !gone(c.refA) && !gone(c.refB));
+    for (const m of this.measurements) { shift(m.refA); shift(m.refB); }
+    for (const c of this.sketch) { shift(c.refA); shift(c.refB); }
+    this.rebuildBody(body);
+  }
+
+  /**
+   * Set a body's (or its hole `hole`'s) corner radius / margin (clamped ≥ 0), then
+   * rebuild its shape. This is the outline-wide default; corners with a per-corner
+   * override (`radii`) keep it.
+   */
+  setBodyRadius(bodyId: number, radius: number, hole?: number | null): void {
     const body = this.getBody(bodyId);
     if (!body) return;
-    body.radius = Math.max(0, radius);
+    const shape = hole === null || hole === undefined ? body : body.holes?.[hole];
+    if (!shape) return;
+    shape.radius = Math.max(0, radius);
     this.rebuildBody(body);
+  }
+
+  /** Effective radius of every corner (its override, or the outline default), parallel
+   *  to the outline's control polygon. `hole` selects a hole; null/absent = the outer. */
+  bodyCornerRadii(body: Body, hole?: number | null): number[] {
+    const shape = hole === null || hole === undefined ? body : body.holes?.[hole];
+    const ctrl = this.controlListOf(body, hole);
+    if (!shape || !ctrl) return [];
+    return ctrl.map((_, i) => {
+      const r = shape.radii?.[i];
+      return typeof r === "number" ? r : shape.radius;
+    });
+  }
+
+  /**
+   * Override one corner's radius / margin (clamped ≥ 0) on the outer outline or hole
+   * `hole`, or clear the override back to the outline default with `null`, then
+   * rebuild. The override array parallels the control polygon and is dropped entirely
+   * once no corner is overridden any more.
+   */
+  setBodyCornerRadius(bodyId: number, index: number, radius: number | null, hole?: number | null): void {
+    const body = this.getBody(bodyId);
+    if (!body) return;
+    const shape = hole === null || hole === undefined ? body : body.holes?.[hole];
+    const ctrl = this.controlListOf(body, hole);
+    if (!shape || !ctrl || index < 0 || index >= ctrl.length) return;
+    const src = shape.radii ?? [];
+    const radii = ctrl.map((_, i) => (typeof src[i] === "number" ? src[i] : null));
+    radii[index] = radius === null ? null : Math.max(0, radius);
+    if (radii.some((r) => r !== null)) shape.radii = radii;
+    else delete shape.radii;
+    this.rebuildBody(body);
+  }
+
+  /** World positions of a hole's control vertices (like `bodyControlWorld`, for holes). */
+  bodyHoleControlWorld(body: Body, hole: number): Vec2[] {
+    const h = body.holes?.[hole];
+    if (!h) return [];
+    return h.controlLocal.map((p) => add(body.pos, rotate(p, body.angle)));
   }
 
   addJoint(bodyId: number, worldPos: Vec2): Joint {
@@ -826,8 +1022,9 @@ export class Scene {
       }
       case "vertex": {
         const b = this.getBody(ref.bodyId);
-        if (!b || ref.index < 0 || ref.index >= b.controlLocal.length) return null;
-        return { kind: "point", p: this.bodyControlWorld(b)[ref.index] };
+        const ctrl = b ? this.controlListOf(b, ref.hole ?? null) : null;
+        if (!b || !ctrl || ref.index < 0 || ref.index >= ctrl.length) return null;
+        return { kind: "point", p: add(b.pos, rotate(ctrl[ref.index], b.angle)) };
       }
       case "bodyPoint": {
         const b = this.getBody(ref.bodyId);
@@ -845,9 +1042,11 @@ export class Scene {
       }
       case "edge": {
         const b = this.getBody(ref.bodyId);
-        if (!b || ref.index < 0 || ref.index >= b.controlLocal.length) return null;
-        const verts = this.bodyControlWorld(b);
-        return { kind: "line", a: verts[ref.index], b: verts[(ref.index + 1) % verts.length] };
+        const ctrl = b ? this.controlListOf(b, ref.hole ?? null) : null;
+        // A 1-point outline (a disk hole) has no edges to reference.
+        if (!b || !ctrl || ctrl.length < 2 || ref.index < 0 || ref.index >= ctrl.length) return null;
+        const w = (i: number) => add(b.pos, rotate(ctrl[i], b.angle));
+        return { kind: "line", a: w(ref.index), b: w((ref.index + 1) % ctrl.length) };
       }
       case "guidePoint": {
         const g = this.getGuide(ref.guideId);
@@ -942,12 +1141,18 @@ export class Scene {
    * Keep vertex/edge measurement refs pointing at the same geometry across a control
    * vertex insert (`delta = 1` at `at`) or removal (`delta = -1`): later indices shift;
    * a ref *on* a removed vertex/edge loses its subject, so its measurement is dropped.
+   * `hole` scopes the shift to one outline (a hole's, or the outer when null).
    */
-  private shiftMeasureIndices(bodyId: number, at: number, delta: 1 | -1): void {
+  private shiftMeasureIndices(bodyId: number, at: number, delta: 1 | -1, hole: number | null = null): void {
+    const affected = (ref: MeasureRef | null): ref is MeasureRef & { index: number } =>
+      !!ref &&
+      (ref.kind === "vertex" || ref.kind === "edge") &&
+      ref.bodyId === bodyId &&
+      (ref.hole ?? null) === hole;
     const gone = new Set<number>();
     for (const m of this.measurements) {
       for (const ref of [m.refA, m.refB]) {
-        if ((ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) continue;
+        if (!affected(ref)) continue;
         if (delta === -1) {
           if (ref.index === at) gone.add(m.id);
           else if (ref.index > at) ref.index--;
@@ -960,7 +1165,7 @@ export class Scene {
     const cGone = new Set<number>();
     for (const c of this.sketch) {
       for (const ref of [c.refA, c.refB]) {
-        if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) continue;
+        if (!affected(ref)) continue;
         if (delta === -1) {
           if (ref.index === at) cGone.add(c.id);
           else if (ref.index > at) ref.index--;
@@ -1067,9 +1272,13 @@ export class Scene {
     const body = this.getBody(bodyId);
     if (!body || !(factor > 0) || factor === 1) return;
     body.controlLocal = body.controlLocal.map((p) => scale(p, factor));
-    if (body.holesLocal)
-      body.holesLocal = body.holesLocal.map((loop) => loop.map((p) => scale(p, factor)));
     body.radius *= factor;
+    if (body.radii) body.radii = body.radii.map((r) => (typeof r === "number" ? r * factor : r));
+    body.holes?.forEach((h) => {
+      h.controlLocal = h.controlLocal.map((p) => scale(p, factor));
+      h.radius *= factor;
+      if (h.radii) h.radii = h.radii.map((r) => (typeof r === "number" ? r * factor : r));
+    });
     const attached = this.joints.filter((j) => j.bodyId === bodyId);
     for (const j of attached) j.local = scale(j.local, factor);
     this.rebuildBody(body); // re-anchors joints at their (already scaled) world positions
@@ -1212,22 +1421,28 @@ export class Scene {
     if (!j) return;
     if (j.bodyId !== null) {
       const body = this.getBody(j.bodyId)!;
-      const vi = this.coincidentVertexIndex(body, this.jointWorld(j));
-      if (vi >= 0) {
-        this.moveBodyVertex(body.id, vi, delta);
+      const v = this.coincidentVertexIndex(body, this.jointWorld(j));
+      if (v) {
+        this.moveBodyVertex(body.id, v.index, delta, v.hole);
         return;
       }
     }
     this.shiftJoint(j, delta);
   }
 
-  /** Index of the control vertex exactly coincident with world point `p`, or -1. */
-  private coincidentVertexIndex(body: Body, p: Vec2): number {
+  /** The control vertex (outer, or of any hole) exactly coincident with `p`, or null. */
+  private coincidentVertexIndex(body: Body, p: Vec2): { index: number; hole: number | null } | null {
     const ctrl = this.bodyControlWorld(body);
     for (let i = 0; i < ctrl.length; i++) {
-      if (dist(ctrl[i], p) < VERTEX_LINK_EPS) return i;
+      if (dist(ctrl[i], p) < VERTEX_LINK_EPS) return { index: i, hole: null };
     }
-    return -1;
+    for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
+      const hc = this.bodyHoleControlWorld(body, hi);
+      for (let i = 0; i < hc.length; i++) {
+        if (dist(hc[i], p) < VERTEX_LINK_EPS) return { index: i, hole: hi };
+      }
+    }
+    return null;
   }
 
   /**
@@ -1292,7 +1507,10 @@ export class Scene {
     }
     // Reflect the control polygon in world space; reverse it to preserve the winding.
     const ctrlWorld = this.bodyControlWorld(body).map(reflect).reverse();
-    const holesWorld = this.bodyHolesWorld(body).map((loop) => loop.map(reflect).reverse());
+    // Hole control polygons reflect + reverse the same way (their radii reverse below).
+    const holeCtrlWorld = (body.holes ?? []).map((_, hi) =>
+      this.bodyHoleControlWorld(body, hi).map(reflect).reverse()
+    );
     const attached = this.joints.filter((j) => j.bodyId === bodyId);
     const jointWorlds = new Map(attached.map((j) => [j.id, reflect(this.jointWorld(j))]));
     const owned = new Set(attached.map((j) => j.id));
@@ -1304,7 +1522,13 @@ export class Scene {
     // re-anchor joints to their now-reflected world positions.
     body.angle = 0;
     body.controlLocal = ctrlWorld.map((p) => sub(p, c));
-    if (body.holesLocal) body.holesLocal = holesWorld.map((loop) => loop.map((p) => sub(p, c)));
+    // The reversal renumbers the corners (vertex i → n−1−i), so per-corner radius
+    // overrides reverse with them to stay on the same physical corner.
+    if (body.radii) body.radii = [...body.radii].reverse();
+    body.holes?.forEach((h, hi) => {
+      h.controlLocal = holeCtrlWorld[hi].map((p) => sub(p, c));
+      if (h.radii) h.radii = [...h.radii].reverse();
+    });
     for (const j of attached) j.local = sub(jointWorlds.get(j.id)!, c);
     this.rebuildBody(body);
     // The reversal renumbered the control polygon, so vertex/edge refs (sketch constraints
@@ -1314,9 +1538,12 @@ export class Scene {
     // the geometry to satisfy the wrong element. (Reflection itself preserves every
     // constraint kind: H stays H, V stays V, parallel/perpendicular/equal/coincident and
     // distances are all reflection-invariant.)
-    const n = body.controlLocal.length;
     const remap = (ref: MeasureRef | null): void => {
       if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) return;
+      // Each outline reversed independently, so a ref remaps within its own outline.
+      const ctrl = this.controlListOf(body, ref.hole ?? null);
+      if (!ctrl) return;
+      const n = ctrl.length;
       ref.index = ref.kind === "vertex" ? n - 1 - ref.index : (2 * n - 2 - ref.index) % n;
     };
     for (const m of this.measurements) {
@@ -1694,8 +1921,14 @@ export class Scene {
       bodies: bodies.map((b) => ({
         tmp: b.id,
         controlWorld: this.bodyControlWorld(b).map(clone),
-        holesWorld: this.bodyHolesWorld(b),
+        holes: (b.holes ?? []).map((h, hi) => ({
+          control: this.bodyHoleControlWorld(b, hi),
+          radius: h.radius,
+          radii: h.radii ? [...h.radii] : undefined,
+          round: h.round,
+        })),
         radius: b.radius,
+        radii: b.radii ? [...b.radii] : undefined,
         round: b.round,
         color: b.color,
         grounded: b.grounded,
@@ -1734,7 +1967,8 @@ export class Scene {
         b.controlWorld.map((p) => add(p, offset)),
         b.radius,
         b.round,
-        (b.holesWorld ?? []).map((loop) => loop.map((p) => add(p, offset)))
+        (b.holes ?? []).map((h) => ({ ...h, control: h.control.map((p) => add(p, offset)) })),
+        b.radii // paste keeps per-corner radius overrides
       );
       if (body.local.length < 3) return null;
       body.color = b.color; // paste keeps the source body's colour
@@ -2138,9 +2372,16 @@ export class Scene {
         sb.controlLocal = db.controlLocal.map((p) => vec(p.x, p.y));
         sb.local = db.local.map((p) => vec(p.x, p.y));
         sb.radius = db.radius;
+        if (db.radii) sb.radii = [...db.radii];
+        else delete sb.radii;
         sb.round = db.round;
-        if (db.holesLocal?.length) sb.holesLocal = db.holesLocal.map((l) => l.map((p) => vec(p.x, p.y)));
-        else delete sb.holesLocal;
+        if (db.holes?.length) {
+          sb.holes = cloneBodyHoles(db.holes);
+          sb.holesLocal = (db.holesLocal ?? []).map((l) => l.map((p) => vec(p.x, p.y)));
+        } else {
+          delete sb.holes;
+          delete sb.holesLocal;
+        }
         sb.invMass = db.invMass;
         sb.invInertia = db.invInertia;
         sb.color = db.color;
@@ -2154,6 +2395,7 @@ export class Scene {
           controlLocal: db.controlLocal.map((p) => vec(p.x, p.y)),
           radius: db.radius,
           round: db.round,
+          ...(db.radii ? { radii: [...db.radii] } : {}),
           local: db.local.map((p) => vec(p.x, p.y)),
           pos: xf(db.pos),
           angle: db.angle + t.angle,
@@ -2162,7 +2404,10 @@ export class Scene {
           color: db.color,
           grounded: false,
         };
-        if (db.holesLocal?.length) sb.holesLocal = db.holesLocal.map((l) => l.map((p) => vec(p.x, p.y)));
+        if (db.holes?.length) {
+          sb.holes = cloneBodyHoles(db.holes);
+          sb.holesLocal = (db.holesLocal ?? []).map((l) => l.map((p) => vec(p.x, p.y)));
+        }
         this.bodies.push(sb);
       }
       bodyIdMap.set(db.id, sb.id);
@@ -2564,18 +2809,54 @@ export class Scene {
     this.bodies = data.bodies.map((b) => {
       const local = b.local.map((p) => vec(p.x, p.y));
       // Older files (< v5) have no control polygon: treat the saved polygon as a sharp control.
-      const src = b as Body & { controlLocal?: Vec2[]; radius?: number; round?: RoundMode; grounded?: boolean };
+      const src = b as Body & { controlLocal?: Vec2[]; radius?: number; radii?: (number | null)[]; round?: RoundMode; grounded?: boolean };
       const controlLocal = src.controlLocal ? src.controlLocal.map((p) => vec(p.x, p.y)) : local.map((p) => vec(p.x, p.y));
-      // Hole loops arrived in v13; older files simply have none. Keep only valid loops.
-      const holesLocal = Array.isArray(src.holesLocal)
-        ? src.holesLocal
-            .filter((loop) => Array.isArray(loop) && loop.length >= 3)
-            .map((loop) => loop.map((p) => vec(p.x, p.y)))
-        : [];
+      // Per-corner radius overrides arrived in v15; older files simply have none.
+      // Sanitize: entries must be non-negative numbers or null, one per control vertex.
+      const sanitizeRadii = (raw: unknown, n: number): (number | null)[] => {
+        let rr = Array.isArray(raw)
+          ? raw.slice(0, n).map((r) => (typeof r === "number" && r >= 0 ? r : null))
+          : [];
+        while (rr.length > 0 && rr.length < n) rr.push(null);
+        if (!rr.some((r) => r !== null)) rr = [];
+        return rr;
+      };
+      const radii = sanitizeRadii(src.radii, controlLocal.length);
+      // Editable hole shapes arrived in v16. Older files (v13–v15) carry only baked
+      // `holesLocal` loops — each becomes a radius-0 hole control polygon, so legacy
+      // holes load as editable ones with exactly the same outline.
+      let holes: BodyHole[] = [];
+      if (Array.isArray(src.holes)) {
+        holes = src.holes
+          .filter((h) => h && Array.isArray(h.controlLocal) && h.controlLocal.length >= 1)
+          .map((h) => {
+            const out: BodyHole = {
+              controlLocal: h.controlLocal.map((p) => vec(p.x, p.y)),
+              radius: typeof h.radius === "number" && h.radius >= 0 ? h.radius : 0,
+            };
+            if (h.round === "offset") out.round = "offset";
+            const hr = sanitizeRadii(h.radii, out.controlLocal.length);
+            if (hr.length) out.radii = hr;
+            return out;
+          });
+      } else if (Array.isArray(src.holesLocal)) {
+        holes = src.holesLocal
+          .filter((loop) => Array.isArray(loop) && loop.length >= 3)
+          .map((loop) => ({ controlLocal: loop.map((p) => vec(p.x, p.y)), radius: 0 }));
+      }
       // Grounded bodies arrived in v10; older files simply have none.
       const out: Body = { ...b, pos: vec(b.pos.x, b.pos.y), local, controlLocal, radius: src.radius ?? 0, round: src.round ?? "fillet", grounded: src.grounded ?? false };
-      if (holesLocal.length) out.holesLocal = holesLocal;
-      else delete out.holesLocal;
+      if (radii.length) out.radii = radii;
+      else delete out.radii;
+      if (holes.length) {
+        out.holes = holes;
+        // Re-derive the sampled loops from the (sanitized) controls rather than trusting
+        // the file's copy — they can never disagree with the shapes this way.
+        out.holesLocal = holes.map((h) => deriveHoleOutline(h.controlLocal, h));
+      } else {
+        delete out.holes;
+        delete out.holesLocal;
+      }
       return out;
     });
     this.joints = data.joints.map((j) => ({ ...j, local: vec(j.local.x, j.local.y) }));
@@ -2754,7 +3035,8 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
     case "edge":
       return (
         a.bodyId === (b as { bodyId: number }).bodyId &&
-        a.index === (b as { index: number }).index
+        a.index === (b as { index: number }).index &&
+        (a.hole ?? null) === ((b as { hole?: number }).hole ?? null)
       );
     case "rail":
       return a.sliderId === (b as { sliderId: number }).sliderId;

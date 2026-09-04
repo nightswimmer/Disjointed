@@ -72,16 +72,24 @@ interface SolveItem {
   run(pos: Vec2[], apply: boolean): number;
 }
 
-function vertexKey(bodyId: number, index: number): string {
-  return `v:${bodyId}:${index}`;
+function vertexKey(bodyId: number, index: number, hole: number | null = null): string {
+  return hole === null ? `v:${bodyId}:${index}` : `v:${bodyId}:${index}:${hole}`;
+}
+
+/** The control polygon a vertex/edge ref names: a hole's, or the body's outer one. */
+function refControl(scene: Scene, bodyId: number, hole: number | null): Vec2[] | null {
+  const b = scene.getBody(bodyId);
+  if (!b) return null;
+  return hole === null ? b.controlLocal : b.holes?.[hole]?.controlLocal ?? null;
 }
 
 /** Variable key for a point ref, or null when the ref can't be a solver variable. */
 function pointVarKey(scene: Scene, ref: MeasureRef): string | null {
   if (ref.kind === "vertex") {
-    const b = scene.getBody(ref.bodyId);
-    return b && ref.index >= 0 && ref.index < b.controlLocal.length
-      ? vertexKey(ref.bodyId, ref.index)
+    const hole = ref.hole ?? null;
+    const ctrl = refControl(scene, ref.bodyId, hole);
+    return ctrl && ref.index >= 0 && ref.index < ctrl.length
+      ? vertexKey(ref.bodyId, ref.index, hole)
       : null;
   }
   if (ref.kind === "joint") {
@@ -95,6 +103,12 @@ function pointVarKey(scene: Scene, ref: MeasureRef): string | null {
       for (let i = 0; i < ctrl.length; i++) {
         if (dist(ctrl[i], w) < VERTEX_LINK_EPS) return vertexKey(body.id, i);
       }
+      for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
+        const hc = scene.bodyHoleControlWorld(body, hi);
+        for (let i = 0; i < hc.length; i++) {
+          if (dist(hc[i], w) < VERTEX_LINK_EPS) return vertexKey(body.id, i, hi);
+        }
+      }
     }
     return `j:${ref.jointId}`;
   }
@@ -107,11 +121,12 @@ function pointVarKey(scene: Scene, ref: MeasureRef): string | null {
 /** Variable keys for a line ref's two endpoints, or null. */
 function lineVarKeys(scene: Scene, ref: MeasureRef): [string, string] | null {
   if (ref.kind === "edge") {
-    const b = scene.getBody(ref.bodyId);
-    if (!b || ref.index < 0 || ref.index >= b.controlLocal.length) return null;
+    const hole = ref.hole ?? null;
+    const ctrl = refControl(scene, ref.bodyId, hole);
+    if (!ctrl || ctrl.length < 2 || ref.index < 0 || ref.index >= ctrl.length) return null;
     return [
-      vertexKey(ref.bodyId, ref.index),
-      vertexKey(ref.bodyId, (ref.index + 1) % b.controlLocal.length),
+      vertexKey(ref.bodyId, ref.index, hole),
+      vertexKey(ref.bodyId, (ref.index + 1) % ctrl.length, hole),
     ];
   }
   if (ref.kind === "rail") {
@@ -133,10 +148,15 @@ function lineVarKeys(scene: Scene, ref: MeasureRef): [string, string] | null {
 function varWorld(scene: Scene, key: string): Vec2 | null {
   const parts = key.split(":");
   if (parts[0] === "v") {
-    const body = scene.getBody(Number(parts[1]));
+    const bodyId = Number(parts[1]);
     const index = Number(parts[2]);
-    if (!body || index < 0 || index >= body.controlLocal.length) return null;
-    return scene.bodyControlWorld(body)[index];
+    const hole = parts.length > 3 ? Number(parts[3]) : null;
+    const body = scene.getBody(bodyId);
+    const ctrl = refControl(scene, bodyId, hole);
+    if (!body || !ctrl || index < 0 || index >= ctrl.length) return null;
+    return hole === null
+      ? scene.bodyControlWorld(body)[index]
+      : scene.bodyHoleControlWorld(body, hole)[index];
   }
   if (parts[0] === "g") {
     const g = scene.getGuide(Number(parts[1]));
@@ -525,8 +545,14 @@ function applySystem(scene: Scene, sys: System): void {
     const delta = sub(sys.pos[i], cur);
     if (len(delta) < EPS) continue;
     const parts = key.split(":");
-    if (parts[0] === "v") scene.moveBodyVertex(Number(parts[1]), Number(parts[2]), delta);
-    else if (parts[0] === "g") {
+    if (parts[0] === "v") {
+      scene.moveBodyVertex(
+        Number(parts[1]),
+        Number(parts[2]),
+        delta,
+        parts.length > 3 ? Number(parts[3]) : null
+      );
+    } else if (parts[0] === "g") {
       scene.moveGuidePoint(Number(parts[1]), parts[2] as "a" | "b", sys.pos[i]);
     } else scene.moveJoint(Number(parts[1]), delta);
   }
@@ -583,11 +609,15 @@ export function solveSketch(scene: Scene, anchors?: ReadonlySet<string>): Sketch
 
 // --- drag anchoring ------------------------------------------------------------
 
-/** Anchor keys pinning a whole body's shape: every control vertex + every joint on it. */
+/** Anchor keys pinning a whole body's shape: every control vertex (outer + hole) +
+ *  every joint on it. */
 export function anchorVarsForBody(scene: Scene, bodyId: number): string[] {
   const body = scene.getBody(bodyId);
   if (!body) return [];
   const keys = body.controlLocal.map((_, i) => vertexKey(bodyId, i));
+  body.holes?.forEach((h, hi) => {
+    for (let i = 0; i < h.controlLocal.length; i++) keys.push(vertexKey(bodyId, i, hi));
+  });
   for (const j of scene.joints) {
     if (j.bodyId !== bodyId) continue;
     const k = pointVarKey(scene, { kind: "joint", jointId: j.id });
@@ -612,9 +642,9 @@ export function anchorVarForGuidePoint(guideId: number, which: "a" | "b"): strin
   return `g:${guideId}:${which}`;
 }
 
-/** Anchor key pinning one body control vertex. */
-export function anchorVarForVertex(bodyId: number, index: number): string {
-  return vertexKey(bodyId, index);
+/** Anchor key pinning one body control vertex (of the outer outline, or hole `hole`). */
+export function anchorVarForVertex(bodyId: number, index: number, hole: number | null = null): string {
+  return vertexKey(bodyId, index, hole);
 }
 
 /**

@@ -8,7 +8,7 @@
  */
 import { parseDxf, nestLoops, loopSignedArea } from "../src/dxf";
 import { Scene, SceneData } from "../src/model";
-import { Vec2, dist, polygonCentroid } from "../src/geometry";
+import { Vec2, dist, polygonCentroid, filletPolygon } from "../src/geometry";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail: string) {
@@ -29,8 +29,9 @@ const insunits = (code: number) => `9\n$INSUNITS\n70\n${code}\n`;
     "0\nLWPOLYLINE\n90\n4\n70\n1\n10\n0\n20\n0\n10\n10\n20\n0\n10\n10\n20\n10\n10\n0\n20\n10\n";
   const res = parseDxf(dxf(square));
   check("closed LWPOLYLINE becomes one loop", res.loops.length === 1, `${res.loops.length} loops`);
-  const loop = res.loops[0] ?? [];
+  const loop = res.loops[0]?.pts ?? [];
   check("square keeps its 4 corners", loop.length === 4, `${loop.length} points`);
+  check("no arcs → no fillet reconstruction", res.loops[0]?.fillet === null, `${res.loops[0]?.fillet}`);
   const xs = loop.map((p) => p.x);
   const ys = loop.map((p) => p.y);
   check(
@@ -49,14 +50,61 @@ const insunits = (code: number) => `9\n$INSUNITS\n70\n${code}\n`;
   const dee = "0\nLWPOLYLINE\n90\n2\n70\n1\n10\n0\n20\n0\n10\n10\n20\n0\n42\n1\n";
   const res = parseDxf(dxf(dee));
   check("bulge polyline becomes one loop", res.loops.length === 1, `${res.loops.length} loops`);
-  const loop = res.loops[0] ?? [];
+  const loop = res.loops[0]?.pts ?? [];
   check("semicircle bulge is sampled", loop.length > 12, `${loop.length} points`);
+  check("a half-circle arc is no corner fillet", res.loops[0]?.fillet === null, `${res.loops[0]?.fillet}`);
   let worstR = 0;
   for (const p of loop) worstR = Math.max(worstR, Math.abs(dist(p, { x: 5, y: 0 }) - 5));
   check("all points sit on the arc's circle", worstR < 1e-9, `max radius error ${worstR.toExponential(2)}`);
   // Positive bulge runs CCW (y-up): the return arc from (10,0) to (0,0) passes above.
   const maxY = Math.max(...loop.map((p) => p.y));
   check("positive bulge arcs counter-clockwise", Math.abs(maxY - 5) < 1e-9, `apex y ${maxY.toFixed(4)}`);
+}
+
+// --- fillet reconstruction ----------------------------------------------------
+{
+  // A 40×20 rounded rectangle (corner r = 5): 8 vertices, straight edges alternating
+  // with 90° bulge arcs (bulge = tan(22.5°)), CCW in DXF's y-up frame.
+  const b = Math.tan(Math.PI / 8).toFixed(15);
+  const v = (x: number, y: number, bulge?: string) =>
+    `10\n${x}\n20\n${y}\n` + (bulge ? `42\n${bulge}\n` : "");
+  const rrect =
+    "0\nLWPOLYLINE\n90\n8\n70\n1\n" +
+    v(5, 0) + v(35, 0, b) + v(40, 5) + v(40, 15, b) +
+    v(35, 20) + v(5, 20, b) + v(0, 15) + v(0, 5, b);
+  const res = parseDxf(dxf(rrect));
+  const fillet = res.loops[0]?.fillet;
+  check("rounded rectangle reconstructs as fillets", !!fillet, fillet ? "reconstructed" : "null");
+  check("four sharp control corners", fillet?.control.length === 4, `${fillet?.control.length} corners`);
+  const corners = [{ x: 40, y: 0 }, { x: 40, y: 20 }, { x: 0, y: 20 }, { x: 0, y: 0 }];
+  const cornerErr = Math.max(
+    ...(fillet?.control.map((p) => Math.min(...corners.map((c) => dist(p, c)))) ?? [Infinity])
+  );
+  check("control corners sit at the sharp rectangle corners", cornerErr < 1e-9, `max error ${cornerErr.toExponential(2)}`);
+  check("every corner carries radius 5", (fillet?.radii ?? []).every((r) => Math.abs(r - 5) < 1e-9),
+    `radii ${fillet?.radii.map((r) => r.toFixed(3)).join("/")}`);
+  // Regenerating the fillet from the reconstruction reproduces the shape (both the
+  // regenerated and the sampled outline are inscribed approximations of the exact
+  // rounded rectangle, at different arc sampling densities).
+  const regen = filletPolygon(fillet!.control, fillet!.radii);
+  const exact = 40 * 20 - (4 - Math.PI) * 25;
+  const aRegen = Math.abs(loopSignedArea(regen));
+  const aSampled = Math.abs(loopSignedArea(res.loops[0].pts));
+  check("regenerated fillet reproduces the shape",
+    Math.abs(aRegen - exact) < exact * 0.005 && Math.abs(aSampled - exact) < exact * 0.005,
+    `area ${aRegen.toFixed(2)} / ${aSampled.toFixed(2)} vs exact ${exact.toFixed(2)}`);
+}
+{
+  // The same corner arc endpoints but a shallower bulge — not tangent to the edges,
+  // so nothing converts and the loop stays purely sampled.
+  const v = (x: number, y: number, bulge?: string) =>
+    `10\n${x}\n20\n${y}\n` + (bulge ? `42\n${bulge}\n` : "");
+  const bad =
+    "0\nLWPOLYLINE\n90\n8\n70\n1\n" +
+    v(5, 0) + v(35, 0, "0.2") + v(40, 5) + v(40, 15, "0.2") +
+    v(35, 20) + v(5, 20, "0.2") + v(0, 15) + v(0, 5, "0.2");
+  const res = parseDxf(dxf(bad));
+  check("non-tangent arcs don't reconstruct", res.loops[0]?.fillet === null, `${res.loops[0]?.fillet}`);
 }
 
 // --- LINE chaining ----------------------------------------------------------
@@ -69,7 +117,7 @@ const insunits = (code: number) => `9\n$INSUNITS\n70\n${code}\n`;
   const res = parseDxf(dxf(tri));
   check("three LINEs chain into one loop", res.loops.length === 1 && res.skippedPaths === 0,
     `${res.loops.length} loops, ${res.skippedPaths} skipped`);
-  check("chained triangle has 3 points", (res.loops[0] ?? []).length === 3, `${res.loops[0]?.length} points`);
+  check("chained triangle has 3 points", (res.loops[0]?.pts ?? []).length === 3, `${res.loops[0]?.pts.length} points`);
 }
 
 // --- ARC + LINE chaining ----------------------------------------------------
@@ -80,7 +128,7 @@ const insunits = (code: number) => `9\n$INSUNITS\n70\n${code}\n`;
     "0\nLINE\n10\n0\n20\n0\n11\n10\n21\n0\n";
   const res = parseDxf(dxf(half));
   check("ARC + LINE chain into one loop", res.loops.length === 1, `${res.loops.length} loops`);
-  const loop = res.loops[0] ?? [];
+  const loop = res.loops[0]?.pts ?? [];
   const above = loop.filter((p) => p.y > 1).length;
   check("arc points sampled above the chord", above > 8, `${above} points with y > 1`);
   let worstR = 0;
@@ -91,8 +139,11 @@ const insunits = (code: number) => `9\n$INSUNITS\n70\n${code}\n`;
 // --- CIRCLE -----------------------------------------------------------------
 {
   const res = parseDxf(dxf("0\nCIRCLE\n10\n20\n20\n30\n40\n5\n"));
-  const loop = res.loops[0] ?? [];
+  const loop = res.loops[0]?.pts ?? [];
   check("CIRCLE becomes one sampled loop", res.loops.length === 1 && loop.length >= 24, `${loop.length} points`);
+  const circ = res.loops[0]?.circle;
+  check("CIRCLE reports its centre + radius", !!circ && circ.r === 5 && dist(circ.c, { x: 20, y: 30 }) < 1e-12,
+    `c (${circ?.c.x}, ${circ?.c.y}), r ${circ?.r}`);
   let worstR = 0;
   for (const p of loop) worstR = Math.max(worstR, Math.abs(dist(p, { x: 20, y: 30 }) - 5));
   check("circle points at the radius", worstR < 1e-9, `max radius error ${worstR.toExponential(2)}`);
@@ -106,8 +157,8 @@ const insunits = (code: number) => `9\n$INSUNITS\n70\n${code}\n`;
     "0\nVERTEX\n10\n0\n20\n0\n0\nVERTEX\n10\n10\n20\n0\n0\nVERTEX\n10\n10\n20\n10\n0\nVERTEX\n10\n0\n20\n10\n" +
     "0\nSEQEND\n";
   const res = parseDxf(dxf(poly));
-  check("closed POLYLINE/VERTEX becomes one loop", res.loops.length === 1 && res.loops[0].length === 4,
-    `${res.loops.length} loops, ${res.loops[0]?.length} points`);
+  check("closed POLYLINE/VERTEX becomes one loop", res.loops.length === 1 && res.loops[0].pts.length === 4,
+    `${res.loops.length} loops, ${res.loops[0]?.pts.length} points`);
 }
 
 // --- open geometry + unsupported entities ------------------------------------
@@ -151,7 +202,7 @@ const insunits = (code: number) => `9\n$INSUNITS\n70\n${code}\n`;
   scene.addBody([{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 30 }]);
   scene.unit = "in";
   const data = JSON.parse(JSON.stringify(scene.serialize())) as SceneData;
-  check("serialize writes v14 + unit", data.version === 14 && data.unit === "in",
+  check("serialize writes v16 + unit", data.version === 16 && data.unit === "in",
     `version ${data.version}, unit ${data.unit}`);
   const loaded = new Scene();
   loaded.load(data);

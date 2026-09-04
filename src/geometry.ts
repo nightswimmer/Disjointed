@@ -147,14 +147,32 @@ export function convexHull(points: Vec2[]): Vec2[] {
   return lower.concat(upper);
 }
 
+/** One corner's solved fillet: the tangent arc actually emitted (after all clamping). */
+export interface FilletArc {
+  center: Vec2;
+  /** Actual radius after clamping (may be smaller than the requested one on tight shapes). */
+  r: number;
+  /** Arc start angle and signed sweep (the "short way" around the corner). */
+  a1: number;
+  da: number;
+}
+
+/** Requested radius of corner `i` — `radius` is uniform, or per-corner when an array. */
+const cornerRadius = (radius: number | number[], i: number): number =>
+  typeof radius === "number" ? radius : radius[i] ?? 0;
+
+const maxCornerRadius = (radius: number | number[]): number =>
+  typeof radius === "number" ? radius : radius.reduce((m, r) => Math.max(m, r), 0);
+
 /**
- * Round the corners of a simple polygon in place: each corner becomes a circular arc
- * tangent to its two edges, with radius clamped so adjacent fillets don't overlap.
- * Convex and reflex (concave) corners are both handled. `radius <= 0` returns a copy.
+ * Shared fillet solver behind `filletPolygon` / `filletCornerArcs`: per-corner half
+ * interior angle + tangent length, clamped so fillets never overlap or poke through.
  */
-export function filletPolygon(verts: Vec2[], radius: number, segPerCorner = 8): Vec2[] {
+function solveFillets(
+  verts: Vec2[],
+  radius: number | number[]
+): { half: number[]; want: number[]; t: number[] } {
   const n = verts.length;
-  if (n < 3 || radius <= 0) return verts.map((v) => ({ x: v.x, y: v.y }));
 
   // Pass 1 — per-corner geometry. `half` is half the interior angle; `want` is the
   // tangent length needed for the requested radius (0 for degenerate / near-straight
@@ -162,6 +180,8 @@ export function filletPolygon(verts: Vec2[], radius: number, segPerCorner = 8): 
   const half = new Array<number>(n).fill(0);
   const want = new Array<number>(n).fill(0);
   for (let i = 0; i < n; i++) {
+    const r = cornerRadius(radius, i);
+    if (r <= 0) continue; // this corner stays sharp
     const prev = verts[(i - 1 + n) % n];
     const v = verts[i];
     const next = verts[(i + 1) % n];
@@ -170,7 +190,7 @@ export function filletPolygon(verts: Vec2[], radius: number, segPerCorner = 8): 
     const angle = Math.acos(Math.max(-1, Math.min(1, dot(u1, u2)))); // 0..π between edges
     if (angle < 1e-3 || angle > Math.PI - 1e-3) continue; // degenerate / nearly straight
     half[i] = angle / 2;
-    want[i] = radius / Math.tan(half[i]);
+    want[i] = r / Math.tan(half[i]);
   }
 
   // Pass 2 — shared-edge budget. On every edge the two corners' tangent lengths must
@@ -218,39 +238,79 @@ export function filletPolygon(verts: Vec2[], radius: number, segPerCorner = 8): 
     if (!changed) break;
   }
 
-  // Pass 3 — emit the rounded outline (arc per filleted corner).
+  return { half, want, t };
+}
+
+/** The solved arc of corner `i` (from `solveFillets` output), or null when it takes no fillet. */
+function filletArcAt(
+  verts: Vec2[],
+  i: number,
+  half: number[],
+  want: number[],
+  t: number[]
+): FilletArc | null {
+  if (want[i] === 0 || t[i] < 1e-6) return null;
+  const n = verts.length;
+  const v = verts[i];
+  const u1 = normalize(sub(verts[(i - 1 + n) % n], v));
+  const u2 = normalize(sub(verts[(i + 1) % n], v));
+  const r = t[i] * Math.tan(half[i]); // actual radius after clamping
+  const t1 = add(v, scale(u1, t[i]));
+  const t2 = add(v, scale(u2, t[i]));
+  // The fillet centre lies along the bisector of the two edge directions. That bisector
+  // points to the correct tangent-circle side for both convex corners (into the body)
+  // and reflex corners (into the notch), so no per-corner flip is needed — the "short
+  // way" arc sweep below then rounds each corner in the right direction.
+  const bis = normalize(add(u1, u2));
+  const center = add(v, scale(bis, r / Math.sin(half[i])));
+  const a1 = Math.atan2(t1.y - center.y, t1.x - center.x);
+  const a2 = Math.atan2(t2.y - center.y, t2.x - center.x);
+  let da = a2 - a1; // sweep the short way
+  while (da > Math.PI) da -= 2 * Math.PI;
+  while (da < -Math.PI) da += 2 * Math.PI;
+  return { center, r, a1, da };
+}
+
+/**
+ * Round the corners of a simple polygon in place: each corner becomes a circular arc
+ * tangent to its two edges, with radius clamped so adjacent fillets don't overlap.
+ * Convex and reflex (concave) corners are both handled. `radius` is one uniform value,
+ * or an array with one radius per corner (≤ 0 keeps that corner sharp). No positive
+ * radius returns a copy. `segPerCorner` counts segments per 180° of sweep (the default
+ * 24 samples arcs at 7.5° per segment, matching the DXF importer).
+ */
+export function filletPolygon(verts: Vec2[], radius: number | number[], segPerCorner = 24): Vec2[] {
+  const n = verts.length;
+  if (n < 3 || maxCornerRadius(radius) <= 0) return verts.map((v) => ({ x: v.x, y: v.y }));
+  const { half, want, t } = solveFillets(verts, radius);
+
+  // Emit the rounded outline (arc per filleted corner).
   const out: Vec2[] = [];
   for (let i = 0; i < n; i++) {
-    const prev = verts[(i - 1 + n) % n];
-    const v = verts[i];
-    const next = verts[(i + 1) % n];
-    if (want[i] === 0 || t[i] < 1e-6) {
-      out.push({ x: v.x, y: v.y }); // no fillet here
+    const arc = filletArcAt(verts, i, half, want, t);
+    if (!arc) {
+      out.push({ x: verts[i].x, y: verts[i].y }); // no fillet here
       continue;
     }
-    const u1 = normalize(sub(prev, v));
-    const u2 = normalize(sub(next, v));
-    const r = t[i] * Math.tan(half[i]); // actual radius after clamping
-    const t1 = add(v, scale(u1, t[i]));
-    const t2 = add(v, scale(u2, t[i]));
-    // The fillet centre lies along the bisector of the two edge directions. That bisector
-    // points to the correct tangent-circle side for both convex corners (into the body)
-    // and reflex corners (into the notch), so no per-corner flip is needed — the "short
-    // way" arc sweep below then rounds each corner in the right direction.
-    const bis = normalize(add(u1, u2));
-    const center = add(v, scale(bis, r / Math.sin(half[i])));
-    const a1 = Math.atan2(t1.y - center.y, t1.x - center.x);
-    const a2 = Math.atan2(t2.y - center.y, t2.x - center.x);
-    let da = a2 - a1; // sweep the short way
-    while (da > Math.PI) da -= 2 * Math.PI;
-    while (da < -Math.PI) da += 2 * Math.PI;
-    const steps = Math.max(1, Math.round((segPerCorner * Math.abs(da)) / Math.PI));
+    const steps = Math.max(1, Math.round((segPerCorner * Math.abs(arc.da)) / Math.PI));
     for (let s = 0; s <= steps; s++) {
-      const a = a1 + (da * s) / steps;
-      out.push({ x: center.x + r * Math.cos(a), y: center.y + r * Math.sin(a) });
+      const a = arc.a1 + (arc.da * s) / steps;
+      out.push({ x: arc.center.x + arc.r * Math.cos(a), y: arc.center.y + arc.r * Math.sin(a) });
     }
   }
   return out;
+}
+
+/**
+ * The solved fillet arc of every corner of `filletPolygon(verts, radius)` — same
+ * clamping, no sampling. `null` where a corner takes no fillet. Used by the editor to
+ * place per-corner radius handles exactly on the drawn arcs.
+ */
+export function filletCornerArcs(verts: Vec2[], radius: number | number[]): (FilletArc | null)[] {
+  const n = verts.length;
+  if (n < 3 || maxCornerRadius(radius) <= 0) return verts.map(() => null);
+  const { half, want, t } = solveFillets(verts, radius);
+  return verts.map((_, i) => filletArcAt(verts, i, half, want, t));
 }
 
 /**
@@ -258,18 +318,25 @@ export function filletPolygon(verts: Vec2[], radius: number, segPerCorner = 8): 
  * i.e. the Minkowski sum of their hull with a disk, built as the hull of circles
  * (sampled into `segments` points) placed at each point. The corners are true circular
  * arcs; `segments` only sets how finely they're sampled. Handles 1 point (a disk),
- * 2 (a stadium), or many. When `segments` is omitted it scales with `margin` so the
- * arc facets stay small (smooth) at any size.
+ * 2 (a stadium), or many. The default sampling is 48 facets per full circle (7.5° per
+ * segment, matching the fillet sampling and the DXF importer). `margin` is one uniform
+ * value, or an array with one margin per point (the hull of different-size circles;
+ * ≤ 0 keeps that point bare).
  */
-export function roundedConvexBody(points: Vec2[], margin: number, segments?: number): Vec2[] {
-  // ~1 facet per 4 world units of circumference, clamped to a sensible range.
-  const n = segments ?? Math.max(24, Math.min(96, Math.round((Math.PI * margin) / 2)));
+export function roundedConvexBody(points: Vec2[], margin: number | number[], segments?: number): Vec2[] {
+  const mAt = (i: number): number => cornerRadius(margin, i);
+  const n = segments ?? 48;
   const cloud: Vec2[] = [];
-  for (const p of points) {
+  points.forEach((p, i) => {
+    const m = mAt(i);
+    if (m <= 0) {
+      cloud.push({ x: p.x, y: p.y });
+      return;
+    }
     for (let j = 0; j < n; j++) {
       const a = (j / n) * Math.PI * 2;
-      cloud.push({ x: p.x + margin * Math.cos(a), y: p.y + margin * Math.sin(a) });
+      cloud.push({ x: p.x + m * Math.cos(a), y: p.y + m * Math.sin(a) });
     }
-  }
+  });
   return convexHull(cloud);
 }

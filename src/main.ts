@@ -2,6 +2,8 @@ import "./style.css";
 import {
   Scene,
   SceneData,
+  Body,
+  RoundMode,
   SelectionClip,
   ComponentInstance,
   InstanceTransform,
@@ -25,7 +27,7 @@ import {
   anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
 } from "./sketch";
 import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
-import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, roundedConvexBody, distToSegment, distToLine } from "./geometry";
+import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
@@ -364,7 +366,10 @@ let pan: { lastScreen: Vec2 } | null = null;
 type LeftDrag =
   | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean }
   | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean }
-  | { kind: "vertex"; bodyId: number; index: number; grabOffset: Vec2; moved: boolean }
+  // `hole` scopes a vertex/fillet drag to one of the body's holes (null = the outer outline).
+  | { kind: "vertex"; bodyId: number; index: number; hole: number | null; grabOffset: Vec2; moved: boolean }
+  // Per-corner radius handle: the cursor's position maps straight to that corner's radius.
+  | { kind: "fillet"; bodyId: number; index: number; hole: number | null; moved: boolean }
   | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean }
   // Whole-guideline move (angle preserved; anchored on its point `a`)…
   | { kind: "guide"; id: number; grabOffset: Vec2; moved: boolean }
@@ -389,7 +394,12 @@ let leftDrag: LeftDrag | null = null;
 
 /** Current world position of a drag's anchor (the point that snaps to the grid). */
 function dragAnchorWorld(d: LeftDrag): Vec2 {
-  if (d.kind === "vertex") return scene.bodyControlWorld(scene.getBody(d.bodyId)!)[d.index];
+  if (d.kind === "vertex") {
+    const body = scene.getBody(d.bodyId)!;
+    return d.hole === null
+      ? scene.bodyControlWorld(body)[d.index]
+      : scene.bodyHoleControlWorld(body, d.hole)[d.index];
+  }
   if (d.kind === "body") return add(scene.getBody(d.id)!.pos, d.anchorOffset);
   if (d.kind === "measureLabel") {
     return scene.measurementLabelPos(scene.getMeasurement(d.id)!) ?? vec(0, 0);
@@ -402,6 +412,13 @@ function dragAnchorWorld(d: LeftDrag): Vec2 {
   if (d.kind === "rigid") return d.driver.target; // solver-driven; no snap anchor
   if (d.kind === "guide") return scene.getGuide(d.id)!.a;
   if (d.kind === "guidePoint") return scene.getGuide(d.id)![d.which];
+  // Fillet drags map the cursor to a radius directly (never snapped); the corner anchors.
+  if (d.kind === "fillet") {
+    const body = scene.getBody(d.bodyId)!;
+    return d.hole === null
+      ? scene.bodyControlWorld(body)[d.index]
+      : scene.bodyHoleControlWorld(body, d.hole)[d.index];
+  }
   return scene.jointWorld(scene.getJoint(d.id)!);
 }
 
@@ -803,7 +820,7 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round corners · Delete to remove.",
+  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
@@ -1437,27 +1454,68 @@ async function importDxfFile(file: File, at: Vec2): Promise<void> {
     if (mode === "sim") setMode("draw");
     const factor = res.unitToMm !== null ? res.unitToMm / UNIT_TO_MM[scene.unit] : 1;
     // Scale into working units and flip y (DXF is y-up, the canvas world is y-down).
-    const loops = res.loops.map((loop) => loop.map((p) => vec(p.x * factor, -p.y * factor)));
+    // Reconstructed fillet controls, radii and circles transform the same way (radii
+    // and circle radius by the positive scale factor; the flip doesn't affect them).
+    const xf = (p: Vec2): Vec2 => vec(p.x * factor, -p.y * factor);
+    const loops = res.loops.map((loop) => ({
+      pts: loop.pts.map(xf),
+      fillet: loop.fillet
+        ? { control: loop.fillet.control.map(xf), radii: loop.fillet.radii.map((r) => r * factor) }
+        : null,
+      circle: loop.circle ? { c: xf(loop.circle.c), r: loop.circle.r * factor } : null,
+    }));
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const loop of loops)
-      for (const p of loop) {
+      for (const p of loop.pts) {
         minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
         maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
       }
     const off = sub(snap(at), vec((minX + maxX) / 2, (minY + maxY) / 2));
     // Nest the loops: a loop inside another becomes a hole of it (an island inside a
     // hole starts a new solid), so a plate with cut-outs arrives as ONE body.
-    const solids = nestLoops(loops);
+    const solids = nestLoops(loops.map((l) => l.pts));
+    const byPts = new Map(loops.map((l) => [l.pts, l])); // outer loop → its arc metadata
     const bodyIds = new Set<number>();
     for (const s of solids) {
-      const outer = s.outer.map((p) => add(p, off));
-      if (loopSignedArea(outer) < 0) outer.reverse(); // consistent winding for later corner rounding
-      const holes = s.holes.map((loop) => {
-        const h = loop.map((p) => add(p, off));
-        if (loopSignedArea(h) > 0) h.reverse(); // holes wound opposite the outer, by convention
+      const meta = byPts.get(s.outer);
+      const holes = s.holes.map((loopPts) => {
+        const hm = byPts.get(loopPts);
+        if (hm?.circle) {
+          // A circular cut-out imports as a parametric disk hole (centre + radius) —
+          // drag its rim handle to resize it, its centre node to move it.
+          return { control: [add(hm.circle.c, off)], radius: hm.circle.r, round: "offset" as const };
+        }
+        if (hm?.fillet) {
+          // Tangent corner arcs stay parametric on holes too (control + per-corner radii).
+          return {
+            control: hm.fillet.control.map((p) => add(p, off)),
+            radii: hm.fillet.radii.map((r) => (r > 0 ? r : null)),
+          };
+        }
+        const h = loopPts.map((p) => add(p, off));
+        if (loopSignedArea(h) > 0) h.reverse(); // sampled holes wound opposite the outer, by convention
         return h;
       });
-      const body = scene.addBody(outer, 0, "fillet", holes);
+      let body;
+      if (meta?.circle) {
+        // A circle imports as a parametric disk: one control point + offset radius,
+        // so its rim handle resizes it like any other round body.
+        body = scene.addBody([add(meta.circle.c, off)], meta.circle.r, "offset", holes);
+      } else if (meta?.fillet) {
+        // Tangent corner arcs come back as sharp control corners + per-corner radii —
+        // the fillet regenerates the same arcs, and each corner stays editable.
+        let control = meta.fillet.control.map((p) => add(p, off));
+        let radii: (number | null)[] = meta.fillet.radii.map((r) => (r > 0 ? r : null));
+        if (loopSignedArea(control) < 0) {
+          control = [...control].reverse(); // consistent winding for the corner rounding
+          radii = [...radii].reverse(); // ...with the overrides on the renumbered corners
+        }
+        body = scene.addBody(control, 0, "fillet", holes, radii);
+      } else {
+        const outer = s.outer.map((p) => add(p, off));
+        if (loopSignedArea(outer) < 0) outer.reverse(); // consistent winding for later corner rounding
+        body = scene.addBody(outer, 0, "fillet", holes);
+      }
       body.color = defaultBodyColor;
       bodyIds.add(body.id);
     }
@@ -1708,15 +1766,54 @@ function handleDrawClick(p: Vec2): void {
 function constraintPointRefAt(p: Vec2, excludeGuide?: number): MeasureRef | null {
   const j = scene.jointAt(p, pickRadius());
   if (j) return { kind: "joint", jointId: j.id };
+  const v = bodyVertexRefAt(p);
+  if (v) return v;
+  const gp = scene.guidePointAt(p, pickRadius(), excludeGuide);
+  if (gp) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
+  return null;
+}
+
+/** Topmost body control vertex — outer outline or hole — within pick range, as a ref. */
+function bodyVertexRefAt(p: Vec2): MeasureRef | null {
   for (let i = scene.bodies.length - 1; i >= 0; i--) {
     const body = scene.bodies[i];
     const verts = scene.bodyControlWorld(body);
     for (let vi = 0; vi < verts.length; vi++) {
       if (dist(verts[vi], p) <= pickRadius()) return { kind: "vertex", bodyId: body.id, index: vi };
     }
+    for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
+      const hv = scene.bodyHoleControlWorld(body, hi);
+      for (let vi = 0; vi < hv.length; vi++) {
+        if (dist(hv[vi], p) <= pickRadius())
+          return { kind: "vertex", bodyId: body.id, index: vi, hole: hi };
+      }
+    }
   }
-  const gp = scene.guidePointAt(p, pickRadius(), excludeGuide);
-  if (gp) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
+  return null;
+}
+
+/** Topmost body control edge — outer outline or hole — within pick range, as a ref. */
+function bodyEdgeRefAt(p: Vec2): MeasureRef | null {
+  for (let i = scene.bodies.length - 1; i >= 0; i--) {
+    const body = scene.bodies[i];
+    const scanEdges = (verts: Vec2[], hole: number | null): MeasureRef | null => {
+      if (verts.length < 2) return null;
+      for (let ei = 0; ei < verts.length; ei++) {
+        if (distToSegment(p, verts[ei], verts[(ei + 1) % verts.length]) <= pickRadius()) {
+          return hole === null
+            ? { kind: "edge", bodyId: body.id, index: ei }
+            : { kind: "edge", bodyId: body.id, index: ei, hole };
+        }
+      }
+      return null;
+    };
+    const outer = scanEdges(scene.bodyControlWorld(body), null);
+    if (outer) return outer;
+    for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
+      const hit = scanEdges(scene.bodyHoleControlWorld(body, hi), hi);
+      if (hit) return hit;
+    }
+  }
   return null;
 }
 
@@ -1725,15 +1822,8 @@ function constraintPointRefAt(p: Vec2, excludeGuide?: number): MeasureRef | null
 function constraintLineRefAt(p: Vec2): MeasureRef | null {
   const s = scene.sliderAt(p, pickRadius());
   if (s) return { kind: "rail", sliderId: s.id };
-  for (let i = scene.bodies.length - 1; i >= 0; i--) {
-    const body = scene.bodies[i];
-    const verts = scene.bodyControlWorld(body);
-    for (let ei = 0; ei < verts.length; ei++) {
-      if (distToSegment(p, verts[ei], verts[(ei + 1) % verts.length]) <= pickRadius()) {
-        return { kind: "edge", bodyId: body.id, index: ei };
-      }
-    }
-  }
+  const edge = bodyEdgeRefAt(p);
+  if (edge) return edge;
   const gl = scene.guideAt(p, pickRadius());
   if (gl) return { kind: "guideLine", guideId: gl.id };
   return null;
@@ -1755,18 +1845,10 @@ function guidePlacementAt(p: Vec2): { at: Vec2; pick: MeasureRef | null } {
   const lineRes = s ? scene.resolveMeasureRef({ kind: "rail", sliderId: s.id }) : null;
   let seg = lineRes?.kind === "line" ? lineRes : null;
   if (!seg) {
-    // Body control edge under the cursor (same walk as constraintLineRefAt).
-    outer: for (let i = scene.bodies.length - 1; i >= 0; i--) {
-      const verts = scene.bodyControlWorld(scene.bodies[i]);
-      for (let ei = 0; ei < verts.length; ei++) {
-        const a = verts[ei];
-        const b = verts[(ei + 1) % verts.length];
-        if (distToSegment(p, a, b) <= pickRadius()) {
-          seg = { kind: "line", a, b };
-          break outer;
-        }
-      }
-    }
+    // Body control edge under the cursor (outer or hole — same pick as the line refs).
+    const edge = bodyEdgeRefAt(p);
+    const res = edge ? scene.resolveMeasureRef(edge) : null;
+    if (res?.kind === "line") seg = res;
   }
   if (seg) {
     const ab = sub(seg.b, seg.a);
@@ -1885,7 +1967,7 @@ function dragAnchorVars(): Set<string> | undefined {
         keys.push(...anchorVarsForJoint(scene, leftDrag.id));
         break;
       case "vertex":
-        keys.push(anchorVarForVertex(leftDrag.bodyId, leftDrag.index));
+        keys.push(anchorVarForVertex(leftDrag.bodyId, leftDrag.index, leftDrag.hole));
         break;
       case "multi":
         for (const id of leftDrag.bodies) keys.push(...anchorVarsForBody(scene, id));
@@ -1972,13 +2054,8 @@ dimEditInput.addEventListener("blur", () => {
 function measureRefAt(p: Vec2): MeasureRef | null {
   const j = scene.jointAt(p, pickRadius());
   if (j) return { kind: "joint", jointId: j.id };
-  for (let i = scene.bodies.length - 1; i >= 0; i--) {
-    const body = scene.bodies[i];
-    const verts = scene.bodyControlWorld(body);
-    for (let vi = 0; vi < verts.length; vi++) {
-      if (dist(verts[vi], p) <= pickRadius()) return { kind: "vertex", bodyId: body.id, index: vi };
-    }
-  }
+  const v = bodyVertexRefAt(p);
+  if (v) return v;
   // Guides are draw-mode-only aids (invisible in sim), so only draw-mode picks see them.
   if (mode === "draw") {
     const gp = scene.guidePointAt(p, pickRadius());
@@ -1986,15 +2063,8 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   }
   const s = scene.sliderAt(p, pickRadius());
   if (s) return { kind: "rail", sliderId: s.id };
-  for (let i = scene.bodies.length - 1; i >= 0; i--) {
-    const body = scene.bodies[i];
-    const verts = scene.bodyControlWorld(body);
-    for (let ei = 0; ei < verts.length; ei++) {
-      if (distToSegment(p, verts[ei], verts[(ei + 1) % verts.length]) <= pickRadius()) {
-        return { kind: "edge", bodyId: body.id, index: ei };
-      }
-    }
-  }
+  const edge = bodyEdgeRefAt(p);
+  if (edge) return edge;
   if (mode === "draw") {
     const gl = scene.guideAt(p, pickRadius());
     if (gl) return { kind: "guideLine", guideId: gl.id };
@@ -2100,7 +2170,7 @@ function handleSelectClick(p: Vec2): void {
   // Keep the selected body when clicking on/near its control polygon (its edges sit on
   // the boundary, so a click there can land just outside the filled shape). This lets a
   // double-click on an edge reach the vertex-edit handler without deselecting first.
-  if (selection?.kind === "body" && (selectedBodyVertexAt(p) >= 0 || selectedBodyEdgeAt(p))) {
+  if (selection?.kind === "body" && (selectedBodyNodeAt(p) || selectedBodyEdgeAt(p))) {
     return;
   }
   const body = scene.bodyAt(p);
@@ -2123,50 +2193,190 @@ function handleSelectClick(p: Vec2): void {
   selection = null;
 }
 
-/** Index of the selected body's control vertex within pick range of `p`, or -1. */
-function selectedBodyVertexAt(p: Vec2): number {
-  if (selection?.kind !== "body") return -1;
+/** The selected body's nearest control vertex — outer outline or any hole — within
+ *  pick range of `p`, or null. `hole` is the hole index (null = the outer outline). */
+function selectedBodyNodeAt(p: Vec2): { index: number; hole: number | null; at: Vec2 } | null {
+  if (selection?.kind !== "body") return null;
   const body = scene.getBody(selection.id);
-  if (!body) return -1;
-  let best = -1;
+  if (!body) return null;
+  let best: { index: number; hole: number | null; at: Vec2 } | null = null;
   let bestD = pickRadius();
-  scene.bodyControlWorld(body).forEach((v, i) => {
-    const d = dist(v, p);
+  const scan = (verts: Vec2[], hole: number | null): void => {
+    verts.forEach((v, i) => {
+      const d = dist(v, p);
+      if (d <= bestD) {
+        bestD = d;
+        best = { index: i, hole, at: v };
+      }
+    });
+  };
+  scan(scene.bodyControlWorld(body), null);
+  body.holes?.forEach((_, hi) => scan(scene.bodyHoleControlWorld(body, hi), hi));
+  return best;
+}
+
+// --- per-corner radius handles -----------------------------------------------
+/** Minimum screen-px offset of a corner's radius handle from its vertex (grabbable at r ≈ 0). */
+const FILLET_HANDLE_MIN_PX = 16;
+
+/** Half interior angle + bisector direction of control corner `i`, or null when degenerate. */
+function cornerHalfBisector(verts: Vec2[], i: number): { half: number; bis: Vec2 } | null {
+  const n = verts.length;
+  if (n < 3) return null;
+  const v = verts[i];
+  const u1 = normalize(sub(verts[(i - 1 + n) % n], v));
+  const u2 = normalize(sub(verts[(i + 1) % n], v));
+  const angle = Math.acos(Math.max(-1, Math.min(1, dot(u1, u2))));
+  if (angle < 1e-3 || angle > Math.PI - 1e-3) return null; // degenerate / nearly straight
+  const bis = normalize(add(u1, u2));
+  return bis.x === 0 && bis.y === 0 ? null : { half: angle / 2, bis };
+}
+
+/** One per-corner radius handle: its world position + the corner it controls. */
+interface FilletHandle {
+  at: Vec2;
+  index: number;
+  /** Hole index the corner belongs to (null = the outer outline). */
+  hole: number | null;
+}
+
+/** The round mode of one of a body's outlines (outer, or hole `hole`). */
+function outlineRound(body: Body, hole: number | null): RoundMode {
+  return (hole === null ? body.round : body.holes?.[hole]?.round) ?? "fillet";
+}
+
+/** World control vertices of one of a body's outlines. */
+function outlineControlWorld(body: Body, hole: number | null): Vec2[] {
+  return hole === null ? scene.bodyControlWorld(body) : scene.bodyHoleControlWorld(body, hole);
+}
+
+/**
+ * Every per-corner radius handle of `body` — outer outline and holes. Fillet mode: the
+ * midpoint of the corner's drawn arc, pushed out to a minimum screen offset along the
+ * bisector so a sharp corner's handle is still grabbable. Offset mode: on the point's
+ * circle, outward from the outline's own centre (so a one-point disk gets a rim handle).
+ */
+function filletHandleList(body: Body): FilletHandle[] {
+  const out: FilletHandle[] = [];
+  const minOff = FILLET_HANDLE_MIN_PX / view.scale;
+  const addOutline = (hole: number | null): void => {
+    const verts = outlineControlWorld(body, hole);
+    if (!verts.length) return;
+    const radii = scene.bodyCornerRadii(body, hole);
+    if (outlineRound(body, hole) === "offset") {
+      const centre =
+        hole === null
+          ? body.pos
+          : scale(verts.reduce((acc, v) => add(acc, v), vec(0, 0)), 1 / verts.length);
+      verts.forEach((v, i) => {
+        const outd = normalize(sub(v, centre));
+        const dir = outd.x === 0 && outd.y === 0 ? vec(1, 0) : outd;
+        out.push({ at: add(v, scale(dir, Math.max(radii[i], minOff))), index: i, hole });
+      });
+      return;
+    }
+    const arcs = filletCornerArcs(verts, radii);
+    verts.forEach((v, i) => {
+      const arc = arcs[i];
+      if (arc) {
+        const am = arc.a1 + arc.da / 2;
+        const mid = vec(arc.center.x + arc.r * Math.cos(am), arc.center.y + arc.r * Math.sin(am));
+        if (dist(mid, v) >= minOff) {
+          out.push({ at: mid, index: i, hole });
+          return;
+        }
+        // Arc hugs the vertex: fall through to the grabbable min-offset spot on the bisector.
+      }
+      const cb = cornerHalfBisector(verts, i);
+      if (cb) out.push({ at: add(v, scale(cb.bis, minOff)), index: i, hole });
+    });
+  };
+  addOutline(null);
+  body.holes?.forEach((_, hi) => addOutline(hi));
+  return out;
+}
+
+/** The selected body's radius handle within pick range of `p` (nearest), or null. */
+function selectedBodyFilletHandleAt(p: Vec2): FilletHandle | null {
+  if (mode !== "draw" || tool !== null || selection?.kind !== "body") return null;
+  const body = scene.getBody(selection.id);
+  if (!body) return null;
+  let best: FilletHandle | null = null;
+  let bestD = pickRadius();
+  for (const h of filletHandleList(body)) {
+    const d = dist(p, h.at);
     if (d <= bestD) {
       bestD = d;
-      best = i;
+      best = h;
     }
-  });
+  }
   return best;
 }
 
 /**
- * Nearest control-polygon edge of the selected body within pick range of `p`.
- * Returns the edge's later-vertex index (insertion slot) and the closest point on
- * the segment, or null. Vertices within pick range are excluded so an edge hit
- * doesn't shadow a vertex hit (which means "remove" instead of "add").
+ * The corner radius a fillet-handle drag to `cursor` asks for (null = leave it alone).
+ * Offset mode measures straight from the control point; fillet mode projects the cursor
+ * onto the corner's bisector and inverts the arc-midpoint distance d = r·(1−sin h)/sin h.
+ * Dropping the cursor (nearly) onto the vertex snaps the corner sharp (radius 0).
  */
-function selectedBodyEdgeAt(p: Vec2): { index: number; point: Vec2 } | null {
+function filletDragRadius(body: Body, index: number, cursor: Vec2, hole: number | null): number | null {
+  const verts = outlineControlWorld(body, hole);
+  const v = verts[index];
+  if (!v) return null;
+  const sharpZone = (FILLET_HANDLE_MIN_PX * 0.5) / view.scale;
+  if (outlineRound(body, hole) === "offset") {
+    const m = dist(cursor, v);
+    // A one-point offset outline (a disk hole) collapses at radius 0 — keep it a disk.
+    return m <= sharpZone && verts.length > 1 ? 0 : m;
+  }
+  const cb = cornerHalfBisector(verts, index);
+  if (!cb) return null;
+  const d = Math.max(0, dot(sub(cursor, v), cb.bis));
+  if (d <= sharpZone) return 0;
+  const s = Math.sin(cb.half);
+  if (1 - s < 1e-4) return null; // nearly straight corner: no meaningful fillet
+  return (d * s) / (1 - s);
+}
+
+/** Radius handles to show alongside the vertex squares (select mode only). */
+function filletHandlesView(): Vec2[] | null {
+  if (mode !== "draw" || tool !== null || selection?.kind !== "body") return null;
+  const body = scene.getBody(selection.id);
+  if (!body) return null;
+  return filletHandleList(body).map((h) => h.at);
+}
+
+/**
+ * Nearest control-polygon edge of the selected body — outer outline or any hole —
+ * within pick range of `p`. Returns the edge's later-vertex index (insertion slot),
+ * the closest point on the segment, and the hole index (null = outer), or null.
+ * Vertices within pick range are excluded so an edge hit doesn't shadow a vertex hit
+ * (which means "remove" instead of "add").
+ */
+function selectedBodyEdgeAt(p: Vec2): { index: number; point: Vec2; hole: number | null } | null {
   if (selection?.kind !== "body") return null;
   const body = scene.getBody(selection.id);
   if (!body) return null;
-  const verts = scene.bodyControlWorld(body);
-  if (selectedBodyVertexAt(p) >= 0) return null;
-  const r = pickRadius();
-  let best: { index: number; point: Vec2 } | null = null;
-  let bestD = r;
-  for (let i = 0; i < verts.length; i++) {
-    const a = verts[i];
-    const b = verts[(i + 1) % verts.length];
-    const ab = sub(b, a);
-    const t = Math.max(0, Math.min(1, dot(sub(p, a), ab) / Math.max(lenSq(ab), 1e-9)));
-    const point = add(a, scale(ab, t));
-    const d = dist(p, point);
-    if (d < bestD) {
-      bestD = d;
-      best = { index: i + 1, point };
+  if (selectedBodyNodeAt(p)) return null;
+  let best: { index: number; point: Vec2; hole: number | null } | null = null;
+  let bestD = pickRadius();
+  const scan = (verts: Vec2[], hole: number | null): void => {
+    if (verts.length < 2) return;
+    for (let i = 0; i < verts.length; i++) {
+      const a = verts[i];
+      const b = verts[(i + 1) % verts.length];
+      const ab = sub(b, a);
+      const t = Math.max(0, Math.min(1, dot(sub(p, a), ab) / Math.max(lenSq(ab), 1e-9)));
+      const point = add(a, scale(ab, t));
+      const d = dist(p, point);
+      if (d < bestD) {
+        bestD = d;
+        best = { index: i + 1, point, hole };
+      }
     }
-  }
+  };
+  scan(scene.bodyControlWorld(body), null);
+  body.holes?.forEach((_, hi) => scan(scene.bodyHoleControlWorld(body, hi), hi));
   return best;
 }
 
@@ -2345,10 +2555,9 @@ function reorderSelection(where: "back" | "front"): void {
  * centroid (and becomes the selection). No body → nothing happens.
  */
 function startRotate(p: Vec2): void {
-  const vi = selectedBodyVertexAt(p);
-  if (vi >= 0 && selection?.kind === "body") {
-    const pivot = scene.bodyControlWorld(scene.getBody(selection.id)!)[vi];
-    beginRotate([selection.id], [], pivot, p);
+  const node = selectedBodyNodeAt(p);
+  if (node && selection?.kind === "body") {
+    beginRotate([selection.id], [], node.at, p);
     return;
   }
   const body = scene.bodyAt(p);
@@ -2558,11 +2767,23 @@ canvas.addEventListener("mousedown", (e) => {
         }
         return;
       }
-      // A selected body shows draggable corner handles; grabbing one reshapes the body.
-      const vi = selectedBodyVertexAt(world);
-      if (vi >= 0 && selection?.kind === "body") {
-        const anchor = scene.bodyControlWorld(scene.getBody(selection.id)!)[vi];
-        leftDrag = { kind: "vertex", bodyId: selection.id, index: vi, grabOffset: sub(world, anchor), moved: false };
+      // A selected body shows draggable corner handles — outer outline and holes alike;
+      // grabbing one reshapes the body (square = move the vertex, circle = adjust that
+      // corner's radius; nearest wins).
+      const node = selectedBodyNodeAt(world);
+      const fh = selectedBodyFilletHandleAt(world);
+      if (fh && selection?.kind === "body" && (!node || dist(world, fh.at) < dist(world, node.at))) {
+        leftDrag = { kind: "fillet", bodyId: selection.id, index: fh.index, hole: fh.hole, moved: false };
+        canvas.style.cursor = "move";
+      } else if (node && selection?.kind === "body") {
+        leftDrag = {
+          kind: "vertex",
+          bodyId: selection.id,
+          index: node.index,
+          hole: node.hole,
+          grabOffset: sub(world, node.at),
+          moved: false,
+        };
         canvas.style.cursor = "move";
       } else if (e.shiftKey) {
         // Shift+drag: rigid drag — what's grabbed moves like in simulation (grounds
@@ -2711,6 +2932,18 @@ canvas.addEventListener("mousemove", (e) => {
       leftDrag.moved = true;
       return;
     }
+    // Fillet-handle drag: the cursor's position maps straight to that corner's radius
+    // (absolute per move, so the handle tracks the cursor; the sketch is untouched —
+    // a radius change never moves control vertices or joints).
+    if (leftDrag.kind === "fillet") {
+      const body = scene.getBody(leftDrag.bodyId);
+      const r = body ? filletDragRadius(body, leftDrag.index, world, leftDrag.hole) : null;
+      if (r !== null) {
+        scene.setBodyCornerRadius(leftDrag.bodyId, leftDrag.index, r, leftDrag.hole);
+        leftDrag.moved = true;
+      }
+      return;
+    }
     // A dragged guide point lands on joints / body corners / other guides' points
     // (exact, like placement) before falling back to the grid/guide snap — its own
     // guideline is excluded from every pick (it can't snap to itself).
@@ -2731,7 +2964,7 @@ canvas.addEventListener("mousemove", (e) => {
       leftDrag.kind === "guide" ? leftDrag.id : undefined
     );
     const delta = sub(target, dragAnchorWorld(leftDrag));
-    if (leftDrag.kind === "vertex") scene.moveBodyVertex(leftDrag.bodyId, leftDrag.index, delta);
+    if (leftDrag.kind === "vertex") scene.moveBodyVertex(leftDrag.bodyId, leftDrag.index, delta, leftDrag.hole);
     else if (leftDrag.kind === "body") scene.moveBody(leftDrag.id, delta);
     else if (leftDrag.kind === "guide") scene.moveGuide(leftDrag.id, delta);
     else if (leftDrag.kind === "multi") {
@@ -2754,7 +2987,8 @@ canvas.addEventListener("mousemove", (e) => {
   // Hint that elements are grabbable: a move cursor over a joint/body/handle/label in select mode.
   if (mode === "draw" && tool === null) {
     const grabbable =
-      selectedBodyVertexAt(world) >= 0 ||
+      selectedBodyNodeAt(world) !== null ||
+      selectedBodyFilletHandleAt(world) !== null ||
       hoverJoint !== null ||
       hoverBody !== null ||
       measurementLabelAt(world) !== null ||
@@ -2765,7 +2999,7 @@ canvas.addEventListener("mousemove", (e) => {
   }
   // Rotate tool: a grab cursor over a node of the selected body or any body.
   if (mode === "draw" && tool === "rotate") {
-    const rotatable = selectedBodyVertexAt(world) >= 0 || scene.bodyAt(world) !== undefined;
+    const rotatable = selectedBodyNodeAt(world) !== null || scene.bodyAt(world) !== undefined;
     canvas.style.cursor = rotatable ? "grab" : "crosshair";
   }
   if (mode === "sim") {
@@ -2800,9 +3034,10 @@ window.addEventListener("mouseup", (e) => {
       // released at is exactly the pose that gets persisted.
       if (finished.kind === "rigid") {
         timedSolve("rigidDrag", finished.driver, 100, undefined, finished.freeze);
-      } else if (finished.kind !== "measureLabel") {
+      } else if (finished.kind !== "measureLabel" && finished.kind !== "fillet") {
         // Settle: one symmetric sketch solve at rest, repairing anything the anchored
-        // live solves couldn't satisfy without moving the dragged geometry.
+        // live solves couldn't satisfy without moving the dragged geometry. (A fillet
+        // drag needs none: a radius change moves no control vertices or joints.)
         solveSketchLive();
       }
       markDirty(); // persist a reposition (a plain click just selects)
@@ -2869,15 +3104,33 @@ canvas.addEventListener("dblclick", (e) => {
   // remove it (kept ≥ 3); on an edge → add a node at the click point (grid-snapped).
   if (mode === "draw" && tool === null && selection?.kind === "body") {
     const world = eventWorld(e);
-    const vi = selectedBodyVertexAt(world);
-    if (vi >= 0) {
-      scene.removeBodyVertex(selection.id, vi);
+    const node = selectedBodyNodeAt(world);
+    // Double-click a radius handle (when it isn't shadowed by a nearer vertex square):
+    // clear that corner's override, back to the outline default.
+    const fh = selectedBodyFilletHandleAt(world);
+    if (fh && (!node || dist(world, fh.at) < dist(world, node.at))) {
+      leftDrag = null; // cancel the fillet drag the double-click's mousedowns started
+      scene.setBodyCornerRadius(selection.id, fh.index, null, fh.hole);
+      markDirty();
+      return;
+    }
+    if (node) {
+      // Removing the last removable node of a hole deletes the hole itself (a fillet
+      // hole keeps ≥ 3 vertices, a disk keeps its 1 — so a no-op removal means "the
+      // user wants the hole gone").
+      const body = scene.getBody(selection.id)!;
+      const before = node.hole === null ? null : body.holes?.[node.hole]?.controlLocal.length;
+      scene.removeBodyVertex(selection.id, node.index, node.hole);
+      const after = node.hole === null ? null : body.holes?.[node.hole]?.controlLocal.length;
+      if (node.hole !== null && before !== undefined && before === after) {
+        scene.removeBodyHole(selection.id, node.hole);
+      }
       markDirty();
       return;
     }
     const edge = selectedBodyEdgeAt(world);
     if (edge) {
-      scene.insertBodyVertex(selection.id, edge.index, snap(edge.point));
+      scene.insertBodyVertex(selection.id, edge.index, snap(edge.point), edge.hole);
       markDirty();
     }
   }
@@ -3311,12 +3564,16 @@ function guideDraftView(): { a: Vec2; cursor: Vec2 } | null {
   return { a: guideDraft, cursor: guidePlacementAt(cursor).at };
 }
 
-/** Control-vertex handles to show for the body selected in select / rotate mode (else null). */
+/** Control-vertex handles to show for the body selected in select / rotate mode (else
+ *  null) — the outer outline's plus every hole's. */
 function editVerticesView(): Vec2[] | null {
   if (mode !== "draw" || (tool !== null && tool !== "rotate") || selection?.kind !== "body")
     return null;
   const body = scene.getBody(selection.id);
-  return body ? scene.bodyControlWorld(body) : null;
+  if (!body) return null;
+  const out = [...scene.bodyControlWorld(body)];
+  body.holes?.forEach((_, hi) => out.push(...scene.bodyHoleControlWorld(body, hi)));
+  return out;
 }
 
 /** Resolved measurements of the current mode (a ref that can't resolve just isn't drawn). */
@@ -3359,8 +3616,8 @@ function measureDraftView(): {
 function sketchRefKey(ref: MeasureRef): string {
   switch (ref.kind) {
     case "joint": return `j:${ref.jointId}`;
-    case "vertex": return `v:${ref.bodyId}:${ref.index}`;
-    case "edge": return `e:${ref.bodyId}:${ref.index}`;
+    case "vertex": return `v:${ref.bodyId}:${ref.index}${ref.hole !== undefined ? `:${ref.hole}` : ""}`;
+    case "edge": return `e:${ref.bodyId}:${ref.index}${ref.hole !== undefined ? `:${ref.hole}` : ""}`;
     case "rail": return `r:${ref.sliderId}`;
     case "guidePoint": return `gp:${ref.guideId}:${ref.which}`;
     case "guideLine": return `gl:${ref.guideId}`;
@@ -3505,6 +3762,7 @@ function frame(now?: number): void {
         : null,
     marquee: boxSelect?.moved ? { a: boxSelect.start, b: boxSelect.end } : null,
     editVertices: editVerticesView(),
+    filletHandles: filletHandlesView(),
     sliderDraft: sliderDraftView(),
     guideDraft: guideDraftView(),
     bodyJointDraft: bodyJointDraftView(),

@@ -1,6 +1,6 @@
 /** Corner filleting + body editing: radius changes and vertex moves keep joints anchored. */
 import { Scene } from "../src/model";
-import { filletPolygon, polygonArea, dist } from "../src/geometry";
+import { filletPolygon, roundedConvexBody, polygonArea, dist } from "../src/geometry";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -154,6 +154,177 @@ e.removeBodyVertex(eb.id, 0);
 check("remove down to a triangle works", eb.controlLocal.length === 3, `${eb.controlLocal.length}`);
 e.removeBodyVertex(eb.id, 0);
 check("remove is a no-op at the 3-vertex minimum", eb.controlLocal.length === 3, `${eb.controlLocal.length}`);
+
+// --- per-corner radii (v15) ---
+// geometry: an array radius rounds only the corners it names.
+const oneCorner = filletPolygon(sq, [20, 0, 0, 0]);
+check("per-corner fillet rounds only the named corner", oneCorner.length > 4 && oneCorner.length < rounded.length, `${oneCorner.length} pts vs ${rounded.length} all-round`);
+check("unrounded corners stay exactly sharp", oneCorner.some((p) => p.x === 100 && p.y === 0));
+const areaOne = Math.abs(polygonArea(oneCorner));
+check("one fillet trims a quarter of the all-round loss", areaOne > areaR && areaOne < 10000, `${areaOne.toFixed(0)}`);
+
+// offset mode: per-point margins = hull of different-size circles.
+const stadium = roundedConvexBody([{ x: 0, y: 0 }, { x: 100, y: 0 }], [10, 30]);
+const xs = stadium.map((p) => p.x);
+const maxX = Math.max(...xs);
+const minX = Math.min(...xs);
+check("per-point offset grows each end by its own margin", maxX > 125 && maxX <= 130 && minX < -8 && minX >= -10, `x ∈ [${minX.toFixed(1)}, ${maxX.toFixed(1)}]`);
+
+// scene: overriding one corner keeps joints anchored and the others on the default.
+const pc = new Scene();
+const pb = pc.addBody([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }], 10);
+const pj = pc.addJoint(pb.id, { x: 50, y: 50 });
+const pjBefore = pc.jointWorld(pj);
+pc.setBodyCornerRadius(pb.id, 2, 30);
+check("corner override recorded (others null)", pb.radii?.[2] === 30 && pb.radii?.[0] === null, JSON.stringify(pb.radii));
+check("effective radii mix override + default", JSON.stringify(pc.bodyCornerRadii(pb)) === "[10,10,30,10]", JSON.stringify(pc.bodyCornerRadii(pb)));
+check("joint stays put on a per-corner change", dist(pjBefore, pc.jointWorld(pj)) < 1e-9);
+
+// insert / remove control vertices keep overrides on the same physical corner.
+pc.insertBodyVertex(pb.id, 1, { x: 50, y: 0 }); // node on the bottom edge, before the override
+check("insert shifts the override with its corner", pb.radii?.length === 5 && pb.radii?.[3] === 30, JSON.stringify(pb.radii));
+pc.removeBodyVertex(pb.id, 3);
+check("removing the overridden corner drops the whole array", pb.radii === undefined, JSON.stringify(pb.radii));
+
+// clearing an override back to the default.
+pc.setBodyCornerRadius(pb.id, 0, 25);
+pc.setBodyCornerRadius(pb.id, 0, null);
+check("clearing the last override drops the array", pb.radii === undefined);
+
+// mirror reverses the override array along with the renumbered corners.
+const mi = new Scene();
+const mib = mi.addBody([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }], 10);
+mi.setBodyCornerRadius(mib.id, 0, 40);
+const cornerBefore = mi.bodyControlWorld(mib)[0];
+const centroidX = mib.pos.x; // the fillet shifts the centroid off (50,50) — reflect about the real axis
+mi.mirrorBody(mib.id, "h");
+const n = mib.controlLocal.length;
+check("mirror moves the override to the renumbered corner", mib.radii?.[n - 1] === 40, JSON.stringify(mib.radii));
+check("the overridden corner is the reflected one", dist(mi.bodyControlWorld(mib)[n - 1], { x: 2 * centroidX - cornerBefore.x, y: cornerBefore.y }) < 1e-6);
+
+// scale scales overrides with the body.
+mi.scaleBody(mib.id, 2);
+check("scale doubles the override", mib.radii?.[n - 1] === 80, JSON.stringify(mib.radii));
+
+// save / load and copy / paste round-trip the overrides.
+const rt = new Scene();
+rt.load(JSON.parse(JSON.stringify(mi.serialize())));
+const rtb = rt.bodies[0];
+check("radii survive save/load", rtb.radii?.[n - 1] === 80, JSON.stringify(rtb.radii));
+const clip = rt.extractBody(rtb.id)!;
+const pasted = rt.insertSelection(clip, { x: 500, y: 500 })!;
+const pastedBody = rt.getBody(pasted.bodyIds[0])!;
+check("radii survive copy/paste", pastedBody.radii?.[n - 1] === 80, JSON.stringify(pastedBody.radii));
+check("pasted outline uses the override", Math.abs(Math.abs(polygonArea(rt.bodyWorldVerts(pastedBody))) - Math.abs(polygonArea(rt.bodyWorldVerts(rtb)))) < 1e-6);
+
+// --- editable holes (v16) ---
+const rect4 = (x0: number, y0: number, x1: number, y1: number) => [
+  { x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 },
+];
+const hs = new Scene();
+const hb = hs.addBody(rect4(0, 0, 100, 100), 0, "fillet", [
+  rect4(30, 30, 50, 50), // square cut-out
+  { control: [{ x: 70, y: 70 }], radius: 8, round: "offset" }, // circular (disk) hole
+]);
+check("holes become editable shapes", hb.holes?.length === 2 && hb.holesLocal?.length === 2,
+  `${hb.holes?.length} shapes, ${hb.holesLocal?.length} derived`);
+const disk = hs.bodyHolesWorld(hb)[1];
+const diskErr = Math.max(...disk.map((p) => Math.abs(dist(p, { x: 70, y: 70 }) - 8)));
+check("disk hole derives as a true circle", disk.length >= 24 && diskErr < 1e-9,
+  `${disk.length} pts, max radius error ${diskErr.toExponential(2)}`);
+const expectArea = 10000 - 400 - Math.PI * 64;
+check("both holes subtract from mass", Math.abs(1 / hb.invMass - expectArea) < 10,
+  `area ${(1 / hb.invMass).toFixed(1)} vs ~${expectArea.toFixed(1)}`);
+
+// Measurements + sketch refs on hole geometry resolve and track edits.
+const mRes = hs.resolveMeasureRef({ kind: "vertex", bodyId: hb.id, index: 0, hole: 0 });
+check("hole vertex resolves as a measure ref", mRes?.kind === "point" && dist(mRes.p, { x: 30, y: 30 }) < 1e-9,
+  mRes?.kind === "point" ? `(${mRes.p.x}, ${mRes.p.y})` : "null");
+const eRes = hs.resolveMeasureRef({ kind: "edge", bodyId: hb.id, index: 0, hole: 0 });
+check("hole edge resolves as a measure ref", eRes?.kind === "line", `${eRes?.kind}`);
+check("disk hole has no edge refs", hs.resolveMeasureRef({ kind: "edge", bodyId: hb.id, index: 0, hole: 1 }) === null, "1-point outline");
+
+// Editing a hole vertex reshapes the hole only; the outer polygon stays put.
+const outerBefore = hs.bodyControlWorld(hb).map((p) => ({ x: p.x, y: p.y }));
+const areaBeforeMove = 1 / hb.invMass;
+hs.moveBodyVertex(hb.id, 0, { x: -10, y: -10 }, 0);
+check("hole vertex move grows the cut-out", 1 / hb.invMass < areaBeforeMove - 50,
+  `area ${(1 / hb.invMass).toFixed(1)}`);
+check("outer outline untouched by a hole edit",
+  hs.bodyControlWorld(hb).every((p, i) => dist(p, outerBefore[i]) < 1e-9), "outer verts");
+const movedRes = hs.resolveMeasureRef({ kind: "vertex", bodyId: hb.id, index: 0, hole: 0 });
+check("hole ref tracks the moved vertex", movedRes?.kind === "point" && dist(movedRes.p, { x: 20, y: 20 }) < 1e-9,
+  movedRes?.kind === "point" ? `(${movedRes.p.x.toFixed(1)}, ${movedRes.p.y.toFixed(1)})` : "null");
+
+// Insert / remove hole vertices remap hole refs (and only same-hole refs).
+const hm = hs.addMeasurement("draw",
+  { kind: "vertex", bodyId: hb.id, index: 2, hole: 0 },
+  { kind: "vertex", bodyId: hb.id, index: 2 }, // outer vertex 2 must NOT shift
+  { x: 0, y: -20 })!;
+hs.insertBodyVertex(hb.id, 1, { x: 50, y: 25 }, 0);
+const hmRefA = hm.refA as { index: number; hole?: number };
+const hmRefB = hm.refB as { index: number; hole?: number };
+check("hole vertex insert shifts same-hole refs", hmRefA.index === 3 && hmRefA.hole === 0, `index ${hmRefA.index}`);
+check("outer refs unaffected by hole inserts", hmRefB.index === 2 && hmRefB.hole === undefined, `index ${hmRefB.index}`);
+hs.removeBodyVertex(hb.id, 1, 0);
+check("hole vertex remove shifts refs back", (hm.refA as { index: number }).index === 2, `index ${(hm.refA as { index: number }).index}`);
+
+// Per-corner radius on a hole corner.
+hs.setBodyCornerRadius(hb.id, 0, 6, 0);
+check("hole corner radius override recorded", hb.holes?.[0].radii?.[0] === 6, JSON.stringify(hb.holes?.[0].radii));
+check("hole outline rounds that corner", (hb.holesLocal?.[0].length ?? 0) > 4, `${hb.holesLocal?.[0].length} pts`);
+
+// Mirror remaps hole refs within their own outline.
+const mScene = new Scene();
+const mBody = mScene.addBody(rect4(0, 0, 100, 100), 0, "fillet", [rect4(20, 20, 40, 40)]);
+const mm = mScene.addMeasurement("draw",
+  { kind: "vertex", bodyId: mBody.id, index: 0, hole: 0 },
+  { kind: "vertex", bodyId: mBody.id, index: 0 },
+  { x: 0, y: -20 })!;
+const mAxisX = mBody.pos.x; // the hole shifts the centroid off x=50 — reflect about the real axis
+mScene.mirrorBody(mBody.id, "h");
+const mmA = mm.refA as { index: number; hole?: number };
+check("mirror remaps hole vertex refs in the hole's own outline", mmA.index === 3 && mmA.hole === 0, `index ${mmA.index}`);
+const mmRes = mScene.resolveMeasureRef(mm.refA);
+check("remapped hole ref names the reflected corner",
+  mmRes?.kind === "point" && dist(mmRes.p, { x: 2 * mAxisX - 20, y: 20 }) < 1e-6,
+  mmRes?.kind === "point" ? `(${mmRes.p.x.toFixed(1)}, ${mmRes.p.y.toFixed(1)})` : "null");
+
+// Copy/paste carries hole shapes (control + rounding), and save/load round-trips them.
+const hClip = hs.extractBody(hb.id)!;
+const hPaste = hs.insertSelection(hClip, { x: 500, y: 500 })!;
+const hPasted = hs.getBody(hPaste.bodyIds[0])!;
+check("paste carries editable holes", hPasted.holes?.length === 2 && hPasted.holes[0].radii?.[0] === 6 && hPasted.holes[1].round === "offset",
+  `${hPasted.holes?.length} holes`);
+const hLoad = new Scene();
+hLoad.load(JSON.parse(JSON.stringify(hs.serialize())));
+const hLoaded = hLoad.getBody(hb.id)!;
+check("holes survive save/load with their rounding", hLoaded.holes?.length === 2 && hLoaded.holes[0].radii?.[0] === 6 && hLoaded.holes[1].radius === 8,
+  `${hLoaded.holes?.length} holes`);
+
+// Legacy (≤ v15) files carry only baked holesLocal loops — they load as editable holes.
+const legacyData = JSON.parse(JSON.stringify(hs.serialize()));
+for (const b of legacyData.bodies) delete b.holes; // simulate a pre-v16 file
+const legacy = new Scene();
+legacy.load(legacyData);
+const lHoles = legacy.getBody(hb.id)!.holes;
+check("legacy baked holes load as radius-0 editable holes",
+  lHoles?.length === 2 && lHoles.every((h) => h.radius === 0) && (lHoles[0].controlLocal.length > 4),
+  `${lHoles?.length} holes, ${lHoles?.[0].controlLocal.length} ctrl pts`);
+
+// Removing a whole hole cascades its refs and shifts later holes' refs down.
+const dScene = new Scene();
+const dBody = dScene.addBody(rect4(0, 0, 100, 100), 0, "fillet", [rect4(10, 10, 20, 20), rect4(60, 60, 80, 80)]);
+const dGone = dScene.addMeasurement("draw",
+  { kind: "vertex", bodyId: dBody.id, index: 0, hole: 0 },
+  { kind: "vertex", bodyId: dBody.id, index: 0 }, { x: 0, y: -10 })!;
+const dKept = dScene.addMeasurement("draw",
+  { kind: "vertex", bodyId: dBody.id, index: 1, hole: 1 },
+  { kind: "vertex", bodyId: dBody.id, index: 1 }, { x: 0, y: -10 })!;
+dScene.removeBodyHole(dBody.id, 0);
+check("removing a hole drops its refs' measurements", dScene.getMeasurement(dGone.id) === undefined, "cascaded");
+const dRef = dScene.getMeasurement(dKept.id)?.refA as { hole?: number } | undefined;
+check("later holes' refs shift down", dRef?.hole === 0 && dBody.holes?.length === 1, `hole ${dRef?.hole}`);
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

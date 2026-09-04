@@ -40,6 +40,8 @@ export interface RenderInput {
   flash: Set<number> | null;
   /** Control-vertex handles to draw for the selected body (draggable to reshape it). */
   editVertices: Vec2[] | null;
+  /** Per-corner radius handles for the selected body (circle = drag to round that corner). */
+  filletHandles: Vec2[] | null;
   /**
    * While defining a slider: the world positions of the rail joints picked so far
    * (1 → previewing toward the cursor; 2 → rail set, awaiting the riding joint).
@@ -547,6 +549,21 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     for (const v of input.editVertices) {
       ctx.beginPath();
       ctx.rect(v.x - h, v.y - h, 2 * h, 2 * h);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  // Per-corner radius handles (circle = drag along the corner's bisector to round it).
+  // Inverted colours vs the vertex squares so the two handle kinds read apart.
+  if (input.filletHandles) {
+    const r = px(4.5);
+    ctx.lineWidth = px(2);
+    ctx.strokeStyle = theme.ink;
+    ctx.fillStyle = theme.surface;
+    for (const h of input.filletHandles) {
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, r, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }

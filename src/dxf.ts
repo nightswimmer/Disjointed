@@ -8,16 +8,36 @@
  * since bodies are control polygons. Everything else (INSERT, SPLINE, TEXT,
  * dimensions, 3D meshes, ...) is counted and skipped.
  *
+ * Fillet reconstruction: a closed polyline's bulge arc that sweeps < 180° and is
+ * tangent to the straight segments on both sides is a corner fillet — those loops
+ * also come back as a sparse control polygon + per-corner radii (`DxfLoop.fillet`),
+ * so imported rounded corners stay parametric (editable) instead of baked points.
+ * A CIRCLE reports itself in `DxfLoop.circle` so it can import as a one-point disk.
+ *
  * Coordinates are returned exactly as stored in the file (DXF is y-up; the
  * importer flips and scales them). `$INSUNITS` from the HEADER section is
  * reported as millimetres-per-drawing-unit so the importer can convert into
  * the document's working units.
  */
-import { Vec2, vec, dist, pointInPolygon } from "./geometry";
+import { Vec2, vec, add, sub, scale, rotate, normalize, dot, cross, len, dist, pointInPolygon } from "./geometry";
+
+/** One closed loop from the file, in raw DXF coordinates (y-up). */
+export interface DxfLoop {
+  /** Sampled outline (≥ 3 points, no closing duplicate) — what nesting / holes use. */
+  pts: Vec2[];
+  /**
+   * Fillet reconstruction (when at least one arc converted): sparse control polygon +
+   * per-corner radius (0 = sharp) that regenerates the loop's tangent corner arcs
+   * parametrically. Non-fillet arcs stay sampled inside `control` as radius-0 points.
+   */
+  fillet: { control: Vec2[]; radii: number[] } | null;
+  /** The source CIRCLE when this loop is one (importable as a parametric disk). */
+  circle: { c: Vec2; r: number } | null;
+}
 
 export interface DxfResult {
-  /** Closed loops (≥ 3 points, no closing duplicate), in raw DXF coordinates (y-up). */
-  loops: Vec2[][];
+  /** Closed loops, in raw DXF coordinates (y-up). */
+  loops: DxfLoop[];
   /** Millimetres per drawing unit from `$INSUNITS`, or null when absent / unitless / unknown. */
   unitToMm: number | null;
   /** Open paths that could not be chained into a closed loop (dropped). */
@@ -64,7 +84,7 @@ export function parseDxf(text: string): DxfResult {
   }
 
   let unitToMm: number | null = null;
-  const loops: Vec2[][] = [];
+  const loops: DxfLoop[] = [];
   const open: Vec2[][] = [];
   let skippedEntities = 0;
 
@@ -100,12 +120,15 @@ export function parseDxf(text: string): DxfResult {
   }
 
   const chained = chainPaths(open);
-  const all = [...loops, ...chained.closed];
-  const cleaned: Vec2[][] = [];
+  const all: DxfLoop[] = [
+    ...loops,
+    ...chained.closed.map((pts) => ({ pts, fillet: null, circle: null })),
+  ];
+  const cleaned: DxfLoop[] = [];
   let degenerate = 0;
   for (const loop of all) {
-    const c = cleanLoop(loop);
-    if (c) cleaned.push(c);
+    const c = cleanLoop(loop.pts);
+    if (c) cleaned.push({ ...loop, pts: c });
     else degenerate++;
   }
   return {
@@ -136,7 +159,7 @@ function toPairs(text: string): Pair[] {
 function parseEntity(
   ps: Pair[],
   i: number,
-  loops: Vec2[][],
+  loops: DxfLoop[],
   open: Vec2[][],
   skip: () => void
 ): number {
@@ -221,7 +244,7 @@ function parseEntity(
           const a = (k / n) * 2 * Math.PI;
           pts.push(vec(cx + r * Math.cos(a), cy + r * Math.sin(a)));
         }
-        loops.push(pts);
+        loops.push({ pts, fillet: null, circle: { c: vec(cx, cy), r } });
       }
       return end;
     }
@@ -248,7 +271,7 @@ function parseEntity(
 }
 
 /** Expand a polyline's bulges into sampled points and file it as a loop or an open path. */
-function emitPolyline(verts: BulgeVertex[], closed: boolean, loops: Vec2[][], open: Vec2[][]): void {
+function emitPolyline(verts: BulgeVertex[], closed: boolean, loops: DxfLoop[], open: Vec2[][]): void {
   if (verts.length < 2) return;
   // A "closed" flag missing but last point on first point is treated as closed too.
   const n = verts.length;
@@ -263,8 +286,86 @@ function emitPolyline(verts: BulgeVertex[], closed: boolean, loops: Vec2[][], op
       if (verts[k].bulge !== 0) sampleBulge(verts[k].p, next, verts[k].bulge, pts);
     }
   }
-  if (effectiveClosed) loops.push(pts);
+  if (effectiveClosed) loops.push({ pts, fillet: reconstructFillets(verts), circle: null });
   else open.push(pts);
+}
+
+/** Angle tolerance (radians) for "this arc is tangent to its neighbouring segments". */
+const FILLET_TANGENT_TOL = 0.01;
+
+/**
+ * Rebuild a closed bulge polyline as a sparse control polygon + per-corner fillet
+ * radii: every arc that sweeps < 180° and is tangent to the straight segments on both
+ * sides is replaced by the sharp corner where those segments would meet, carrying the
+ * arc's radius — `filletPolygon` regenerates the same arc parametrically, so imported
+ * rounded corners stay editable. Arcs that aren't corner fillets stay sampled
+ * (radius-0 points). Returns null when no arc converts (the sampled loop is used).
+ */
+function reconstructFillets(nodes: BulgeVertex[]): { control: Vec2[]; radii: number[] } | null {
+  // Drop a closing duplicate vertex (its bulge would sit on a zero-length edge).
+  const ring = nodes.slice();
+  while (ring.length > 1 && dist(ring[0].p, ring[ring.length - 1].p) === 0) ring.pop();
+  const n = ring.length;
+  if (n < 3 || !ring.some((v) => v.bulge !== 0)) return null;
+
+  // Edge k runs ring[k] → ring[(k+1) % n] and carries ring[k].bulge.
+  const conv: ({ v: Vec2; r: number } | null)[] = new Array(n).fill(null);
+  for (let k = 0; k < n; k++) {
+    const a = ring[k];
+    if (a.bulge === 0) continue;
+    const b = ring[(k + 1) % n];
+    const theta = 4 * Math.atan(a.bulge); // signed sweep; positive = CCW (y-up)
+    if (Math.abs(theta) >= Math.PI - 1e-6) continue; // ≥ half-circle: no corner exists
+    // Both neighbouring edges must be straight and non-degenerate.
+    const prev = ring[(k - 1 + n) % n];
+    const next2 = ring[(k + 2) % n];
+    if (prev.bulge !== 0 || b.bulge !== 0) continue;
+    const chord = sub(b.p, a.p);
+    const c = len(chord);
+    if (c < 1e-12 || dist(prev.p, a.p) < 1e-12 || dist(b.p, next2.p) < 1e-12) continue;
+    // Tangency: a circular arc's end tangents are its chord direction rotated ∓θ/2.
+    const dIn = normalize(sub(a.p, prev.p));
+    const dOut = normalize(sub(next2.p, b.p));
+    const tangentTol = Math.cos(FILLET_TANGENT_TOL);
+    if (dot(dIn, rotate(normalize(chord), -theta / 2)) < tangentTol) continue;
+    if (dot(dOut, rotate(normalize(chord), theta / 2)) < tangentTol) continue;
+    // The corner: where the incoming segment (through `a` along dIn) meets the
+    // outgoing one (through `b` along dOut). Tangency puts it ahead of the arc.
+    const denom = cross(dIn, dOut);
+    if (Math.abs(denom) < 1e-9) continue; // ≈ parallel: arc too shallow to matter
+    const t = cross(chord, dOut) / denom;
+    if (t <= 0) continue;
+    const v = add(a.p, scale(dIn, t));
+    // A true fillet has symmetric tangent lengths — cheap final sanity check.
+    if (Math.abs(dist(v, a.p) - dist(v, b.p)) > Math.max(dist(v, a.p), 1e-9) * 0.02) continue;
+    conv[k] = { v, r: c / (2 * Math.sin(Math.abs(theta) / 2)) };
+  }
+  if (!conv.some((e) => e !== null)) return null;
+
+  // Walk the ring: a converted arc contributes its corner point (replacing both arc
+  // endpoints); everything else keeps its vertex, with non-fillet arcs sampled inline.
+  const control: Vec2[] = [];
+  const radii: number[] = [];
+  for (let k = 0; k < n; k++) {
+    if (conv[(k - 1 + n) % n]) continue; // this vertex is a converted arc's far end
+    const arc = conv[k];
+    if (arc) {
+      control.push(arc.v);
+      radii.push(arc.r);
+      continue;
+    }
+    control.push(ring[k].p);
+    radii.push(0);
+    if (ring[k].bulge !== 0) {
+      const seg: Vec2[] = [];
+      sampleBulge(ring[k].p, ring[(k + 1) % n].p, ring[k].bulge, seg);
+      for (const p of seg) {
+        control.push(p);
+        radii.push(0);
+      }
+    }
+  }
+  return control.length >= 3 ? { control, radii } : null;
 }
 
 /**

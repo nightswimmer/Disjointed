@@ -9,10 +9,14 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
 ## Concepts
 
 - **Body** — a rigid shape with rounded-able corners. It's defined by an editable **control
-  polygon** plus a **corner radius**; the outline you see is derived from those, so you can
-  reshape it (drag corners) or round it any time. A body can carry **holes** (inner cut-outs,
-  e.g. from a DXF import): they render hollow and are subtracted from the body's mass and
-  inertia, and they mirror / rotate / scale / copy with the body. Holes don't restrict where
+  polygon** plus a **corner radius** — with optional **per-corner overrides**, so each corner
+  can carry its own radius; the outline you see is derived from those, so you can reshape it
+  (drag corners) or round it (drag a corner's round radius handle) any time. A body can carry
+  **holes** (inner cut-outs, e.g. from a DXF import) — each hole is a full editable outline of
+  its own: drag its nodes, round its corners, and a **circular hole** is a true parametric
+  disk you resize by its rim. Holes render hollow, are subtracted from the body's mass and
+  inertia, mirror / rotate / scale / copy with the body, and their corners and edges are
+  **measurable and constrainable** just like the outer profile. Holes don't restrict where
   joints can go — a joint can sit anywhere inside the outer outline, including dead-centre
   of a shaft hole.
 - **Joint** — a point. Either **attached** to a body (rigid with it) or **free** (a body-less
@@ -71,7 +75,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `A` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
-| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node, a guide point, or any point inside a body) or a **line** (a slider rail, a body edge, or a guideline). Works in **both modes** — see *Measurements* below. |
+| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a slider rail, a body edge or hole edge, or a guideline). Works in **both modes** — see *Measurements* below. |
 | **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position. |
 | **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, slider rail or guideline** (one click), or **two points**, to make it horizontal / vertical. |
 | **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, slider rails or guidelines) to constrain their directions — or, for Equal, their lengths (Equal doesn't take guidelines: an infinite line has no length). |
@@ -80,11 +84,17 @@ to **Select** mode. Press **Esc** to abort the current placement.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
 the edge makes it slide along the outline instead. A joint sitting exactly on one of its body's
 corner nodes (as in a body **built from joints**) is **stuck to that node**: dragging either one
-moves both, reshaping the body around it. A selected body shows **corner handles** — drag one to
-reshape it, and press **`[` / `]`** to decrease / increase its corner radius (this is how you
-round a freehand polygon: draw it, select it, press `]`). With a body selected you can also edit its
-outline by **double-click**: double-click an **edge** to add a node there (snapped to the grid
-when Snap is on), or double-click a **node** to remove it (kept to a minimum of 3). Press
+moves both, reshaping the body around it. A selected body shows handles on its outer outline
+**and on every hole**: **square handles** move vertices, and each corner also gets a **round
+radius handle** sitting on its fillet arc — drag it away from the corner to round just that
+corner, drop it onto the corner to make it sharp, **double-click** it to go back to the body's
+default radius. **`[` / `]`** still decrease / increase the body-wide default radius (this is
+how you round a freehand polygon: draw it, select it, press `]`; corners with their own radius
+keep it). On a circular (disk) hole the round handle rides the rim — drag it to resize the
+hole, drag the centre node to move it. With a body selected you can also edit any outline by
+**double-click**: double-click an **edge** (outer or hole) to add a node there (snapped to the
+grid when Snap is on), or double-click a **node** to remove it (outer outlines keep a minimum
+of 3) — double-clicking a hole's **last removable node deletes the whole hole**. Press
 **Delete** to remove the selection: a body takes its joints and constraints with it; a slider rail
 leaves its joints; a joint detaches from any rail.
 
@@ -271,7 +281,10 @@ measurements show the unit, and imports convert into it. The choice is saved wit
 point, at true scale — the file's `$INSUNITS` is converted into your working unit (a unitless
 file is assumed to already be in working units). Closed polylines (arc bulges included),
 circles, and loose lines/arcs that chain into closed loops all import; a loop **inside**
-another becomes a **hole** in it, so a plate with cut-outs arrives as *one* body. The imported
+another becomes a **hole** in it, so a plate with cut-outs arrives as *one* body. **Rounded
+corners stay editable**: an arc that fillets two straight segments imports as a sharp control
+corner carrying that radius (grab its round handle to change it), and circles — bodies or
+cut-outs — import as true parametric disks. The imported
 shapes land multi-selected, ready to move or group. If an import covers your mechanism, press
 **PageDown** (or the Send-to-back button) to push it behind everything. Dropping a `.json`
 file loads it as a scene, same as the Load button. (`dxf import test.dxf` in the repo is a
@@ -326,15 +339,21 @@ re-solves the rest, then pulls the disabled ones as close as the freedom allows 
 as breaks — so a connected impossible piece doesn't corrupt the parts that can be solved. Sliders
 are prismatic constraints with end-stops; the rail is either a body (which moves) or a world-fixed
 line built from two grounded free joints. Body outlines are
-generated from a control polygon + corner radius (rounded corners via fillet or outward offset).
+generated from a control polygon + corner radius (rounded corners via fillet or outward offset),
+with optional **per-corner radii** overriding the body default; arcs sample at 7.5° per segment.
 The fillet rounds convex and concave (reflex) corners correctly, and splits each edge between its
 two corners so neighbouring fillets never overlap or fold — even on thin shapes at large radii.
-A body's **holes** are baked loops riding its frame: drawn with an even-odd fill and subtracted
-from the mass properties (net area, composite centroid, parallel-axis inertia), while picking and
+A body's **holes** are outlines of the same kind (control polygon + rounding, or a one-point
+disk), each with a derived loop drawn with an even-odd fill and subtracted from the mass
+properties (net area, composite centroid, parallel-axis inertia); their corners and edges are
+first-class measurement / constraint references, while picking and
 joint containment deliberately use the outer outline only.
 **DXF import** is a small dependency-free reader (`dxf.ts`): it samples arcs/bulges into
 polyline points, chains loose segments into closed loops, nests loops even-odd style into
 solids-with-holes, and converts units via the file's `$INSUNITS` and the document's working unit.
+Corner arcs that are tangent fillets are **reconstructed** rather than baked — they come back as
+sharp control corners with per-corner radii, and circles as parametric disks — so imported
+rounded geometry stays editable.
 **Actuators and motors** are layered on top of the same solver: while animation runs, each
 actuator/motor computes a world target for its joint(s) from its phase + speed, and the solver
 takes those targets as additional "moving grounds" — sacred just like a normal ground, so
@@ -367,7 +386,8 @@ it kinematically without disturbing — or being spuriously blocked by — the r
 coordinates) and re-resolve them to world geometry every frame, which is why their values track
 the running simulation for free.
 **Sketch constraints** get their own solver (`sketch.ts`): the same Gauss-Seidel projection
-idea, but over *shape* — the world positions of body corner nodes, joints and guideline
+idea, but over *shape* — the world positions of body corner nodes (outer and hole outlines
+alike), joints and guideline
 defining points — rather than rigid poses. After a converged solve, bodies rebuild from
 their new control polygons; an unsatisfiable solve never touches the scene (edits are
 rejected, not approximated). Every solver variable carries a **mobility rank** —

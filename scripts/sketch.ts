@@ -536,6 +536,40 @@ const TOL = sketchConfig.tol;
   check("constraints registered on the scene", s.sketch.length === 2);
 }
 
+// --- constraints on hole geometry (v16) -----------------------------------------
+{
+  const s = new Scene();
+  // Plate with a slightly tilted quadrilateral hole.
+  const body = s.addBody(
+    [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }],
+    0,
+    "fillet",
+    [[{ x: 30, y: 30 }, { x: 60, y: 34 }, { x: 60, y: 60 }, { x: 30, y: 62 }]]
+  );
+  const holeEdge: MeasureRef = { kind: "edge", bodyId: body.id, index: 0, hole: 0 };
+  const { constraint } = tryAddConstraint(s, "horizontal", holeEdge);
+  check("horizontal constraint accepted on a hole edge", constraint !== null);
+  const hv = body.holes![0].controlLocal;
+  const yA = hv[0].y;
+  const yB = hv[1].y;
+  check("hole edge solved horizontal", near(yA, yB, TOL * 2), `Δy ${(yB - yA).toExponential(2)}`);
+  check("outer outline untouched by the hole solve",
+    s.bodyControlWorld(body).every((p) => [0, 100].includes(Math.round(p.x)) && [0, 100].includes(Math.round(p.y))),
+    "outer square intact");
+
+  // Coincident between a joint and a hole corner drags the hole corner onto the joint
+  // (the joint is on a body, so both ends are geometry-ranked; they meet in between).
+  const j = s.addFreeJoint({ x: 20, y: 20 });
+  const holeCorner: MeasureRef = { kind: "vertex", bodyId: body.id, index: 0, hole: 0 };
+  const res = tryAddConstraint(s, "coincident", { kind: "joint", jointId: j.id }, holeCorner);
+  check("coincident joint ↔ hole corner accepted", res.constraint !== null);
+  const cw = s.resolveMeasureRef(holeCorner);
+  const jw = s.jointWorld(s.getJoint(j.id)!);
+  check("hole corner and joint coincide after solve",
+    cw?.kind === "point" && Math.hypot(cw.p.x - jw.x, cw.p.y - jw.y) < TOL * 2,
+    cw?.kind === "point" ? `Δ ${Math.hypot(cw.p.x - jw.x, cw.p.y - jw.y).toExponential(2)}` : "null");
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);
