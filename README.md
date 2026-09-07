@@ -213,6 +213,10 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   in place. Everything internal travels into the definition: joints, pins, grounds, sliders,
   actuators/motors, sketch constraints, dimensions and measurements. The definition's
   constraints **don't exist outside it** — instances show the designed shapes only.
+- **Start empty**: press **⊞ with nothing selected** to create a completely **empty component**,
+  opened for editing immediately — the natural way to build a component made entirely of other
+  components (place instances inside it, no throwaway body needed). An empty definition can't be
+  placed until it has content.
 - **Instances are atomic**: clicking any part selects the whole instance (dashed outline);
   drag / rotate / copy / delete act on it whole, and pasting a copied instance creates a new
   instance of the same definition. Shapes are **design-locked** — no corner handles, no sketch
@@ -225,9 +229,10 @@ through two points — CAD-style scaffolding for laying out a mechanism:
 - **Edit the definition**: double-click any instance (or use ✎ in the **component browser**,
   the panel behind the grid-of-squares toolbar button). A **breadcrumb bar** shows where you
   are (`Assembly ▸ Leg ▸ Foot` — definitions can nest); every tool works inside, including
-  Simulate. Changes **cascade live to every instance everywhere** — placements and each
-  instance's current mechanism pose are preserved. Click a breadcrumb (or press **Esc** with
-  nothing selected) to go back out.
+  Simulate. Changes **cascade live to every instance everywhere** — each instance keeps its
+  placement while its parts snap to the definition's layout (**the definition is the pose
+  reference**: what you draw inside it is exactly what every instance shows, nested components
+  included). Click a breadcrumb (or press **Esc** with nothing selected) to go back out.
 - The **component browser** lists definitions: rename inline, **＋** inserts an instance (click
   the canvas to place it), **✎** edits, **×** deletes (refused while instances exist).
   Circular references are rejected.
@@ -389,10 +394,10 @@ and hit-testing need no hierarchy concept at all. Grounds inside a definition ar
 expansion — grounded material becomes one rigid chassis group per instance, and a joint-ground
 becomes a pin to a synthesized group-locked point (a revolute to the component's frame). Editing
 a definition re-expands each instance by **reconciling** against the provenance maps: surviving
-elements keep their scene ids (and, for moving parts, their current poses — instance state),
-chassis material snaps to the definition's rigid layout at the instance's current placement
-(derived from a chassis body's pose vs its cached def-frame pose), and added/removed definition
-elements appear/disappear. Definitions can contain instances of other definitions (a DAG); a
+elements keep their scene ids while every part's pose snaps back to the definition's layout at
+the instance's current placement (derived from a chassis body's pose vs its cached def-frame
+pose — the definition is the pose reference), and added/removed definition elements
+appear/disappear. Definitions can contain instances of other definitions (a DAG); a
 change cascades through the definition graph and then into every open context.
 **Grounded bodies** are the degenerate case: an immovable host (zero mass and inertia), sacred
 like a ground anchor — grounding any member fixes its whole group.

@@ -2277,6 +2277,19 @@ export class Scene {
     return Number.isFinite(minX) ? vec((minX + maxX) / 2, (minY + maxY) / 2) : vec(0, 0);
   }
 
+  /** Create a new, completely empty component definition (no instance is placed) —
+   *  meant to be opened for editing and filled with bodies and/or instances of other
+   *  components. Instances of it can only be placed once it has content
+   *  (`instantiateComponent` refuses an empty definition). */
+  createEmptyComponent(name: string): ComponentDef {
+    const tmp = new Scene();
+    tmp.unit = this.unit;
+    const defId = this.components.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+    const def: ComponentDef = { id: defId, name, data: tmp.serializeContext() };
+    this.components.push(def);
+    return def;
+  }
+
   /**
    * Turn a selection into a new component definition and replace it with one instance
    * placed exactly where the originals were. The definition's frame is the selection's
@@ -2313,10 +2326,12 @@ export class Scene {
   }
 
   /** Expand one new instance of a definition into this context, placed by `t` (def frame
-   *  → context). Returns null for an unknown definition. */
+   *  → context). Returns null for an unknown or still-empty definition (an instance with
+   *  no material would dissolve immediately). */
   instantiateComponent(defId: number, t: InstanceTransform): ComponentInstance | null {
     const def = this.getComponent(defId);
     if (!def) return null;
+    if (def.data.bodies.length === 0 && def.data.joints.length === 0) return null;
     const inst = this.expandInstance(def, null, t);
     this.instances.push(inst);
     return inst;
@@ -2352,9 +2367,9 @@ export class Scene {
   /**
    * Re-expand every instance whose definition is in `changed`, reconciling the expanded
    * elements against the (new) definition: surviving elements keep their scene identity
-   * (ids, and — for mechanism parts — their current pose), chassis material snaps to the
-   * definition's rigid layout at the instance's current placement, new elements appear,
-   * removed ones cascade away. Returns whether anything was re-expanded.
+   * (ids), every part's pose snaps to the definition's layout at the instance's current
+   * placement (the def is the reference — cascades through nested defs), new elements
+   * appear, removed ones cascade away. Returns whether anything was re-expanded.
    */
   reexpandInstances(changed: ReadonlySet<number>): boolean {
     let did = false;
@@ -2447,9 +2462,9 @@ export class Scene {
   /**
    * The expansion engine: materialize (or reconcile) one instance of `def` into this
    * context at placement `t`. With `inst` given, elements are matched by their def-local
-   * src ids — surviving ones are updated in place (design fields from the def; poses of
-   * non-chassis parts kept as instance state), missing ones created, orphaned ones
-   * removed. Ground constraints inside the definition are **converted**, never expanded:
+   * src ids — surviving ones are updated in place (design fields AND poses from the def:
+   * every part snaps to the def layout at the instance's placement), missing ones
+   * created, orphaned ones removed. Ground constraints inside the definition are **converted**, never expanded:
    * a grounded body joins the rigid chassis group; a grounded free joint becomes a
    * group-locked chassis point; a joint-ground on a non-grounded body becomes a pin to a
    * synthesized chassis point (revolute to the component's frame). The def's own groups
@@ -2491,9 +2506,10 @@ export class Scene {
       const old = oldBodyEntries.get(db.id);
       let sb = old ? this.getBody(old.id) : undefined;
       if (sb) {
-        // Design comes from the def; pose is instance state (except chassis material,
-        // which follows the def's rigid layout at the instance's placement). The
-        // grounded flag is instance state too (grounding an instance happens outside).
+        // Design AND pose come from the def — the definition is the reference, so a
+        // re-expansion snaps every part back to the def layout at the instance's
+        // placement. Only the grounded flag is instance state (grounding an instance
+        // happens outside).
         sb.controlLocal = db.controlLocal.map((p) => vec(p.x, p.y));
         sb.local = db.local.map((p) => vec(p.x, p.y));
         sb.radius = db.radius;
@@ -2510,10 +2526,8 @@ export class Scene {
         sb.invMass = db.invMass;
         sb.invInertia = db.invInertia;
         sb.color = db.color;
-        if (chassis) {
-          sb.pos = xf(db.pos);
-          sb.angle = db.angle + t.angle;
-        }
+        sb.pos = xf(db.pos);
+        sb.angle = db.angle + t.angle;
       } else {
         sb = {
           id: this.id(),
@@ -2554,16 +2568,12 @@ export class Scene {
     for (const dj of d.joints) {
       const old = oldJointEntries.get(dj.id);
       let sj = old ? this.getJoint(old.id) : undefined;
-      const chassisPoint = dj.bodyId === null && chassisJointSrc.has(dj.id);
       if (sj) {
         if (dj.bodyId === null) {
-          if (sj.bodyId !== null) {
-            // The def detached this joint from a body — reset it to the def position.
-            sj.bodyId = null;
-            sj.local = xf(defJointWorld(dj));
-          } else if (chassisPoint) {
-            sj.local = xf(defJointWorld(dj)); // rigid to the chassis: follow the def
-          } // else: a mechanism point keeps its scene position (instance state)
+          // Free joints follow the def layout too (a joint the def detached from a
+          // body is reset the same way).
+          sj.bodyId = null;
+          sj.local = xf(defJointWorld(dj));
         } else {
           const bid = bodyIdMap.get(dj.bodyId);
           if (bid === undefined) {

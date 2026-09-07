@@ -183,7 +183,8 @@ constraints / dimensions / measurements / guides stay in the def (instances carr
 not design constraints — so instances rotate freely, which was the motivating pain with
 H/V constraints). Editing a definition **cascades** to every instance everywhere (other
 defs that use it included — defs form a DAG, cycles rejected) via a reconciling re-expansion
-that preserves each instance's placement, scene ids, and per-instance mechanism pose.
+that preserves each instance's placement and scene ids while snapping every part's pose
+back to the definition layout (the def is the pose reference).
 Prerequisite feature (also user-facing): **groups now lock free joints as members**
 (`BodyGroup.jointIds`) — point masses riding the rigid composite; a ground on a locked joint
 pivots its group about it; two locked joints can define a group-riding slider track. UI:
@@ -272,6 +273,18 @@ through save/load, copy/paste (`SelectionClip.sliders[].locked`), component expa
 cascades away with the rider; `attachSliderRider` gained a `locked` flag, plus
 `sliderOfRider` / `setSliderRiderLocked`. The analyzer counts a locked rider as removing
 2 DOF (vs 1). New test script `scripts/slider-locks.ts` (12 checks).
+**Empty components + the definition as pose reference** (no format change): pressing **⊞
+with nothing selected** now creates a **completely empty component** and opens it for
+editing — the way to build a component made entirely of other components, no throwaway
+body needed (`Scene.createEmptyComponent`; selecting only free joints still alerts, a
+component needs ≥ 1 body). `instantiateComponent` **refuses a still-empty definition** (an
+instance with no material would dissolve instantly) and the browser's ＋ insert button
+alerts with a hint to fill the def first. And re-expansion now treats the **definition as
+the pose reference**: on any def edit, every instance part — bodies AND free mechanism
+joints, not just chassis material — snaps to `T·defPose` (`T` = the instance placement,
+which is preserved), cascading through nested defs; a mechanism posed at the assembly
+level resets whenever its definition is next touched (what's drawn in the def is what
+instances show).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -399,16 +412,20 @@ cascades away with the rider; `attachSliderRider` gained a `locked` flag, plus
     `groupMap` for groups recreated from the def's own groups, and `groupId` = the chassis
     group). Key methods: `createComponentFromSelection(name, bodyIds, freeJointIds)` (packs
     the selection — via `extractSelection` with `drivenDims: true` — into a new def and
-    replaces it with one instance in place), `instantiateComponent(defId, {pos, angle})`,
+    replaces it with one instance in place), `createEmptyComponent(name)` (a blank def, no
+    instance placed — meant to be opened for editing and filled with bodies and/or
+    instances of other defs), `instantiateComponent(defId, {pos, angle})` (refuses an
+    unknown **or still-empty** definition),
     `makeInstanceUnique(instanceId)` (fork: deep-copies the instance's def into a new
     component — name `"<source> copy"` deduped — and re-points the instance's `defId`;
     the copy is identical so provenance maps stay valid and no re-expansion runs; nested
     sub-definitions stay shared),
     `reexpandInstances(changedDefIds)` (the reconciling re-expansion: surviving elements
-    keep scene ids; design fields — shape, colour, joint locals, constraint wiring — come
-    from the def; poses of non-chassis parts are **instance state** and are kept; chassis
-    poses snap to `T·defPose` where `T` = the instance placement derived from a chassis
-    body's scene pose vs its cached def pose), `removeInstance` / `dissolveInstance`
+    keep scene ids; design fields — shape, colour, joint locals, constraint wiring — AND
+    **every part's pose** come from the def: bodies and free mechanism joints all snap to
+    `T·defPose`, where `T` = the instance placement derived from a chassis body's scene
+    pose vs its cached def pose — the definition is the pose reference; only the
+    instance-level grounded flag is instance state), `removeInstance` / `dissolveInstance`
     (explode to plain elements) / `removeComponent` (refused while instances exist
     anywhere), `instanceOfBody/Joint/Constraint`, `refInstanceOwned(ref)` (used to reject
     sketch constraints + driving dimensions on instance geometry — its shape belongs to
@@ -930,9 +947,12 @@ cascades away with the rider; `attachSliderRider` gained a `locked` flag, plus
     level); per-context camera saved/restored; entering fits the view. **Component browser**
     (`#comp-panel`, toggled by `#comp-panel-btn`): rename inline, **＋** arms `pendingInsert`
     (next canvas click instantiates at the snapped point, centered via `componentCenter`;
-    cycle-guarded against `componentUses`), **✎** edits, **×** deletes (refused while
-    instances exist anywhere or the def is on `editPath`). `#make-comp-btn` packs the
-    selection (`makeComponentFromSelection`; refuses selections touching other instances).
+    cycle-guarded against `componentUses`; **refused with an alert for a still-empty def**),
+    **✎** edits, **×** deletes (refused while instances exist anywhere or the def is on
+    `editPath`). `#make-comp-btn` packs the selection (`makeComponentFromSelection`;
+    refuses selections touching other instances; with exactly one instance selected forks
+    it; **with nothing selected creates an empty component** via `createEmptyComponent`
+    and enters it for editing straight away).
     **Instance interaction**: selection-atomic via `setMulti` (expands instances + groups —
     including group `jointIds` — to a fixpoint; a lone instance body stays multi-selected so
     it never grows edit handles); clicking an instance joint/body selects the whole instance;
@@ -1395,7 +1415,7 @@ Persistence:
   locked joints is a group-riding track (addSlider doesn't auto-ground them; riders slide
   and follow the towed group); serialize/load round-trip + legacy files; copy/paste carries
   group joints.
-- **components.ts** — hierarchical components end-to-end (~70 checks): creation from a
+- **components.ts** — hierarchical components end-to-end (77 checks): creation from a
   selection (def carries sketch/measurements/grounded flags; assembly carries neither;
   instance replaces the originals exactly in place; sketch constraints on instance geometry
   rejected); joint-ground conversion (synthesized chassis anchor + pin; grounding the
@@ -1403,7 +1423,11 @@ Persistence:
   instances (rotated placement; chassis rigid under tow; other instances untouched);
   **cascade** (recolor/reshape/add/remove def bodies → every instance reconciles, surviving
   scene ids kept, placement — translation *and* rotation — preserved, new def material
-  arrives in the instance's frame); **nested defs** (editing the inner def ripples through
+  arrives in the instance's frame); **pose snap** (a posed body / free joint snaps back to
+  the def layout on re-expansion, instance placement kept — the def is the reference);
+  **empty components** (`createEmptyComponent` stores a blank def; instantiation refused
+  until it has content; fillable with bodies or with *only* an instance of another def —
+  the wrapper appears in the def DAG); **nested defs** (editing the inner def ripples through
   the outer def to the root; componentUses DAG direction); powered constraints inside a
   component (slider + actuator expand with no world grounds; anchors drive the rider along
   the chassis track); removal / dissolve / removeComponent guards; **fork / make-unique**

@@ -13,8 +13,12 @@
  *    converted anchors.
  *  - Editing the definition cascades: re-expansion updates every instance's shape while
  *    preserving each instance's placement (translation + rotation) and the scene ids of
- *    surviving elements; added/removed def elements appear/disappear; nested definitions
+ *    surviving elements; every part's pose snaps back to the definition layout (the def
+ *    is the reference); added/removed def elements appear/disappear; nested definitions
  *    (a def using another def) cascade through cascadeComponentChange.
+ *  - Empty components: createEmptyComponent starts a blank definition (instantiation is
+ *    refused until it has content) that can be filled with bodies and/or instances of
+ *    other components.
  *  - removeInstance / dissolveInstance / removeComponent behave; serialize/load
  *    round-trips components + instances (v14) and pre-v14 files load with none.
  */
@@ -238,6 +242,92 @@ function editDef(scene: Scene, defId: number, mutate: (s: Scene) => void): Set<n
   });
   check("removed def body cascades away", scene.instances.every((i) => i.bodyMap.length === 2), `${inst1.bodyMap.length} bodies`);
   check("its pin cascaded away too", scene.constraints.filter((c) => c.kind === "pin").length === 0, "0 pins");
+}
+
+// --- re-expansion snaps poses back to the definition layout ------------------------
+{
+  const scene = new Scene();
+  const base = square(scene, 0, 0);
+  scene.toggleBodyGround(base.id);
+  const arm = square(scene, 100, 0);
+  const bj = scene.addJoint(base.id, { x: 15, y: 0 });
+  const aj = scene.addJoint(arm.id, { x: 85, y: 0 });
+  scene.addPin(bj.id, aj.id);
+  const free = scene.addFreeJoint({ x: 0, y: -50 });
+  const res = scene.createComponentFromSelection("Snap", [base.id, arm.id], [free.id])!;
+  const inst = res.instance;
+  moveInstance(scene, inst.id, { x: 200, y: 100 }); // place the instance somewhere
+  const armEntry = inst.bodyMap.find((e) => !e.chassis)!;
+  const armHome = { ...scene.getBody(armEntry.id)!.pos }; // = T · def pose
+  const freeId = inst.jointMap.find((e) => scene.getJoint(e.id)?.bodyId === null)!.id;
+  const freeHome = { ...scene.jointWorld(scene.getJoint(freeId)!) };
+  const chassisBody = scene.getBody(inst.bodyMap.find((e) => e.chassis)!.id)!;
+  const chassisPose = { pos: { ...chassisBody.pos }, angle: chassisBody.angle };
+
+  // Pose the mechanism away from the def layout (drag the arm and the free joint).
+  scene.moveBody(armEntry.id, { x: 40, y: -25 });
+  scene.rotateBody(armEntry.id, scene.getBody(armEntry.id)!.pos, 0.7);
+  scene.moveJoint(freeId, { x: -30, y: 10 });
+
+  // Any def edit re-expands: the definition is the reference, poses snap back.
+  editDef(scene, res.def.id, (s) => {
+    s.bodies[0].color = "#222222";
+  });
+  const armAfter = scene.getBody(armEntry.id)!;
+  check(
+    "re-expansion snaps a posed body back to the def layout",
+    dist(armAfter.pos, armHome) < 1e-9 && Math.abs(armAfter.angle) < 1e-9,
+    `pos off ${dist(armAfter.pos, armHome).toExponential(2)}, angle ${armAfter.angle.toFixed(3)}`
+  );
+  const freeAfter = scene.jointWorld(scene.getJoint(freeId)!);
+  check(
+    "re-expansion snaps a posed free joint back",
+    dist(freeAfter, freeHome) < 1e-9,
+    `off ${dist(freeAfter, freeHome).toExponential(2)}`
+  );
+  const chassisAfter = scene.getBody(inst.bodyMap.find((e) => e.chassis)!.id)!;
+  check(
+    "instance placement itself is kept",
+    dist(chassisAfter.pos, chassisPose.pos) < 1e-9 && Math.abs(chassisAfter.angle - chassisPose.angle) < 1e-9,
+    `moved ${dist(chassisAfter.pos, chassisPose.pos).toExponential(2)}`
+  );
+}
+
+// --- empty components ---------------------------------------------------------------
+{
+  const scene = new Scene();
+  const blank = scene.createEmptyComponent("Blank");
+  check(
+    "empty component stored with no content",
+    scene.components.length === 1 && blank.data.bodies.length === 0 && blank.data.joints.length === 0,
+    blank.name
+  );
+  check(
+    "empty definition refuses instantiation",
+    scene.instantiateComponent(blank.id, { pos: { x: 0, y: 0 }, angle: 0 }) === null,
+    "null"
+  );
+  // Fill it the way the editor does (load its context, add material, store back).
+  editDef(scene, blank.id, (s) => {
+    const b = square(s, 0, 0);
+    s.toggleBodyGround(b.id);
+  });
+  const inst = scene.instantiateComponent(blank.id, { pos: { x: 50, y: 50 }, angle: 0 });
+  check("filled empty component instantiates", inst !== null && inst.bodyMap.length === 1, `${inst?.bodyMap.length ?? 0} bodies`);
+
+  // A component made entirely of other components: an empty def filled with only an
+  // instance of another def (the workflow that used to need a throwaway body).
+  const wrapper = scene.createEmptyComponent("Wrapper");
+  editDef(scene, wrapper.id, (s) => {
+    s.instantiateComponent(blank.id, { pos: { x: 0, y: 0 }, angle: 0 });
+  });
+  const wInst = scene.instantiateComponent(wrapper.id, { pos: { x: 300, y: 0 }, angle: 0 });
+  check(
+    "empty def filled with only another component instantiates",
+    wInst !== null && wInst.bodyMap.length === 1,
+    `${wInst?.bodyMap.length ?? 0} bodies`
+  );
+  check("wrapper appears in the def DAG", scene.componentUses(wrapper.id).has(blank.id), "Wrapper uses Blank");
 }
 
 // --- nested definitions cascade -------------------------------------------------

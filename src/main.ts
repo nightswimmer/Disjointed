@@ -1392,7 +1392,9 @@ function updateCompPanel(): void {
 
 /** Pack the current selection into a new component definition (replaced by an instance).
  *  With exactly one component instance selected, forks instead: the definition is copied
- *  into a new independent component and the selected instance re-pointed at the copy. */
+ *  into a new independent component and the selected instance re-pointed at the copy.
+ *  With nothing selected: creates a completely empty component and opens it for editing
+ *  (the way to build a component made entirely of other components). */
 function makeComponentFromSelection(): void {
   if (mode !== "draw") return;
   const inst = selectionInstance();
@@ -1407,8 +1409,17 @@ function makeComponentFromSelection(): void {
   }
   const bodies = multiSel ? [...multiSel.bodies] : selection?.kind === "body" ? [selection.id] : [];
   const joints = multiSel ? [...multiSel.joints] : [];
+  if (bodies.length === 0 && joints.length === 0) {
+    // Nothing selected: start an empty component and edit it straight away.
+    const def = scene.createEmptyComponent(`Component ${scene.components.length + 1}`);
+    markDirty();
+    setCompPanelVisible(true);
+    enterComponent(def.id);
+    hintEl.textContent = `Created empty component “${def.name}” — draw bodies or place instances of other components, then navigate back.`;
+    return;
+  }
   if (bodies.length === 0) {
-    window.alert("Select the bodies (and free joints) that should form the component first.");
+    window.alert("A component needs at least one body — select bodies (and free joints), or select nothing to create an empty component.");
     return;
   }
   if (selectionTouchesInstance()) {
@@ -1425,11 +1436,15 @@ function makeComponentFromSelection(): void {
 
 /** Arm a one-shot instance placement: the next draw-mode canvas click drops it there. */
 function startInsertInstance(defId: number): void {
+  const def = scene.getComponent(defId);
+  if (def && def.data.bodies.length === 0 && def.data.joints.length === 0) {
+    window.alert(`“${def.name}” is still empty — edit it and add some content before placing instances.`);
+    return;
+  }
   if (mode === "sim") setMode("draw");
   disarmTool();
   pendingInsert = defId;
   canvas.style.cursor = "copy";
-  const def = scene.getComponent(defId);
   hintEl.textContent = `Click the canvas to place an instance of “${def?.name ?? "?"}” — Esc cancels.`;
 }
 
