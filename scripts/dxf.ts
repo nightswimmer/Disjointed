@@ -202,7 +202,7 @@ const insunits = (code: number) => `9\n$INSUNITS\n70\n${code}\n`;
   scene.addBody([{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 30 }]);
   scene.unit = "in";
   const data = JSON.parse(JSON.stringify(scene.serialize())) as SceneData;
-  check("serialize writes v16 + unit", data.version === 16 && data.unit === "in",
+  check("serialize writes v17 + unit", data.version === 17 && data.unit === "in",
     `version ${data.version}, unit ${data.unit}`);
   const loaded = new Scene();
   loaded.load(data);

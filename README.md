@@ -1,7 +1,8 @@
 # Disjointed
 
 A simple web app for creating and simulating **2D planar mechanisms** — bodies (with editable,
-round-able shapes) coupled by joints (pins, grounds, sliders) that you can then drag and watch move.
+round-able shapes) coupled by joints (pins, grounds, rails with riders and sliders) that you can
+then drag and watch move.
 
 > Status: working. Draw a mechanism (freehand or from joints), edit it, switch to simulate, and
 > drag any part of it to drive it. The solver and shape/edit logic are covered by headless tests.
@@ -26,11 +27,17 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
   - **Ground** — lock a joint's position; its body can still rotate about it. A **body (or a
     whole group)** can also be grounded, which fixes it completely in simulation — position
     and rotation.
-  - **Slider** — a rail defined by two joints. Joints attached to it (riders) slide along the
+  - **Rail** — a line defined by two joints. Joints attached to it (**riders**) slide along the
     segment **between** those two joints, with hard stops at each end. The rail can be two joints
     on one body (it moves with the body, coupling two bodies) or **two free joints**, which makes
-    a track fixed in world space — the two free joints get grounded automatically.
-  - **Linear actuator** — a special rider on a slider that travels back and forth along the rail
+    a track fixed in world space — the two free joints get grounded automatically. A plain rider
+    is a **pin-in-slot**: it slides along the rail *and* rotates freely.
+  - **Slider** — a rider whose rotation is **locked**: it travels along the rail while its body
+    keeps its drawn angle relative to the rail (a prismatic joint, in CAD terms) — the way two
+    parts move relative to each other along exactly one axis. Placed with the Slider tool (`K`)
+    on any rail; the locked-in angle is whatever you drew, re-captured every time simulation
+    starts. Drawn as a small rail-aligned **carriage rectangle** on the rider.
+  - **Linear actuator** — a special rider on a rail that travels back and forth along the rail
     automatically when animation runs. Configurable speed (Hz) and motion profile (triangle = constant
     speed, sine = smooth ease). Off-animation it behaves like any other rider — draggable, pinnable.
   - **Motor** — a pivot + crank pair on one body; the crank pin orbits the pivot at a configurable
@@ -46,8 +53,8 @@ round-able shapes) coupled by joints (pins, grounds, sliders) that you can then 
   the frame**, and the definition's sketch constraints, dimensions and measurements stay inside
   the definition — instances carry the designed shapes without design-time constraints, so an
   instance can be placed at any rotation. Non-grounded parts keep moving relative to each
-  other: components can contain working mechanisms (pins, sliders, actuators, motors), and
-  definitions can nest instances of other components.
+  other: components can contain working mechanisms (pins, rails, sliders, actuators, motors),
+  and definitions can nest instances of other components.
 - **Guideline** — an **infinite construction line** through two points (Draw mode only; it
   never takes part in simulation). Placement, dragging and drawing snap onto guidelines in
   preference to the grid, and guidelines participate in sketch constraints and measurements
@@ -68,20 +75,21 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | --- | --- | --- |
 | **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
 | **Hole** | `U` | Cut a hole in a body. The **first click picks the body** (topmost under the cursor) and starts the cut-out polygon; further clicks add vertices — each kept **inside** that body (a grid snap that would land outside falls back to the exact click point). Close it by clicking the **first vertex**, **double-clicking**, or pressing **Enter** — the loop becomes an editable hole (sharp corners; round them with its radius handles afterwards), and the body is selected so the hole's handles show right away. Esc aborts. |
-| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **slider rail (or rail node)** and it's automatically attached to that slider as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
-| **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **slider rail** to attach the joint to it as a rider. |
-| **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed slider rail keeps its ground — the track must stay anchored). |
-| **Slider** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a slider rail. Attach riders later with Connect. |
+| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **rail (or rail node)** and it's automatically attached to that rail as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
+| **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **rail** to attach the joint to it as a rider. |
+| **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed rail keeps its ground — the track must stay anchored). |
+| **Rail** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a rail. Attach riders with Connect / the Joint tool, or sliders with the Slider tool. |
+| **Slider** | `K` | Click a **rail** to add a slider — a rider that travels along the rail **without rotating** (its body keeps the drawn angle relative to the rail). It attaches to the body under the cursor (or stays free until one absorbs it). Click an **existing rider** to toggle its rotation lock on/off. |
 | **Guideline** | `L` | Click **two points** to place an **infinite construction line**. Each click lands exactly on a joint / body corner / another guide's point (with an automatic **coincident** constraint), projects onto a rail or body edge, or snaps to the grid. See *Construction guidelines* below. |
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
-| **Linear actuator** | `A` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
+| **Linear actuator** | `A` | Click a **rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
-| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a slider rail, a body edge or hole edge, or a guideline). Works in **both modes** — see *Measurements* below. |
-| **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position — or a **point and a line** (body edge, slider rail or guideline, either order) to hold the point on the **infinite** line. |
-| **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, slider rail or guideline** (one click), or **two points**, to make it horizontal / vertical. |
-| **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, slider rails or guidelines) to constrain their directions — or, for Equal, their lengths (Equal doesn't take guidelines: an infinite line has no length). |
+| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a guideline). Works in **both modes** — see *Measurements* below. |
+| **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position — or a **point and a line** (body edge, rail or guideline, either order) to hold the point on the **infinite** line. |
+| **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, rail or guideline** (one click), or **two points**, to make it horizontal / vertical. |
+| **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails or guidelines) to constrain their directions — or, for Equal, their lengths (Equal doesn't take guidelines: an infinite line has no length). |
 
-**Select mode** (no tool active, the default): click a body, joint, or slider rail to select it.
+**Select mode** (no tool active, the default): click a body, joint, or rail to select it.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
 the edge makes it slide along the outline instead. A joint sitting exactly on one of its body's
 corner nodes (as in a body **built from joints**) is **stuck to that node**: dragging either one
@@ -96,8 +104,8 @@ hole, drag the centre node to move it. With a body selected you can also edit an
 **double-click**: double-click an **edge** (outer or hole) to add a node there (snapped to the
 grid when Snap is on), or double-click a **node** to remove it (outer outlines keep a minimum
 of 3) — double-clicking a hole's **last removable node deletes the whole hole**. Press
-**Delete** to remove the selection: a body takes its joints and constraints with it; a slider rail
-leaves its joints; a joint detaches from any rail.
+**Delete** to remove the selection: a body takes its joints and constraints with it; a rail
+leaves its joints; a joint detaches from any rail (taking its slider lock with it).
 
 **Rigid drag (Shift).** Hold **Shift** when you start a drag and the grabbed object moves the way
 it would in Simulate mode instead of being translated: it behaves as a rigid body, **grounds hold
@@ -179,7 +187,7 @@ through two points — CAD-style scaffolding for laying out a mechanism:
 
 - **Placement snaps to existing elements**: a click lands exactly on a joint, body corner or
   another guide's defining point (and records an automatic **coincident** constraint so the
-  guide stays attached when that point later moves), projects onto a slider rail or body
+  guide stays attached when that point later moves), projects onto a rail or body
   edge, or falls back to the grid.
 - **Snapping prefers guidelines over the grid**: with Snap on, anything you place or drag
   lands *on* a nearby guideline (projected onto it) — and where two guidelines cross, on
@@ -232,17 +240,18 @@ through two points — CAD-style scaffolding for laying out a mechanism:
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
 and editing it recolours the body.
 
-**Actuator / motor speed.** Select an actuator's rider, the slider it rides, or a motor's body
+**Actuator / motor speed.** Select an actuator's rider, the rail it rides, or a motor's body
 (or its pivot / crank joint) and a small inline panel appears in the toolbar with a speed field
 (in Hz) — and, for linear actuators, a `/\` ↔ `~` profile toggle (triangle for constant-speed
 end-to-end travel, sine for smooth ease in/out at the endstops).
 
-Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = slider rider;
-rail-defining joints get a **green ring**, and a **loose free joint a dashed ring**. Once a free
-joint is attached to a slider it's no longer loose, so it drops the dashed ring and shows as a
-normal (green) rider. While drawing, a constraint whose endpoints don't yet touch is drawn as a
-**dotted connector** so the link still reads as connected: **blue** between two pinned joints, and
-**green** from a slider rider to the **middle of its rail**.
+Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = rail rider;
+rail-defining joints get a **green ring**, a **loose free joint a dashed ring**, and an
+**orientation-locked rider (a slider)** additionally shows a green rail-aligned **carriage
+rectangle**. Once a free joint is attached to a rail it's no longer loose, so it drops the
+dashed ring and shows as a normal (green) rider. While drawing, a constraint whose endpoints
+don't yet touch is drawn as a **dotted connector** so the link still reads as connected:
+**blue** between two pinned joints, and **green** from a rider to the **middle of its rail**.
 
 **Undo / redo:** `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Shift+Z` (or `Ctrl/Cmd+Y`) redoes — covering edits to the drawn layout.
 
@@ -325,7 +334,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, hierarchical components
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, hierarchical components, slider orientation locks
 ```
 
 ## How it works
@@ -342,9 +351,12 @@ can't reach. Grounds are inviolable: a grounded joint is treated as a fixed worl
 pin/slider/driver, so pinning to it can never drag the body it sits on. When an assembly can't be
 solved, the solver disables only the genuinely unreachable pins/sliders (never a ground),
 re-solves the rest, then pulls the disabled ones as close as the freedom allows and reports them
-as breaks — so a connected impossible piece doesn't corrupt the parts that can be solved. Sliders
-are prismatic constraints with end-stops; the rail is either a body (which moves) or a world-fixed
-line built from two grounded free joints. Body outlines are
+as breaks — so a connected impossible piece doesn't corrupt the parts that can be solved. Rails
+are point-on-line constraints with end-stops; the rail is either a body (which moves) or a
+world-fixed line built from two grounded free joints. An **orientation-locked rider (slider)**
+adds the classic two-pin trick, synthesized: a phantom second point rigid in the rider's body is
+held on the infinite rail line, locking the body's angle relative to the rail at the drawn value
+(re-captured whenever the drawn layout changes). Body outlines are
 generated from a control polygon + corner radius (rounded corners via fillet or outward offset),
 with optional **per-corner radii** overriding the body default; arcs sample at 7.5° per segment.
 The fillet rounds convex and concave (reflex) corners correctly, and splits each edge between its

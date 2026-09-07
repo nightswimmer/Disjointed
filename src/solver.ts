@@ -442,6 +442,87 @@ function solveSliderRail(rider: Host, pA: Vec2, pB: Vec2, rail: RailHost, relax:
   else if (s > dl) solveAxis(rider, rail, dir, s - dl, relax);
 }
 
+// --- slider orientation locks (prismatic riders) -----------------------------
+/**
+ * Baseline for each orientation-locked rider (`SliderConstraint.locked`): the rail's
+ * direction expressed in the rider body's frame (railAngle − body.angle) at capture
+ * time. Captured lazily by the first solve that sees the lock and kept until
+ * `resetSliderLockBaselines` — main resets on every draw-mode edit and on entering sim,
+ * so simulation locks the relative angle **as drawn** (the same philosophy as pins: the
+ * drawn pose is the intended assembly). Module-level like `groupCtx` (solve isn't
+ * reentrant). A free (body-less) rider has no orientation — no baseline, lock inert.
+ */
+const lockBaselines = new Map<number, number>();
+
+/** Forget all captured lock baselines; the next solve re-captures from the current pose. */
+export function resetSliderLockBaselines(): void {
+  lockBaselines.clear();
+}
+
+/** Capture a baseline for every orientation-locked rider that doesn't have one yet. */
+function captureLockBaselines(scene: Scene): void {
+  for (const con of scene.constraints) {
+    if (con.kind !== "slider" || con.locked.length === 0) continue;
+    const ja = scene.getJoint(con.railA);
+    const jb = scene.getJoint(con.railB);
+    if (!ja || !jb) continue;
+    const d = sub(scene.jointWorld(jb), scene.jointWorld(ja));
+    if (lenSq(d) < 1e-18) continue; // degenerate rail — direction undefined
+    const railAngle = Math.atan2(d.y, d.x);
+    for (const riderId of con.locked) {
+      if (lockBaselines.has(riderId)) continue;
+      const jq = scene.getJoint(riderId);
+      if (!jq || jq.bodyId === null) continue; // free rider: nothing to orient (yet)
+      const body = scene.getBody(jq.bodyId);
+      if (body) lockBaselines.set(riderId, railAngle - body.angle);
+    }
+  }
+}
+
+/**
+ * The phantom point that enforces one orientation lock: a point rigid in the rider's
+ * body, offset from the rider along the direction the rail had in the body's frame at
+ * capture. Holding it on the infinite rail line locks the body's angle relative to the
+ * rail (the classic two-pins-on-one-rail trick, with the second pin synthesized). The
+ * offset is half the rail length, so the phantom's positional error is
+ * `(dl/2)·sin(angle error)` — commensurate with the other units' errors and tolerances.
+ * Returns null when the lock is inert (free rider, no baseline, degenerate rail).
+ */
+function lockPhantom(
+  scene: Scene,
+  jq: Joint,
+  pA: Vec2,
+  pB: Vec2
+): { phantom: Vec2; body: Body; n: Vec2; err: number } | null {
+  if (jq.bodyId === null) return null;
+  const delta = lockBaselines.get(jq.id);
+  if (delta === undefined) return null;
+  const body = scene.getBody(jq.bodyId);
+  if (!body) return null;
+  const d = sub(pB, pA);
+  const dl = len(d);
+  if (dl < 1e-9) return null;
+  const n = perp(scale(d, 1 / dl));
+  const ang = body.angle + delta;
+  const off = dl / 2;
+  const q = scene.jointWorld(jq);
+  const phantom = add(q, { x: off * Math.cos(ang), y: off * Math.sin(ang) });
+  return { phantom, body, n, err: dot(sub(phantom, pA), n) };
+}
+
+/**
+ * Project one orientation lock: drive the phantom onto the rail line. The phantom is
+ * body material, so the impulse translates + rotates the rider's body (or its whole
+ * group; a fixed body makes the correction one-sided onto the rail) — combined with the
+ * rider's own on-rail projection, the body's angle relative to the rail converges to
+ * the captured baseline without moving the rider off the rail.
+ */
+function solveLockedRider(scene: Scene, jq: Joint, pA: Vec2, pB: Vec2, rail: RailHost, relax: number): void {
+  const lp = lockPhantom(scene, jq, pA, pB);
+  if (!lp) return;
+  solveAxis(bodyHostAt(lp.body, lp.phantom), rail, lp.n, lp.err, relax);
+}
+
 /**
  * Classify a slider's rail and build its reaction host. A rail is solvable when its two
  * joints are rigid to one unit — the same body, or the same group (which is how a
@@ -532,20 +613,27 @@ function sweepStructural(
       const jb = scene.getJoint(con.railB);
       if (!ja || !jb) continue;
       for (const riderId of con.riders) {
-        if (skip.has(riderId)) continue;
         const jq = scene.getJoint(riderId);
         if (!jq) continue;
         // Recompute the rail each rider, since a rider's reaction can move the rail unit.
         const rail = railInfo(scene, ja, jb, grounded);
         if (!rail) break; // unsolvable rail configuration
         if (rail.key !== null && rigidKeyOfJoint(jq) === rail.key) continue; // rider rigid to the rail
-        solveSliderRail(
-          pinHostFor(scene, jq, grounded),
-          scene.jointWorld(ja),
-          scene.jointWorld(jb),
-          rail.host,
-          relax
-        );
+        if (!skip.has(riderId)) {
+          solveSliderRail(
+            pinHostFor(scene, jq, grounded),
+            scene.jointWorld(ja),
+            scene.jointWorld(jb),
+            rail.host,
+            relax
+          );
+        }
+        // Orientation lock (prismatic slider): its own unit, keyed by the NEGATED rider
+        // id (unique — scene ids are positive), so Phase B can disable it independently
+        // of the rider's on-rail unit.
+        if (con.locked.includes(riderId) && !skip.has(-riderId)) {
+          solveLockedRider(scene, jq, scene.jointWorld(ja), scene.jointWorld(jb), rail.host, relax);
+        }
       }
     }
   }
@@ -725,6 +813,21 @@ function eachUnit(
         const s = Math.max(0, Math.min(dl, dot(sub(q, a0), dir))); // nearest point on the rail segment
         const closest = add(a0, scale(dir, s));
         visit({ id: riderId, a: q, b: closest, error: len(sub(q, closest)), ground: false, joints: [riderId] });
+        // The rider's orientation lock is its own unit under the negated rider id: the
+        // phantom point vs its projection onto the infinite rail line (see lockPhantom).
+        if (con.locked.includes(riderId)) {
+          const lp = lockPhantom(scene, jq, a0, add(a0, d));
+          if (lp) {
+            visit({
+              id: -riderId,
+              a: lp.phantom,
+              b: sub(lp.phantom, scale(lp.n, lp.err)),
+              error: Math.abs(lp.err),
+              ground: false,
+              joints: [riderId],
+            });
+          }
+        }
       }
     }
   }
@@ -802,18 +905,25 @@ function applyBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<nu
       const jb = scene.getJoint(con.railB);
       if (!ja || !jb) continue;
       for (const riderId of con.riders) {
-        if (!broken.has(riderId)) continue;
+        const isBrokenRider = broken.has(riderId);
+        const isBrokenLock = broken.has(-riderId) && con.locked.includes(riderId);
+        if (!isBrokenRider && !isBrokenLock) continue;
         const jq = scene.getJoint(riderId);
         if (!jq) continue;
         const rail = railInfo(scene, ja, jb, grounded);
         if (!rail || (rail.key !== null && rigidKeyOfJoint(jq) === rail.key)) continue;
-        solveSliderRail(
-          pinHostFor(scene, jq, grounded),
-          scene.jointWorld(ja),
-          scene.jointWorld(jb),
-          rail.host,
-          relax
-        );
+        if (isBrokenRider) {
+          solveSliderRail(
+            pinHostFor(scene, jq, grounded),
+            scene.jointWorld(ja),
+            scene.jointWorld(jb),
+            rail.host,
+            relax
+          );
+        }
+        if (isBrokenLock) {
+          solveLockedRider(scene, jq, scene.jointWorld(ja), scene.jointWorld(jb), rail.host, relax);
+        }
       }
     }
   }
@@ -904,6 +1014,10 @@ export function solve(
   // Grounded bodies/groups — plus anything a scoped solve freezes — are immovable this solve.
   buildFixed(scene, freeze);
   freezeActive = freeze !== undefined;
+  // Orientation-locked riders without a baseline lock in their current relative angle
+  // (main resets the baselines whenever the drawn layout changes, so a new sim session
+  // — or a rigid drag — always locks the angle as drawn).
+  captureLockBaselines(scene);
   const grounded = groundedJoints(scene, anchors);
   // Frozen free joints are held exactly where they are: fixed hosts, like grounded ones.
   if (freeze?.joints) for (const id of freeze.joints) grounded.add(id);

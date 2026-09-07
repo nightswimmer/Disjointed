@@ -165,11 +165,19 @@ export interface GroundConstraint {
 }
 
 /**
- * A slider / prismatic rail: the segment between `railA` and `railB` — two joints
- * on one body. Any joint in `riders` (on other bodies) is confined to that segment
- * and slides along it. The rail moves with its body, so it couples the rail's body
- * to each rider's body. (For a world-fixed track, put the rail joints on a grounded
- * body.) A rail with no riders is just a (selectable, deletable) guide.
+ * A rail (user-facing name; historically "slider"): the segment between `railA` and
+ * `railB` — two joints on one body. Any joint in `riders` (on other bodies) is confined
+ * to that segment and slides along it. The rail moves with its body, so it couples the
+ * rail's body to each rider's body. (For a world-fixed track, put the rail joints on a
+ * grounded body.) A rail with no riders is just a (selectable, deletable) guide.
+ *
+ * `locked` (v17) names the riders that are **sliders** (prismatic carriages): besides
+ * riding the rail, the rider's body keeps its drawn orientation relative to the rail —
+ * it translates along the rail but cannot rotate. An unlocked rider is a pin-in-slot
+ * (slides AND rotates). The locked-in relative angle is captured from the drawn pose
+ * when simulation starts (see solver.ts lock baselines). A lock on a free (body-less)
+ * rider is inert until the joint gains a body (e.g. absorbed by build-body-from-joints).
+ * Always a subset of `riders`.
  */
 export interface SliderConstraint {
   kind: "slider";
@@ -177,6 +185,8 @@ export interface SliderConstraint {
   railA: number;
   railB: number;
   riders: number[];
+  /** Riders whose body's orientation is locked to the rail (prismatic sliders). */
+  locked: number[];
 }
 
 /**
@@ -477,7 +487,7 @@ export interface SelectionClip {
   /** Copied joints: attached ones carry their body's tmp id, free ones null. */
   joints: { tmp: number; bodyTmp: number | null; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
-  sliders: { tmp: number; railA: number; railB: number; riders: number[] }[];
+  sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[] }[];
   pins: { a: number; b: number }[];
   /** Powered constraints fully internal to the clip (slider/rider — body/joints — copied). */
   actuators: { slider: number; rider: number; speed: number; profile: "triangle" | "sine" }[];
@@ -491,7 +501,7 @@ export interface SelectionClip {
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
 }
 
-const FORMAT_VERSION = 16;
+const FORMAT_VERSION = 17;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -870,7 +880,8 @@ export class Scene {
         this.attachSliderRider(slider.id, nj.id);
       } else if (j.bodyId === null && !grounded && !this.groupOfJoint(j.id)) {
         // A loose free joint, or a free slider rider: absorb it. It now belongs to the new
-        // body (angle 0 at creation); if it was a rider it stays one (rider ids are kept).
+        // body (angle 0 at creation); if it was a rider it stays one (rider ids are kept —
+        // and a pending orientation lock activates now that the rider has a body).
         // A group-locked free joint is chassis material and stays independent (pinned below).
         j.bodyId = body.id;
         j.local = sub(w, body.pos);
@@ -919,17 +930,43 @@ export class Scene {
         this.addGround(id, this.jointWorld(j));
       }
     }
-    const c: SliderConstraint = { kind: "slider", id: this.id(), railA, railB, riders: [] };
+    const c: SliderConstraint = { kind: "slider", id: this.id(), railA, railB, riders: [], locked: [] };
     this.constraints.push(c);
     return c;
   }
 
-  /** Attach a joint as a rider of an existing slider (confined to its rail segment). */
-  attachSliderRider(sliderId: number, jointId: number): void {
+  /**
+   * Attach a joint as a rider of an existing rail (confined to its segment). `locked`
+   * makes it a slider (prismatic carriage): the rider's body keeps its orientation
+   * relative to the rail instead of rotating freely (see `SliderConstraint.locked`).
+   */
+  attachSliderRider(sliderId: number, jointId: number, locked = false): void {
     const c = this.constraints.find((x) => x.id === sliderId && x.kind === "slider") as
       | SliderConstraint
       | undefined;
-    if (c && !c.riders.includes(jointId)) c.riders.push(jointId);
+    if (!c) return;
+    if (!c.riders.includes(jointId)) c.riders.push(jointId);
+    if (locked && !c.locked.includes(jointId)) c.locked.push(jointId);
+  }
+
+  /** The rail a joint rides (as a rider — not as a rail-defining joint), if any. */
+  sliderOfRider(jointId: number): SliderConstraint | undefined {
+    return this.constraints.find(
+      (c): c is SliderConstraint => c.kind === "slider" && c.riders.includes(jointId)
+    );
+  }
+
+  /**
+   * Lock / unlock a rider's orientation to its rail (prismatic slider vs pin-in-slot).
+   * A no-op when the joint isn't a rider of that rail.
+   */
+  setSliderRiderLocked(sliderId: number, jointId: number, locked: boolean): void {
+    const c = this.constraints.find((x) => x.id === sliderId && x.kind === "slider") as
+      | SliderConstraint
+      | undefined;
+    if (!c || !c.riders.includes(jointId)) return;
+    if (locked && !c.locked.includes(jointId)) c.locked.push(jointId);
+    else if (!locked) c.locked = c.locked.filter((r) => r !== jointId);
   }
 
   /**
@@ -1902,6 +1939,7 @@ export class Scene {
           railA: c.railA,
           railB: c.railB,
           riders: c.riders.filter((r) => owned.has(r)),
+          locked: c.locked.filter((r) => owned.has(r)),
         });
       } else if (c.kind === "pin" && owned.has(c.jointA) && owned.has(c.jointB)) {
         pins.push({ a: c.jointA, b: c.jointB });
@@ -2063,7 +2101,7 @@ export class Scene {
       sliderIdMap.set(s.tmp, sl.id);
       for (const r of s.riders) {
         const nr = idMap.get(r);
-        if (nr !== undefined) this.attachSliderRider(sl.id, nr);
+        if (nr !== undefined) this.attachSliderRider(sl.id, nr, (s.locked ?? []).includes(r));
       }
     }
     for (const p of clip.pins) {
@@ -2622,17 +2660,22 @@ export class Scene {
         const riders = dc.riders
           .map((r) => jointIdMap.get(r))
           .filter((x): x is number => x !== undefined);
+        // Pre-v17 def data has no `locked`; sanitized loads always do.
+        const locked = (dc.locked ?? [])
+          .map((r) => jointIdMap.get(r))
+          .filter((x): x is number => x !== undefined && riders.includes(x));
         const sc = oldSceneCon(dc.id);
         if (sc && sc.kind === "slider") {
           sc.railA = a;
           sc.railB = b;
           sc.riders = riders;
+          sc.locked = locked;
           keep(dc.id, sc.id);
         } else {
           // Created directly (not via addSlider): a def's world-fixed track means
           // "fixed to the chassis", so its free rail joints must NOT be auto-grounded
           // here — they're group-locked chassis points instead.
-          const ns: SliderConstraint = { kind: "slider", id: this.id(), railA: a, railB: b, riders };
+          const ns: SliderConstraint = { kind: "slider", id: this.id(), railA: a, railB: b, riders, locked };
           this.constraints.push(ns);
           keep(dc.id, ns.id);
         }
@@ -2949,6 +2992,8 @@ export class Scene {
     this.joints = data.joints.map((j) => ({ ...j, local: vec(j.local.x, j.local.y) }));
     // Sliders: drop the legacy origin+dir form (no railA); migrate the earlier
     // single-`slider` rider field to the `riders` array; normalize riders to an array.
+    // `locked` (orientation-locked riders) arrived in v17 — older files have none, and
+    // a hand-edited lock on a non-rider is dropped (the invariant is locked ⊆ riders).
     this.constraints = data.constraints
       .filter((c) => c.kind !== "slider" || (c as { railA?: number }).railA !== undefined)
       .map((c) => {
@@ -2959,7 +3004,8 @@ export class Scene {
           : typeof s.slider === "number"
           ? [s.slider]
           : [];
-        return { kind: "slider", id: s.id, railA: s.railA, railB: s.railB, riders };
+        const locked = Array.isArray(s.locked) ? s.locked.filter((r) => riders.includes(r)) : [];
+        return { kind: "slider", id: s.id, railA: s.railA, railB: s.railB, riders, locked };
       });
     // Measurements arrived in v7; older files simply have none.
     this.measurements = Array.isArray(data.measurements)
@@ -3056,7 +3102,10 @@ function pruneConstraint(c: Constraint, removed: Set<number>): Constraint | null
   }
   if (removed.has(c.railA) || removed.has(c.railB)) return null;
   const riders = c.riders.filter((r) => !removed.has(r));
-  return riders.length === c.riders.length ? c : { ...c, riders };
+  const locked = c.locked.filter((r) => !removed.has(r));
+  return riders.length === c.riders.length && locked.length === c.locked.length
+    ? c
+    : { ...c, riders, locked };
 }
 
 // --- component cascade helpers ----------------------------------------------

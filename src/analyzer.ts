@@ -24,6 +24,8 @@ export interface AnalyzerEdge {
   /** Endpoint node keys. A body node's key is its body id; a free joint's key is the joint id. */
   a: number;
   b: number;
+  /** Slider edges only: the rider is orientation-locked (prismatic) — removes 2 DOF, not 1. */
+  locked?: boolean;
 }
 
 /** One node visited during the propagation walk: the node, its BFS depth, and the edge used to reach it. */
@@ -249,7 +251,14 @@ export function analyzeScene(scene: Scene): AnalysisReport {
       for (const riderId of c.riders) {
         const r = ownerOf.get(riderId);
         if (r === undefined || r === railOwner) continue;
-        edges.push({ via: "slider", constraintId: c.id, joints: [riderId], a: r, b: railOwner });
+        edges.push({
+          via: "slider",
+          constraintId: c.id,
+          joints: [riderId],
+          a: r,
+          b: railOwner,
+          locked: c.locked.includes(riderId),
+        });
       }
     }
   }
@@ -324,14 +333,17 @@ export function analyzeScene(scene: Scene): AnalysisReport {
 
     // DOF: planar Grübler-Kutzbach. Pins and grounds each remove 2 DOF (a point coincidence /
     // a point locked to world). A slider rider is a point-on-line contact — it slides AND
-    // rotates freely (one equality constraint in the solver) — so it removes only 1 DOF.
+    // rotates freely (one equality constraint in the solver) — so it removes only 1 DOF;
+    // an orientation-locked rider (a prismatic slider) also removes the rotation, so 2.
     const pinEdges = bucket.edges.filter((e) => e.via === "pin").length;
     const sliderEdges = bucket.edges.filter((e) => e.via === "slider").length;
+    const lockedSliderEdges = bucket.edges.filter((e) => e.via === "slider" && e.locked).length;
     const dofEstimate =
       3 * bucket.bodies.length +
       2 * bucket.freeJoints.length -
       2 * (pinEdges + groundCount) -
-      sliderEdges;
+      sliderEdges -
+      lockedSliderEdges;
 
     // Adjacency for BFS.
     const adj = new Map<number, AnalyzerEdge[]>();

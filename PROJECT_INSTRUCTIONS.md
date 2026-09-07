@@ -4,7 +4,7 @@
 A simple webapp to create and simulate 2D planar mechanisms (moving joints / linkages).
 Two modes:
 - **Drawing mode** — draw bodies, place joints (attached or free), and couple them with
-  constraints (rotation/pin, ground, slider). Joints on the same body are rigid relative to
+  constraints (rotation/pin, ground, rail + riders/sliders). Joints on the same body are rigid relative to
   each other. Bodies have an editable control polygon + corner radius; the rounded outline is
   derived from it.
 - **Simulation mode** — drag any joint, or any point on a body, to drive the mechanism; the
@@ -17,9 +17,11 @@ shortcuts; free (body-less) joints that can be grounded as anchors; bodies built
 (freehand polygon, or from existing joints); rounded corners (editable control polygon +
 radius, re-editable by dragging corner handles, with vertices added/removed by double-click,
 and a fillet that handles convex + concave corners without overlapping on thin shapes);
-sliders with end-stops whose rail is either two
+**rails** with end-stops (called "sliders" internally / pre-v17) — a rail is either two
 joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded),
-with joints auto-attached as riders when placed on a rail (Joint tool or body-from-joints);
+with joints auto-attached as riders when placed on a rail (Joint tool or body-from-joints),
+and riders optionally **orientation-locked** ("sliders", v17 — see the rails & sliders
+paragraph below);
 **linear actuators** (a self-driving rider on a slider that travels back and forth in animation
 at a configurable speed + motion profile) and **motors** (a pivot + crank pair on a body whose
 crank pin orbits the pivot at a configurable angular speed in animation), with a sim-mode
@@ -242,6 +244,34 @@ the signed perpendicular distance, split by the usual mobility ranks (a joint co
 onto a guideline moves the guide, not the joint; a drag stays pinned). A point that *is* a
 defining point of the line (an edge's end vertex, a rail's own joint, a guide's own point)
 is rejected as a permanent no-op.
+**Rails & sliders (v17)**: the S tool is now called **Rail** (the line joints ride along —
+"track"/"rail" in CAD terms; the constraint keeps `kind: "slider"` internally for format
+compatibility, but the tool id, selection kind `"rail"`, and all user-facing text say rail).
+New **Slider tool (`K`)**: click a rail to add a **slider** — an **orientation-locked
+rider** (a prismatic joint, matching Fusion 360 / Onshape naming): it travels along the
+rail but its body keeps its angle **relative to the rail** (a plain rider remains a
+pin-in-slot: slides AND rotates). The click point projects onto the rail; the new joint
+attaches to the topmost body under the cursor (excluding the rail's own body) or is free
+otherwise — a lock on a free rider is **inert until the joint gains a body** (e.g. absorbed
+by build-body-from-joints). Clicking an existing rider with the tool **toggles** its lock;
+clicking a loose joint near a rail attaches it as a locked rider. The locked-in relative
+angle is **captured from the drawn pose** when simulation starts (or a rigid Shift-drag
+begins) — `resetSliderLockBaselines()` is called from `markDirty` / sim entry /
+`setDocument`, and the solver lazily captures missing baselines per locked rider — so
+rotating the body in draw mode re-locks the new angle (the drawn pose is the intended
+assembly, same philosophy as pins). Solver implementation: the classic two-pin trick,
+synthesized — a **phantom point** rigid in the rider's body (offset dl/2 along the
+direction the rail had in the body's frame at capture) is held on the **infinite** rail
+line via `solveAxis`, so the error is `(dl/2)·sin(Δangle)`, commensurate with positional
+tolerances; works on moving rails, groups, fixed tracks, and under anchors. Each lock is
+its own Phase-B unit keyed by the **negated rider id** (unique — scene ids are positive),
+so an unreachable lock is disabled/reported independently of the rider's on-rail unit.
+Rendering: a green rail-aligned **carriage rectangle** on each locked rider.
+`SliderConstraint.locked: number[]` (⊆ riders, v17; legacy files load with none) persists
+through save/load, copy/paste (`SelectionClip.sliders[].locked`), component expansion, and
+cascades away with the rider; `attachSliderRider` gained a `locked` flag, plus
+`sliderOfRider` / `setSliderRiderLocked`. The analyzer counts a locked rider as removing
+2 DOF (vs 1). New test script `scripts/slider-locks.ts` (12 checks).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -305,11 +335,15 @@ is rejected as a permanent no-op.
     from that body's centroid; if `bodyId === null` it is a **free joint** and `local` is its
     own world position (the solver treats it as a movable point particle).
   - Constraints: `pin` (two joints coincide, free rotation), `ground` (a joint locked to a
-    fixed world point — grounding a free joint makes a body-less anchor), `slider` (a rail =
-    two joints `railA`/`railB`, plus a `riders` list of joints confined to the segment between
-    them, with end-stops). The rail is either **two joints on one body** (it moves with that
-    body, coupling two bodies) or **two free joints** (a track fixed in world space — `addSlider`
-    auto-grounds them). Riders may be body joints or free joints. Two new "powered" constraints
+    fixed world point — grounding a free joint makes a body-less anchor), `slider` (a **rail**
+    in the UI: two joints `railA`/`railB`, plus a `riders` list of joints confined to the
+    segment between them, with end-stops, and a `locked` list (v17, ⊆ riders) naming the
+    **orientation-locked riders** — "sliders" in the UI: prismatic, the rider's body keeps its
+    drawn angle relative to the rail; a plain rider is a pin-in-slot). The rail is either
+    **two joints on one body** (it moves with that body, coupling two bodies) or **two free
+    joints** (a track fixed in world space — `addSlider` auto-grounds them). Riders may be
+    body joints or free joints (a lock on a free rider is inert until it gains a body).
+    `attachSliderRider(sliderId, jointId, locked?)`, `setSliderRiderLocked`, `sliderOfRider`. Two new "powered" constraints
     layer on top of the above: `linearActuator` (a slider id + its driven rider id, `speed` in
     cycles/s, `profile: "triangle"|"sine"`) and `motor` (a body + pivot/crank joint ids on it,
     `speed` in revs/s). Off-animation they're inert (the actuator's rider is a normal slider
@@ -485,20 +519,23 @@ is rejected as a permanent no-op.
     `UNIT_TO_MM` (both exported) — a declaration of what one world unit means; changing it
     never moves geometry. Used for measurement display and DXF import conversion.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 16`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 17`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
     constraints or driving flags, pre-v9 files no groups, pre-v10 bodies load ungrounded,
     pre-v11 files no guides, pre-v12 files default to `unit: "mm"`, pre-v13 bodies have no
     holes, pre-v14 files have no components/instances and their groups get empty
-    `jointIds`, pre-v15 bodies have no per-corner `radii`, and pre-v16 files carry only
+    `jointIds`, pre-v15 bodies have no per-corner `radii`, pre-v16 files carry only
     baked `holesLocal` loops (loaded as radius-0 editable holes; v16 loads sanitize `holes`
-    and **re-derive** `holesLocal` from the controls, so the two can never disagree) —
+    and **re-derive** `holesLocal` from the controls, so the two can never disagree), and
+    pre-v17 sliders have no `locked` riders (a hand-edited lock on a non-rider is dropped:
+    locked ⊆ riders is a load invariant) —
     all load fine as-is; loaded groups/instances are pruned against the loaded elements).
     The `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its
     colour, per-corner `radii`, and **hole shapes** (`bodies[].holes`: world control +
-    radius/radii/round each), pins/grounds/sliders internal to the selection,
+    radius/radii/round each), pins/grounds/sliders internal to the selection (rails with
+    their riders **and locked lists**),
     **actuators + motors** (when their slider/body travels), groups (bodies + locked
     joints), internal sketch constraints and dimensions (driving always; driven only for
     component creation via `opts.drivenDims`).
@@ -543,6 +580,18 @@ is rejected as a permanent no-op.
   or mixes: a chassis track that moves with a component instance) — or when both are
   grounded free joints (world-fixed track); the rail host is the body / group / immovable
   line accordingly, and a fixed group makes its rails immovable lines.
+  **Slider orientation locks (v17)**: a module-level `lockBaselines` map (rider id → the
+  rail direction expressed in the rider body's frame at capture) is captured lazily by
+  `captureLockBaselines` at the top of every `solve` and cleared by the exported
+  `resetSliderLockBaselines()` (main calls it from `markDirty`, sim entry, and
+  `setDocument`, so a sim session / rigid drag locks the relative angle **as drawn**).
+  `lockPhantom` builds the enforcement point — rigid in the rider's body, offset dl/2
+  along the captured direction — and `solveLockedRider` projects it onto the infinite
+  rail line via `solveAxis` (host = `bodyHostAt`, so groups and fixed bodies behave; the
+  rail host carries the reaction). Each lock is a `StructuralUnit` keyed by the **negated
+  rider id**, so Phase B can disable / Phase C can close a lock independently of its
+  rider; a lock on a free rider, a degenerate rail, or a rider rigid to the rail unit is
+  inert.
   **Grounded bodies** (`fixedBodies` + `fixedGroups`, rebuilt per solve by `buildFixed`):
   every `grounded` body — expanded to whole groups, with the group's locked free joints
   becoming immovable too — is an **immovable fixed host** in `bodyHostAt` / `railInfo` and
@@ -633,7 +682,9 @@ is rejected as a permanent no-op.
   (spacing = `gridStep`, drawn only when `gridVisible`),
   bodies (selected/hovered highlighted; a body's **hole loops** are added as subpaths and
   filled with the **even-odd rule**, so cut-outs show what's behind them, with the body
-  outline stroked on the hole rims too), slider rails as bounded segments with end-caps,
+  outline stroked on the hole rims too), rails as bounded segments with end-caps — each
+  **orientation-locked rider** additionally badged by a green rail-aligned **carriage
+  rectangle** (`drawCarriage`, drawn with the rail so it exists in both modes),
   ground symbols (per ground constraint, plus one at the **centroid of every grounded
   body** — each member of a grounded group carries the flag, so each shows its own),
   joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
@@ -710,6 +761,14 @@ is rejected as a permanent no-op.
     second joint on the **same body** becomes the crank pin (mismatched second click restarts the
     draft at the new joint). Both tools select the resulting element so the inline properties panel
     appears right away.
+  - **Slider tool** (`K`, draw mode, one-shot): on an existing **rider** → toggles its
+    orientation lock (`setSliderRiderLocked`); on another joint near a rail (not a rail
+    endpoint) → attaches it as a locked rider; on a bare rail → mints a joint at the click
+    projected onto the rail — attached to the topmost body under the cursor excluding the
+    rail's own body (`bodiesAt` is topmost-first), else free — and attaches it locked
+    (`attachSliderRider(id, jid, true)`). Selects the resulting joint. The rail tool keeps
+    `S` (renamed from "Slider"; tool id `"rail"`, selection kind `"rail"`, renderer input
+    `railDraft`).
   - **Guideline tool** (`L`, draw mode; the actuator's shortcut moved to `A`): two clicks
     through `guidePlacementAt` — exactly on a picked point element (joint / body corner /
     guide point; recorded and turned into an **auto-coincident** via `tryAddConstraint`),
@@ -920,8 +979,8 @@ is rejected as a permanent no-op.
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or shortcut —
-`B`/`U` hole/`J`/`C`/`G`/`S`/`L` guideline/`A` actuator/`M`) lets you place one element, then it
-returns to **Select** mode. `Esc` aborts the current placement.
+`B`/`U` hole/`J`/`C`/`G`/`S` rail/`K` slider/`L` guideline/`A` actuator/`M`) lets you place one
+element, then it returns to **Select** mode. `Esc` aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
   **existing joint**: build a body *from joints* — click joints to outline (loose free joints
@@ -955,9 +1014,17 @@ returns to **Select** mode. `Esc` aborts the current placement.
   the cursor**, clicking a **body** toggles grounding of the whole body — fixed position
   *and* rotation in sim — and, through a grouped body, of its **whole group** (any member
   grounded → all ungrounded, else all grounded).
-- **Slider** (`S`) — click two joints on the *same body* (a rail that moves with it), or two
-  *free joints* (a world-fixed track — they get grounded automatically), to create a slider rail
-  (riders are attached later via Connect). A free+body or cross-body pair restarts the draft.
+- **Rail** (`S` — called "Slider" pre-v17) — click two joints on the *same body* (a rail that
+  moves with it), or two *free joints* (a world-fixed track — they get grounded automatically),
+  to create a rail (riders are attached later via Connect, the Joint tool, or the Slider tool).
+  A free+body or cross-body pair restarts the draft.
+- **Slider** (`K`) — click a **rail** to add a slider: an **orientation-locked rider** that
+  travels along the rail while its body keeps its drawn angle relative to it (prismatic —
+  a plain rider is a pin-in-slot). The click projects onto the rail; the joint attaches to
+  the topmost body under the cursor (excluding the rail's own body), else it's free (the
+  lock activates once the joint gains a body). Clicking an **existing rider** toggles its
+  rotation lock; clicking a loose joint near a rail attaches it as a locked rider. The
+  locked angle re-captures from the drawn pose on every sim entry / rigid drag.
 - **Guideline** (`L`) — two clicks place an **infinite construction line**. Clicks land
   exactly on joints / body corners / other guides' points (with an auto-coincident), project
   onto rails / body edges, or grid/guide-snap. Select it to drag the whole line (angle kept)
@@ -1174,7 +1241,11 @@ Persistence:
   grounded free joints), or `null` (unsolvable) — the sweep and the residual check share it so
   they agree. The body-rail angular Jacobian reduces to `cross(u, pQ − posR)`; the fixed rail is
   just the zero-mass degenerate case (single-sided, like a grounded body). A rider may be a body
-  joint or a free joint.
+  joint or a free joint. An **orientation-locked rider** (v17) adds one more scalar projection:
+  a phantom point rigid in the rider's body is held on the infinite rail line (the two-pin
+  trick synthesized), locking the body's angle relative to the rail at the value captured from
+  the drawn pose — baselines live in the solver module and are reset by main whenever the
+  drawn layout changes.
 - **Host abstraction** (`hostFor`): every constraint participant is reduced to a `{ point, pos,
   invMass, invInertia, apply }` host — a body (translate + rotate), a free joint (translate
   only, zero inertia), or a fixed world point (immovable). This unifies pin/ground/slider/driver
@@ -1207,6 +1278,12 @@ Persistence:
 - **free-rail.ts** — a slider built from two **free** joints: asserts `addSlider` auto-grounds
   both, a free rider stays on the world-fixed line (zero offset), the rail joints never move,
   and the rider clamps at each grounded endpoint.
+- **slider-locks.ts** — orientation-locked riders (v17, 12 checks): a locked rider's body
+  never rotates on a fixed track (and stays on the rail) while the same drag rotates it once
+  unlocked; the baseline locks a tilted **drawn** angle; a locked body keeps its angle
+  *relative to* a moving (pivoting) rail; save/load keeps `locked` and legacy sliders load
+  with none; deleting the rider sheds rider + lock; copy/paste recreates the lock on the
+  pasted rider; an impossible lock+ground reports a break with the ground unmoved.
 - **ground-drag.ts** — drags a joint on a grounded body to far/off-axis/unreachable targets;
   asserts the ground never moves and the joint snaps to the nearest reachable angle.
 - **persistence.ts** — round-trips a scene through `serialize → JSON → load`; asserts counts,
@@ -1513,7 +1590,12 @@ Persistence:
   cut-out hugging a concave outer outline can poke outside — harmless: even-odd rendering,
   still editable).
 - **DXF follow-ups**: SPLINE sampling, INSERT/block instancing, ellipses; DXF *export*.
-- More joint types as needed.
+- More joint types as needed. (~~A prismatic / no-rotation slide joint~~ — done in v17: the
+  Slider tool's orientation-locked riders.) **Slider follow-ups**: the locked angle is always
+  re-captured from the drawn pose (by design — no stored angle parameter); if an explicit,
+  persistent relative angle is ever wanted, store a per-lock phase in the constraint instead
+  of the solver-side baseline map. A group-locked *free* rider has no orientation, so its
+  lock is inert (attach the slider to a body of the group instead).
 - Joint containment covers placement + drags only (by choice): **reshaping** a body (corner
   handles, radius shrink, vertex removal) can still strand an already-placed joint outside the
   new outline. If that bites, clamp stranded joints back in `rebuildBody`.

@@ -13,10 +13,10 @@ export interface RenderInput {
   hoverJoint: number | null;
   /** Body hovered in normal/select mode (for pre-selection feedback). */
   hoverBody: number | null;
-  /** Joints highlighted as in-progress tool picks (connect's first pick, slider rail picks). */
+  /** Joints highlighted as in-progress tool picks (connect's first pick, rail picks). */
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
-  selection: { kind: "body" | "joint" | "slider" | "measure" | "sketch" | "guide"; id: number } | null;
+  selection: { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "guide"; id: number } | null;
   /** Draw-mode multi-selection (Ctrl+click / box select): bodies + free joints, highlighted. */
   multiSelected: { bodies: number[]; joints: number[] } | null;
   /** In-progress box selection: the rectangle's two world corners, or null. */
@@ -43,10 +43,10 @@ export interface RenderInput {
   /** Per-corner radius handles for the selected body (circle = drag to round that corner). */
   filletHandles: Vec2[] | null;
   /**
-   * While defining a slider: the world positions of the rail joints picked so far
+   * While defining a rail: the world positions of the rail joints picked so far
    * (1 → previewing toward the cursor; 2 → rail set, awaiting the riding joint).
    */
-  sliderDraft: { rail: Vec2[]; cursor: Vec2 } | null;
+  railDraft: { rail: Vec2[]; cursor: Vec2 } | null;
   /** Guide tool: the first defining point placed (line previews toward the cursor). */
   guideDraft: { a: Vec2; cursor: Vec2 } | null;
   /**
@@ -278,29 +278,31 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     drawHull(pts);
   }
 
-  // Slider rails (drawn under joints): a bounded segment between the two rail joints,
-  // with end-caps marking the stops that the riding joint is clamped between.
-  const selectedSlider =
-    input.selection?.kind === "slider" ? input.selection.id : null;
+  // Rails (drawn under joints): a bounded segment between the two rail joints, with
+  // end-caps marking the stops that the riding joint is clamped between.
+  const selectedRail =
+    input.selection?.kind === "rail" ? input.selection.id : null;
   for (const c of scene.constraints) {
     if (c.kind !== "slider") continue;
     const ja = scene.getJoint(c.railA);
     const jb = scene.getJoint(c.railB);
     if (!ja || !jb) continue;
-    const sel = c.id === selectedSlider;
-    drawRailSegment(
-      ctx,
-      scene.jointWorld(ja),
-      scene.jointWorld(jb),
-      sel ? theme.ink : "#5bd6a6",
-      px(sel ? 2.5 : 1.5),
-      px(6)
-    );
+    const a = scene.jointWorld(ja);
+    const b = scene.jointWorld(jb);
+    const sel = c.id === selectedRail;
+    drawRailSegment(ctx, a, b, sel ? theme.ink : "#5bd6a6", px(sel ? 2.5 : 1.5), px(6));
+    // Orientation-locked riders (prismatic sliders) get a rail-aligned carriage
+    // rectangle on top of the rail so they read differently from pin-in-slot riders.
+    for (const riderId of c.locked) {
+      const rj = scene.getJoint(riderId);
+      if (!rj) continue;
+      drawCarriage(ctx, scene.jointWorld(rj), sub(b, a), px(10), px(6), "#5bd6a6", px(1.5));
+    }
   }
 
-  // In-progress slider: dashed preview of the rail segment being defined.
-  if (input.sliderDraft) {
-    const { rail, cursor } = input.sliderDraft;
+  // In-progress rail: dashed preview of the segment being defined.
+  if (input.railDraft) {
+    const { rail, cursor } = input.railDraft;
     ctx.setLineDash([px(6), px(4)]);
     drawRailSegment(ctx, rail[0], rail.length >= 2 ? rail[1] : cursor, "#9aa0ac", px(1.5), px(6));
     ctx.setLineDash([]);
@@ -867,6 +869,37 @@ function dot(ctx: CanvasRenderingContext2D, p: Vec2, r: number, color: string): 
   ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
+}
+
+/**
+ * Draw a slider carriage: a rail-aligned rectangle centered on an orientation-locked
+ * rider, badging it as prismatic (travels along the rail, no rotation) rather than a
+ * pin-in-slot. `along` is the rail direction (any length).
+ */
+function drawCarriage(
+  ctx: CanvasRenderingContext2D,
+  at: Vec2,
+  along: Vec2,
+  halfLen: number,
+  halfWid: number,
+  color: string,
+  lineWidth: number
+): void {
+  const l = Math.hypot(along.x, along.y);
+  if (l < 1e-9) return;
+  ctx.save();
+  // Rotate the canvas so the rectangle's long axis follows the rail.
+  ctx.transform(along.x / l, along.y / l, -along.y / l, along.x / l, at.x, at.y);
+  ctx.beginPath();
+  ctx.rect(-halfLen, -halfWid, halfLen * 2, halfWid * 2);
+  ctx.globalAlpha = 0.25;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.stroke();
+  ctx.restore();
 }
 
 /** Draw the bounded rail segment a→b with perpendicular end-caps marking the stops. */
