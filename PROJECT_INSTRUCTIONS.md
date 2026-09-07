@@ -72,7 +72,7 @@ click-to-select, draggable (re-derives h/v/direct), Delete to remove — all in 
 Serialized (v7), cascade-removed with their elements, vertex/edge refs remapped across
 control-node insert/remove.
 **CAD-style sketch constraints** (draw mode, serialization v8): a constraint set —
-**coincident** (point–point), **horizontal / vertical** (a line, or a point pair),
+**coincident** (point–point, or point-on-line — see below), **horizontal / vertical** (a line, or a point pair),
 **parallel / perpendicular / equal-length** (line–line) — over joints, body control
 vertices, body edges and slider rails (reusing the `MeasureRef` system, so constraints
 remap/prune like measurements). A new **sketch solver** (`src/sketch.ts`, Gauss-Seidel
@@ -234,6 +234,14 @@ definition, and the hint line announces the fork. Works inside definition-editin
 stay **shared**, the def DAG gains one node with the same out-edges). Undo/save needed no
 work (`canonicalData` already persists `scene.components`). A selection mixing an instance
 with other material still alerts, now explaining both options.
+**Point-on-line coincident** (no format change): the Coincident constraint (`O`) now also
+takes a **point + a line** (body edge, slider rail, or guideline — either pick order; the
+point is normalized into `refA`, where the single badge anchors) and holds the point on the
+**infinite** line — consistent with point+line measurements and H/V. The sketch solver zeroes
+the signed perpendicular distance, split by the usual mobility ranks (a joint constrained
+onto a guideline moves the guide, not the joint; a drag stays pinned). A point that *is* a
+defining point of the line (an edge's end vertex, a rail's own joint, a guide's own point)
+is rejected as a permanent no-op.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -460,7 +468,11 @@ with other material still alerts, now explaining both options.
     vertical / parallel / perpendicular / equal and the refs are `MeasureRef`s (`refB` is
     null for H/V on a single line ref). `addSketchConstraint` validates ref kinds per
     constraint kind (points = joint/vertex — `bodyPoint` is measurement-only; lines =
-    rail/edge), rejects duplicates of the same element and unresolvable refs.
+    rail/edge), rejects duplicates of the same element and unresolvable refs. Coincident
+    takes two points, **or a point + a line** (point-on-line, normalized so the point is
+    `refA`; `pointIsLineEndpoint` rejects a point that structurally *ends* the line — an
+    edge's own vertices, a rail's own joints, a guide's own defining points — as a
+    trivially-satisfied no-op).
     `removeSketchConstraint` / `getSketchConstraint`; `pruneSketch` runs alongside
     `pruneMeasurements` (element deletion cascades) and `shiftMeasureIndices` also remaps
     sketch vertex/edge refs. `sameMeasureRef` (exported) compares refs by element.
@@ -552,7 +564,10 @@ with other material still alerts, now explaining both options.
   positions of body **control vertices** (`v:body:index`) and **joints** (`j:id`) — a
   joint coincident with one of its body's control vertices maps onto the vertex variable
   (the node↔joint link), so constraints on it reshape the body. Each constraint /
-  driving dimension becomes a projection item (coincident → midpoint; H/V → average the
+  driving dimension becomes a projection item (coincident → midpoint; point-on-line
+  coincident → zero the signed perpendicular distance to the **infinite** line — the point
+  moves along the normal, the line translates toward it, rank-weighted like a point+line
+  driving dimension with target 0; H/V → average the
   coordinate; parallel/perpendicular → rotate both lines half-way about their midpoints;
   equal → scale both lines to the mean length; distance dims → symmetric point/line
   moves along the axis/normal — a driving line–line distance also keeps the pair
@@ -723,7 +738,9 @@ with other material still alerts, now explaining both options.
   - **Sketch-constraint tools** (`O`/`H`/`V`/`P`/`T`/`E`, draw mode, one-shot; tool name =
     constraint kind): pick the reference(s) — points via `constraintPointRefAt`
     (joint → body corner), lines via `constraintLineRefAt` (rail → body edge); H/V on a
-    line commits on the first click, everything else on the second. `commitConstraint` →
+    line commits on the first click, everything else on the second. Coincident picks
+    accept a point *or* a line on either click (point preferred when both are under the
+    cursor; once a line is picked the other pick must be a point). `commitConstraint` →
     `tryAddConstraint`: the geometry solves to satisfy the new constraint immediately, or
     the add is rejected and the conflicting items **flash red** (`sketchFlash`, 1.2 s).
     Badge positions come from `sketchGlyphsView()` (one badge per referenced element,
@@ -961,7 +978,9 @@ returns to **Select** mode. `Esc` aborts the current placement.
   perpendicular distance to the infinite line. Line+line: distance while parallel, angle
   otherwise (dynamic; the label's sector picks θ vs 180−θ). Values update live in sim.
 - **Sketch constraints** (draw mode only): **Coincident** (`O`) — two points (joints, body
-  corners — hole corners included — guide points). **Horizontal**
+  corners — hole corners included — guide points), **or a point + a line** (body edge,
+  slider rail, or guideline; either pick order) to hold the point on the **infinite**
+  line. **Horizontal**
   (`H`) / **Vertical** (`V`) — one edge/rail/guideline, or two points. **Parallel** (`P`) /
   **Perpendicular** (`T`) — two lines (edges/rails/guidelines — hole edges included);
   **Equal length** (`E`) —
@@ -1263,7 +1282,13 @@ Persistence:
   `autoConstrainBody` H/V inference (diagonals left alone); cascade removal + vertex/edge
   index remapping; serialize/load v8 round-trip + pre-v8 files. **Hole geometry (v16)**:
   a horizontal constraint on a hole edge solves by reshaping the hole (outer outline
-  untouched), and joint ↔ hole-corner coincident solves to coincidence.
+  untouched), and joint ↔ hole-corner coincident solves to coincidence. **Point-on-line
+  coincident**: validation (line-first pick order normalized to point-as-refA, line+line
+  rejected, structural line endpoints — edge vertices incl. the wrapping one, a rail's own
+  joint, a guide's own point — rejected); a joint beyond the segment lands on the
+  *infinite* edge line with a purely perpendicular correction split evenly with the edge;
+  save/load round-trip + re-solve; a free joint solved onto a rail line; a joint onto a
+  guideline moving only the guide (mobility ranks).
 - **measurements.ts** — axis selection from label placement (h / v / direct zones);
   point-point values + dimension-line geometry + preview parity; label move re-deriving the
   axis; values and label positions tracking moving geometry; point-line using the infinite
@@ -1459,8 +1484,9 @@ Persistence:
   fully-internal ones + driving dimensions.)
 - Measurement follow-ups: copy/paste doesn't carry *driven* (reference) measurements
   (consistent with actuators/motors; driving dimensions are carried, as constraints).
-- **Guideline follow-ups**: no point-**on**-line constraint kind yet (a guide point placed
-  on an edge/rail lands there but isn't constrained to stay); guides don't join
+- **Guideline follow-ups**: ~~no point-**on**-line constraint kind yet~~ (done — Coincident
+  now takes point + line, so a guide point can be constrained to stay on an edge/rail —
+  though placement-time snaps still don't record it automatically); guides don't join
   multi-selections / copy / mirror / rotate; the violet hover highlight for a guide-line
   ref covers only the defining segment (picking works anywhere on the infinite line);
   guides are deliberately invisible + unpickable in sim. If "level two joints through a

@@ -856,7 +856,7 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   linearActuator: "Click a slider rail to drop a self-driving rider — it travels back and forth when animation runs.",
   motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
   measure: "Click two references — a joint, body corner, body edge, slider rail, guideline, or a point on a body — then click where the value should sit.",
-  coincident: "Click two points (joints, body corners, or guideline points) to make them share a position.",
+  coincident: "Click two points (joints, body corners, or guideline points) to make them share a position — or a point and a line (body edge, slider rail or guideline) to hold the point on the infinite line.",
   horizontal: "Click a body edge, slider rail or guideline — or two points — to make it horizontal.",
   vertical: "Click a body edge, slider rail or guideline — or two points — to make it vertical.",
   parallel: "Click two lines (body edges, slider rails or guidelines) to make them parallel.",
@@ -1907,7 +1907,17 @@ function constraintRefAt(p: Vec2): MeasureRef | null {
   if (kind === "parallel" || kind === "perpendicular" || kind === "equal") {
     return constraintLineRefAt(p);
   }
-  if (kind === "coincident") return constraintPointRefAt(p);
+  if (kind === "coincident") {
+    // Point + point, or point + line (either pick order): a pick prefers a point but
+    // also takes a line — unless a line is already picked (a line pair is invalid).
+    if (constraintPicks.length === 0) return constraintPointRefAt(p) ?? constraintLineRefAt(p);
+    const firstIsLine =
+      constraintPicks[0].kind === "rail" ||
+      constraintPicks[0].kind === "edge" ||
+      constraintPicks[0].kind === "guideLine";
+    if (firstIsLine) return constraintPointRefAt(p);
+    return constraintPointRefAt(p) ?? constraintLineRefAt(p);
+  }
   // Horizontal / vertical: the first pick prefers a point but also takes a line (which
   // commits immediately); the second pick must be the pair's other point.
   if (constraintPicks.length === 0) return constraintPointRefAt(p) ?? constraintLineRefAt(p);
@@ -3751,7 +3761,9 @@ function refHovered(ref: MeasureRef, p: Vec2): boolean {
  * On-canvas badges for every sketch constraint (draw mode only): one badge per referenced
  * element, offset from it in screen terms so it stays put at any zoom — beside a point,
  * off the midpoint of a line. Multiple badges on one element stack sideways. Coincident
- * gets a single badge (its two points share a position). Badges render faded unless the
+ * gets a single badge on refA — always the point: two coincident points share a
+ * position, and a point-on-line coincident normalizes the point into refA. Badges
+ * render faded unless the
  * cursor is over one of the constraint's elements (or a badge itself). The result is
  * cached for click hit-testing (`sketchGlyphAt`).
  */

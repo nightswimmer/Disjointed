@@ -77,7 +77,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Linear actuator** | `A` | Click a **slider rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
 | **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a slider rail, a body edge or hole edge, or a guideline). Works in **both modes** — see *Measurements* below. |
-| **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position. |
+| **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position — or a **point and a line** (body edge, slider rail or guideline, either order) to hold the point on the **infinite** line. |
 | **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, slider rail or guideline** (one click), or **two points**, to make it horizontal / vertical. |
 | **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, slider rails or guidelines) to constrain their directions — or, for Equal, their lengths (Equal doesn't take guidelines: an infinite line has no length). |
 
@@ -187,8 +187,9 @@ through two points — CAD-style scaffolding for laying out a mechanism:
 - **Editing**: click to select (its two defining points show as dots); drag the **line** to
   move it whole (angle preserved), drag a **defining point** to re-aim it, **Delete** to
   remove it (its constraints and measurements go with it).
-- **Constraints on guidelines** (H / V / parallel / perpendicular / coincident, and
-  measurements — including driving dimensions) follow one strict rule: they are satisfied
+- **Constraints on guidelines** (H / V / parallel / perpendicular / coincident — a guide
+  point onto another point, or a point held **on** the guide's infinite line — and
+  measurements, including driving dimensions) follow one strict rule: they are satisfied
   by moving **only free guide points — never joints or body nodes**. A constraint that
   would need geometry to move is rejected with a red flash (e.g. Horizontal on a guide
   whose both points are bound to joints at different heights). Constraints hold **during**

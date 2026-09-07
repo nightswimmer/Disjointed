@@ -251,6 +251,40 @@ function buildConstraintItem(
   c: SketchConstraint
 ): SolveItem | null | "invalid" {
   const kind = c.kind;
+  const isLineRef = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
+  if (kind === "coincident" && c.refB && (isLineRef(c.refA) || isLineRef(c.refB))) {
+    // Point on an infinite line: zero the signed perpendicular distance. The model
+    // normalizes the point into refA, but handle either order (robust to hand-edited
+    // saves). Same projection as a point+line driving dimension with target 0.
+    const aLine = isLineRef(c.refA);
+    const kp = pointVarKey(scene, aLine ? c.refB : c.refA);
+    const kl = lineVarKeys(scene, aLine ? c.refA : c.refB);
+    if (!kp || !kl) return "invalid";
+    const p = acquire(scene, sys, kp);
+    const l0 = acquire(scene, sys, kl[0]);
+    const l1 = acquire(scene, sys, kl[1]);
+    if (p === null || l0 === null || l1 === null) return "invalid";
+    if (p === l0 || p === l1) return null; // the point ends the line: on it by construction
+    const wp = shareOf(sys.rank[p], Math.min(sys.rank[l0], sys.rank[l1])); // fraction the point absorbs
+    return {
+      id: c.id,
+      kind: "constraint",
+      run(pos, apply) {
+        const d = sub(pos[l1], pos[l0]);
+        const l = len(d);
+        if (l < EPS) return 0; // degenerate line: nothing to project onto
+        const n = perp(scale(d, 1 / l));
+        const s = dot(sub(pos[p], pos[l0]), n); // signed distance off the line
+        if (apply) {
+          pos[p] = sub(pos[p], scale(n, s * wp));
+          const shift = scale(n, s * (1 - wp)); // line comes to the point (rank-weighted)
+          pos[l0] = add(pos[l0], shift);
+          pos[l1] = add(pos[l1], shift);
+        }
+        return Math.abs(s);
+      },
+    };
+  }
   if (kind === "coincident" || ((kind === "horizontal" || kind === "vertical") && c.refB)) {
     const ka = pointVarKey(scene, c.refA);
     const kb = c.refB ? pointVarKey(scene, c.refB) : null;

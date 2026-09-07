@@ -304,9 +304,10 @@ export interface Measurement {
 
 /**
  * Kinds of CAD-style sketch constraints (draw mode only):
- * `coincident` — two points share a position; `horizontal`/`vertical` — a line (or a
- * point pair) is axis-aligned; `parallel`/`perpendicular` — two lines' directions;
- * `equal` — two lines have equal length.
+ * `coincident` — two points share a position, or a point lies on an infinite line;
+ * `horizontal`/`vertical` — a line (or a point pair) is axis-aligned;
+ * `parallel`/`perpendicular` — two lines' directions; `equal` — two lines have equal
+ * length.
  */
 export type SketchConstraintKind =
   | "coincident"
@@ -1208,14 +1209,17 @@ export class Scene {
 
   /**
    * Create a sketch constraint. Reference kinds are validated per constraint kind:
-   * `coincident` takes two point refs; `horizontal`/`vertical` take one line ref (refB
+   * `coincident` takes two point refs, or a point ref + a line ref (the point is held
+   * on the **infinite** line; normalized so the point is stored as `refA`);
+   * `horizontal`/`vertical` take one line ref (refB
    * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs.
    * Point refs are joints, body control vertices, or guideline defining points
    * (`bodyPoint` refs are measurement-only — the sketch solver can't move them
    * independently); line refs are slider rails, body control edges, or guidelines
    * (except `equal`, which rejects guidelines — an infinite line has no length).
    * Returns null on a kind mismatch, an unresolvable ref, or two refs naming the
-   * same element.
+   * same element (for point-on-line: a point that *is* an endpoint of the line, which
+   * would be trivially satisfied forever).
    */
   addSketchConstraint(
     kind: SketchConstraintKind,
@@ -1224,9 +1228,13 @@ export class Scene {
   ): SketchConstraint | null {
     const isPoint = (r: MeasureRef) => r.kind === "joint" || r.kind === "vertex" || r.kind === "guidePoint";
     const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
-    const b = refB ?? null;
+    let b = refB ?? null;
     if (kind === "coincident") {
-      if (!b || !isPoint(refA) || !isPoint(b)) return null;
+      if (!b) return null;
+      // Normalize point-on-line order: the point is stored as refA (the badge anchors there).
+      if (isLine(refA) && isPoint(b)) [refA, b] = [b, refA];
+      if (!isPoint(refA) || !(isPoint(b) || isLine(b))) return null;
+      if (isLine(b) && this.pointIsLineEndpoint(refA, b)) return null;
     } else if (kind === "horizontal" || kind === "vertical") {
       if (b ? !(isPoint(refA) && isPoint(b)) : !isLine(refA)) return null;
     } else {
@@ -1248,6 +1256,31 @@ export class Scene {
     };
     this.sketch.push(c);
     return c;
+  }
+
+  /**
+   * Whether a point ref structurally names one of a line ref's two defining points
+   * (a vertex that ends the edge, a rail's own joint, a guideline's defining point) —
+   * such a point lies on the line by construction, so a coincident between them is a
+   * permanent no-op and gets rejected.
+   */
+  private pointIsLineEndpoint(pt: MeasureRef, ln: MeasureRef): boolean {
+    if (ln.kind === "edge" && pt.kind === "vertex") {
+      if (pt.bodyId !== ln.bodyId || (pt.hole ?? null) !== (ln.hole ?? null)) return false;
+      const body = this.getBody(ln.bodyId);
+      const ctrl =
+        body && (ln.hole ?? null) === null
+          ? body.controlLocal
+          : body?.holes?.[ln.hole!]?.controlLocal ?? null;
+      if (!ctrl) return false;
+      return pt.index === ln.index || pt.index === (ln.index + 1) % ctrl.length;
+    }
+    if (ln.kind === "rail" && pt.kind === "joint") {
+      const s = this.constraints.find((c) => c.kind === "slider" && c.id === ln.sliderId);
+      return !!s && s.kind === "slider" && (s.railA === pt.jointId || s.railB === pt.jointId);
+    }
+    if (ln.kind === "guideLine" && pt.kind === "guidePoint") return ln.guideId === pt.guideId;
+    return false;
   }
 
   getSketchConstraint(id: number): SketchConstraint | undefined {

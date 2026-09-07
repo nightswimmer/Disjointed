@@ -37,7 +37,8 @@ const TOL = sketchConfig.tol;
   const bodyPointRef: MeasureRef = { kind: "bodyPoint", bodyId: body.id, local: { x: 0, y: 0 } };
 
   check("coincident point+point ok", s.addSketchConstraint("coincident", jointRef, vertexRef) !== null);
-  check("coincident with a line ref rejected", s.addSketchConstraint("coincident", jointRef, edgeRef) === null);
+  check("coincident point+line ok", s.addSketchConstraint("coincident", jointRef, edgeRef) !== null);
+  check("coincident line+line rejected", s.addSketchConstraint("coincident", edgeRef, { kind: "edge", bodyId: body.id, index: 1 }) === null);
   check("coincident with a bodyPoint rejected", s.addSketchConstraint("coincident", jointRef, bodyPointRef) === null);
   check("coincident same element rejected", s.addSketchConstraint("coincident", jointRef, { kind: "joint", jointId: j.id }) === null);
   check("horizontal on a line ok", s.addSketchConstraint("horizontal", edgeRef) !== null);
@@ -568,6 +569,88 @@ const TOL = sketchConfig.tol;
   check("hole corner and joint coincide after solve",
     cw?.kind === "point" && Math.hypot(cw.p.x - jw.x, cw.p.y - jw.y) < TOL * 2,
     cw?.kind === "point" ? `Δ ${Math.hypot(cw.p.x - jw.x, cw.p.y - jw.y).toExponential(2)}` : "null");
+}
+
+// --- coincident point-on-line (infinite line) ------------------------------------
+{
+  const s = new Scene();
+  const body = s.addBody([
+    { x: 0, y: 0 },
+    { x: 100, y: 0 },
+    { x: 100, y: 100 },
+    { x: 0, y: 100 },
+  ]);
+  const edge0: MeasureRef = { kind: "edge", bodyId: body.id, index: 0 }; // bottom, y = 0
+
+  // Normalization: line first still stores the point as refA (badges anchor there).
+  const j = s.addFreeJoint({ x: 200, y: 30 });
+  const c = s.addSketchConstraint("coincident", edge0, { kind: "joint", jointId: j.id });
+  check("point+line accepted with the line picked first", c !== null);
+  check("normalized: point stored as refA", c!.refA.kind === "joint" && c!.refB?.kind === "edge");
+
+  // Structural endpoints of the line are on it forever — rejected as no-ops.
+  check("edge start vertex on its own edge rejected",
+    s.addSketchConstraint("coincident", { kind: "vertex", bodyId: body.id, index: 0 }, edge0) === null);
+  check("edge end vertex (wrapping) rejected",
+    s.addSketchConstraint("coincident", { kind: "vertex", bodyId: body.id, index: 0 }, { kind: "edge", bodyId: body.id, index: 3 }) === null);
+  const nonEnd = s.addSketchConstraint("coincident", { kind: "vertex", bodyId: body.id, index: 2 }, edge0);
+  check("non-endpoint vertex on an edge accepted", nonEnd !== null);
+  s.removeSketchConstraint(nonEnd!.id); // don't let it fold the square in the solves below
+
+  // Solve: the joint sits beyond the edge's segment (x = 200 > 100) — it must land on
+  // the *infinite* line, not get clamped to the segment. The correction is purely
+  // perpendicular, so the joint's x never changes; joint and edge (equal rank) split
+  // the perpendicular gap.
+  check("point-on-line solve", solveSketch(s).length === 0);
+  const v = s.bodyControlWorld(body);
+  const jw = s.jointWorld(s.getJoint(j.id)!);
+  const lineDist = (p: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }) => {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    return Math.abs(dx * (p.y - a.y) - dy * (p.x - a.x)) / Math.hypot(dx, dy);
+  };
+  check("joint lies on the infinite edge line", lineDist(jw, v[0], v[1]) < TOL * 2,
+    `dist ${lineDist(jw, v[0], v[1]).toExponential(2)}`);
+  check("correction is perpendicular (x kept)", near(jw.x, 200, TOL * 2), `${jw.x}`);
+  check("gap split between joint and edge", near(jw.y, 15, 1) && near(v[0].y, 15, 1),
+    `joint y ${jw.y}, edge y ${v[0].y}`);
+
+  // Survives serialize/load and keeps solving.
+  const t = new Scene();
+  t.load(JSON.parse(JSON.stringify(s.serialize())) as SceneData);
+  check("point-on-line survives save/load", t.sketch.some((k) => k.kind === "coincident" && k.refB?.kind === "edge"));
+  t.moveJoint(j.id, { x: 0, y: 40 });
+  check("re-solves after load + violation", solveSketch(t).length === 0);
+}
+
+// --- point-on-line: rails and guidelines ------------------------------------------
+{
+  const s = new Scene();
+  const rail = s.addSlider(s.addFreeJoint({ x: 0, y: 0 }).id, s.addFreeJoint({ x: 100, y: 0 }).id)!;
+  const railRef: MeasureRef = { kind: "rail", sliderId: rail.id };
+  check("rail's own joint on its rail rejected",
+    s.addSketchConstraint("coincident", { kind: "joint", jointId: rail.railA }, railRef) === null);
+  const j = s.addFreeJoint({ x: 50, y: 30 });
+  const res = tryAddConstraint(s, "coincident", { kind: "joint", jointId: j.id }, railRef);
+  check("free joint onto a rail line accepted + solved", res.constraint !== null);
+  const jw = s.jointWorld(s.getJoint(j.id)!);
+  const a = s.jointWorld(s.getJoint(rail.railA)!);
+  const b = s.jointWorld(s.getJoint(rail.railB)!);
+  const cross = Math.abs((b.x - a.x) * (jw.y - a.y) - (b.y - a.y) * (jw.x - a.x)) / Math.hypot(b.x - a.x, b.y - a.y);
+  check("joint on the rail line", cross < TOL * 2, `dist ${cross.toExponential(2)}`);
+
+  // Guideline: construction rank yields — the guide comes to the joint, the joint stays.
+  const g = s.addGuide({ x: 0, y: 100 }, { x: 100, y: 100 })!;
+  check("guide's own defining point rejected",
+    s.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "a" }, { kind: "guideLine", guideId: g.id }) === null);
+  const fixed = s.addFreeJoint({ x: 40, y: 60 });
+  const res2 = tryAddConstraint(s, "coincident", { kind: "joint", jointId: fixed.id }, { kind: "guideLine", guideId: g.id });
+  check("joint onto a guideline accepted + solved", res2.constraint !== null);
+  const fw = s.jointWorld(s.getJoint(fixed.id)!);
+  check("geometry outranks construction: joint unmoved", near(fw.x, 40, TOL * 2) && near(fw.y, 60, TOL * 2),
+    `${fw.x}, ${fw.y}`);
+  const gg = s.getGuide(g.id)!;
+  const gDist = Math.abs((gg.b.x - gg.a.x) * (fw.y - gg.a.y) - (gg.b.y - gg.a.y) * (fw.x - gg.a.x)) / Math.hypot(gg.b.x - gg.a.x, gg.b.y - gg.a.y);
+  check("guide moved onto the joint", gDist < TOL * 2, `dist ${gDist.toExponential(2)}`);
 }
 
 if (failures > 0) {
