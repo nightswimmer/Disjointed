@@ -716,6 +716,33 @@ export class Scene {
   }
 
   /**
+   * Add an editable hole outline to an existing body (world coords — same `HoleSpec`
+   * shapes as `addBody`'s `holesWorld`), then rebuild. Appended after any existing
+   * holes, so refs to them keep their indices. Returns the new hole's index, or null
+   * when rejected (missing body, or too few control points: an offset-mode hole needs
+   * ≥ 1 — a disk — and a fillet-mode one ≥ 3).
+   */
+  addBodyHole(bodyId: number, spec: HoleSpec): number | null {
+    const body = this.getBody(bodyId);
+    if (!body) return null;
+    const control = Array.isArray(spec) ? spec : spec.control;
+    const round = Array.isArray(spec) ? undefined : spec.round;
+    if (control.length < (round === "offset" ? 1 : 3)) return null;
+    const hole: BodyHole = {
+      controlLocal: control.map((p) => rotate(sub(p, body.pos), -body.angle)),
+      radius: Array.isArray(spec) ? 0 : Math.max(0, spec.radius ?? 0),
+    };
+    if (round) hole.round = round;
+    if (!Array.isArray(spec) && spec.radii && spec.radii.length === control.length &&
+        spec.radii.some((r) => r !== null)) {
+      hole.radii = spec.radii.map((r) => (typeof r === "number" ? Math.max(0, r) : null));
+    }
+    body.holes = [...(body.holes ?? []), hole];
+    this.rebuildBody(body);
+    return body.holes.length - 1;
+  }
+
+  /**
    * Remove a whole hole from a body, then rebuild. Measurements / sketch constraints
    * on the hole (and index remaps for later holes' refs) cascade.
    */

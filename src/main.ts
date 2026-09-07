@@ -32,7 +32,7 @@ import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from
 
 type Mode = "draw" | "sim";
 type Tool =
-  | "body" | "joint" | "connect" | "ground" | "slider" | "rotate" | "guide"
+  | "body" | "hole" | "joint" | "connect" | "ground" | "slider" | "rotate" | "guide"
   | "linearActuator" | "motor" | "measure"
   | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
 /** An existing element picked in normal/select mode. */
@@ -179,6 +179,9 @@ let draftBody: Vec2[] = []; // freehand polygon vertices (body tool, empty-space
  * between the new body's corner and that point (the vertex is placed exactly on it).
  */
 let draftBodySnaps: (MeasureRef | null)[] = [];
+/** Hole tool: freehand cut-out vertices, and the body being cut (set by the first click). */
+let holeDraft: Vec2[] = [];
+let holeDraftBodyId: number | null = null;
 let jointDraftIds: number[] = []; // joints picked to build a body (body tool, joint start)
 let jointDraftCreated: number[] = []; // joints made on slider rails during that draft (removed if aborted)
 let jointDraftExpanding = false; // body-from-joints: sizing the outward margin
@@ -822,6 +825,7 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
   select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
+  hole: "Click inside a body to start a cut-out, then click more vertices (all inside that body). Click the first vertex (or press Enter) to close the hole.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   connect: "Click a joint, then another joint to pin them — or a slider line to attach the joint to it.",
   ground: "Click a joint to lock its position (it can still rotate), or a body / group to fix it entirely; click again to unground.",
@@ -1038,6 +1042,8 @@ function resetTransient(): void {
   closeDimEditor();
   draftBody = [];
   draftBodySnaps = [];
+  holeDraft = [];
+  holeDraftBodyId = null;
   constraintPicks = [];
   // Discard any slider-rail joints made for an unfinished body-from-joints draft (a finished
   // build clears this list first, so its absorbed joints survive).
@@ -1555,6 +1561,10 @@ function handleDrawClick(p: Vec2): void {
   switch (tool) {
     case "body":
       handleBodyClick(p);
+      break;
+    case "hole":
+      // Spans many clicks like the body tool; disarms itself in finishHole().
+      handleHoleClick(p);
       break;
     case "joint": {
       // Inside bodies: a joint in each overlapping body, pinned together (a shared
@@ -2740,6 +2750,52 @@ function finishBody(): void {
   draftBodySnaps = [];
 }
 
+/**
+ * Hole tool: the first click picks the body to cut (topmost under the cursor) and
+ * starts a freehand cut-out polygon; later clicks add vertices, each kept inside that
+ * body. Clicking the first vertex (or Enter) closes the hole.
+ */
+function handleHoleClick(p: Vec2): void {
+  if (holeDraftBodyId === null) {
+    const body = scene.bodyAt(p);
+    if (!body) return; // a hole needs a body — keep the tool armed
+    if (scene.instanceOfBody(body.id)) {
+      window.alert("This body belongs to a component instance — edit the definition to cut a hole in it.");
+      disarmTool();
+      return;
+    }
+    holeDraftBodyId = body.id;
+  }
+  if (holeDraft.length >= 3 && dist(p, holeDraft[0]) < CLOSE_RADIUS / view.scale) {
+    finishHole();
+    return;
+  }
+  const body = scene.getBody(holeDraftBodyId);
+  if (!body) { disarmTool(); return; }
+  // Snap to the grid — unless snapping would land outside the body being cut, in which
+  // case the exact click point is used; a click outside the body is ignored entirely.
+  let at = snap(p);
+  if (!scene.pointInBody(body, at)) at = p;
+  if (!scene.pointInBody(body, at)) return;
+  // Ignore near-duplicate points (also de-dupes the 2nd click of a double-click).
+  const last = holeDraft[holeDraft.length - 1];
+  if (last && dist(at, last) < 4 / view.scale) return;
+  holeDraft.push(at);
+}
+
+/** Close the hole draft: cut it into its body as an editable radius-0 hole outline. */
+function finishHole(): void {
+  const bodyId = holeDraftBodyId;
+  if (bodyId !== null && holeDraft.length >= 3 && scene.addBodyHole(bodyId, holeDraft) !== null) {
+    markDirty();
+    disarmTool();
+    selection = { kind: "body", id: bodyId }; // show the new hole's handles right away
+    return;
+  }
+  holeDraft = [];
+  holeDraftBodyId = null;
+}
+
 // --- pointer events ------------------------------------------------------
 canvas.addEventListener("mousedown", (e) => {
   const world = eventWorld(e);
@@ -3082,6 +3138,11 @@ canvas.addEventListener("dblclick", (e) => {
     finishBody();
     return;
   }
+  // A hole draft closes on double-click too (the second click was de-duped as a vertex).
+  if (mode === "draw" && tool === "hole") {
+    finishHole();
+    return;
+  }
   // Select mode: double-click a draw-mode dimension label to edit its value inline
   // (typing a number makes it a driving dimension; clearing it makes it driven again).
   if (mode === "draw" && tool === null) {
@@ -3140,6 +3201,7 @@ canvas.addEventListener("dblclick", (e) => {
  *  G is Ground; the actuator moved to A when L was given to guidelines). */
 const TOOL_KEYS: Record<string, Tool> = {
   b: "body",
+  u: "hole", // cUt-out (H is the horizontal constraint)
   j: "joint",
   c: "connect",
   g: "ground",
@@ -3231,6 +3293,10 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && mode === "draw" && tool === "body") {
     finishBody();
+    return;
+  }
+  if (e.key === "Enter" && mode === "draw" && tool === "hole") {
+    finishHole();
     return;
   }
   // A selected measurement is deletable in either mode (sim keeps its own set).
@@ -3749,7 +3815,12 @@ function frame(now?: number): void {
     scene,
     view,
     mode,
-    draftBody: mode === "draw" && tool === "body" ? draftBody : null,
+    // The hole tool's cut-out draft previews through the same dashed-polyline channel.
+    draftBody:
+      mode !== "draw" ? null
+      : tool === "body" ? draftBody
+      : tool === "hole" ? holeDraft
+      : null,
     cursor,
     hoverJoint,
     hoverBody: mode === "draw" && tool === null ? hoverBody : null,

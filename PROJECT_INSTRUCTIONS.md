@@ -213,6 +213,15 @@ works on hole vertices, and circular DXF cut-outs arrive as resizable disk holes
 remaps hole refs within their own outline, scale / copy-paste / components / save-load all
 carry hole shapes, and legacy (≤ v15) baked hole loops load as radius-0 editable holes.
 Picking + joint containment still deliberately use the outer outline only.
+**Hole tool** (`U`, no format change): holes can now be **drawn in the UI**, not only
+imported — the first click picks the body to cut (topmost under the cursor; empty space is
+ignored, an instance body is refused with an alert to edit the definition), later clicks add
+cut-out vertices (grid-snapped with the usual containment fallback: a snap that would land
+outside the body uses the exact click point, a click outside is ignored), and clicking the
+first vertex / double-click / Enter closes the loop into an editable **radius-0 hole**
+(`Scene.addBodyHole`, appended after existing holes so their refs keep their indices); the
+body is then selected so the new hole's handles show immediately. Esc aborts the draft. The
+in-progress polygon previews through the body tool's dashed-polyline render channel.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -263,8 +272,12 @@ Picking + joint containment still deliberately use the outer outline only.
     reflected + winding and radii reversed, refs remapped per-outline), `scaleBody`
     (controls + radius/radii), rotate/move (local frame), copy/paste
     (`SelectionClip.bodies[].holes` carries the shapes) and component expansion.
-    `removeBodyHole(bodyId, hole)` deletes one hole, dropping its refs and shifting later
-    holes' refs down. `pointInBody`/`clampIntoBody`/`bodyAt` still use the **outer outline
+    `addBodyHole(bodyId, spec)` cuts a new hole into an existing body (a world-coord
+    `HoleSpec`, so a 1-point offset spec cuts a parametric disk; world → local under the
+    body's pose; appended after existing holes so their refs keep their indices; returns
+    the new hole's index, or null when rejected — an offset hole needs ≥ 1 control point,
+    a fillet one ≥ 3). `removeBodyHole(bodyId, hole)` deletes one hole, dropping its refs
+    and shifting later holes' refs down. `pointInBody`/`clampIntoBody`/`bodyAt` still use the **outer outline
     only** by design (joints may sit inside a hole, e.g. at a shaft's centre). Legacy
     (v13–v15) files carry only baked `holesLocal` loops — they load as radius-0 editable
     holes with identical geometry.
@@ -653,7 +666,14 @@ Picking + joint containment still deliberately use the outer outline only.
   joint is never created outside its body. The `#sim-error` banner lives inside a
   **`#canvas-wrap`** container (index.html / style.css) wrapping the canvas, so it overlays the
   canvas top-center *below* the toolbar rather than on top of it.
-  - **Actuator / motor tools** (`L` / `M`, draw mode, one-shot): **Linear actuator** is a single click
+  - **Hole tool** (`U`, draw mode; spans many clicks like the body tool, disarming in
+    `finishHole`): `handleHoleClick` — the first click sets `holeDraftBodyId` via `bodyAt`
+    (instance bodies alert + disarm), later clicks push containment-checked vertices onto
+    `holeDraft`, and closing (first-vertex click / dblclick / Enter) calls
+    `scene.addBodyHole` + selects the body. The draft is passed to the renderer through
+    the same `draftBody` input the body tool uses (dashed polyline to the cursor);
+    `resetTransient` clears it, so Esc aborts.
+  - **Actuator / motor tools** (`A` / `M`, draw mode, one-shot): **Linear actuator** is a single click
     on a slider rail → calls `addLinearActuator` (snapped to the click point). **Motor** is two clicks
     — first joint becomes the pivot (tracked in `motorPivotDraft`, highlighted via `activeJoints`),
     second joint on the **same body** becomes the crank pin (mismatched second click restarts the
@@ -867,8 +887,8 @@ Picking + joint containment still deliberately use the outer outline only.
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or shortcut —
-`B`/`J`/`C`/`G`/`S`/`L` guideline/`A` actuator/`M`) lets you place one element, then it returns
-to **Select** mode. `Esc` aborts the current placement.
+`B`/`U` hole/`J`/`C`/`G`/`S`/`L` guideline/`A` actuator/`M`) lets you place one element, then it
+returns to **Select** mode. `Esc` aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
   **existing joint**: build a body *from joints* — click joints to outline (loose free joints
@@ -881,6 +901,14 @@ to **Select** mode. `Esc` aborts the current placement.
   click an already-added joint to finish, then move the cursor out to size the outward margin
   (live preview) and click to finalize. Joints minted mid-draft are tracked so an aborted draft
   removes them.
+- **Hole** (`U` — `H` is the horizontal constraint) — cut a hole in a body: the **first click
+  picks the body** (topmost under the cursor; empty space does nothing, a component-instance
+  body alerts to edit the definition instead), later clicks add cut-out vertices (grid-snapped;
+  a snap that would land outside the body falls back to the exact click point, a click outside
+  is ignored), and clicking the **first vertex** / **double-click** / **Enter** closes the loop
+  into an editable radius-0 hole (`addBodyHole`). The body is selected afterwards so the hole's
+  vertex / radius handles show right away. No coincident snapping or auto-H/V on hole drafts
+  (v1 scope; the body tool has both).
 - **Joint** (`J`) — click inside a body to attach a joint; click where bodies overlap to drop
   a joint in each and pin them together; click **empty space** to place a free (body-less) joint.
   A node placed on a **slider rail (or rail node)** is auto-attached to that slider as a rider.
@@ -1176,7 +1204,11 @@ Persistence:
   outline, hole vertex/edge refs resolve + track edits, insert/remove remap only same-hole
   refs, per-corner hole radii, mirror remapping hole refs within their own outline,
   copy/paste + save/load round-trips, legacy baked holes loading as radius-0 editable holes,
-  and `removeBodyHole` cascading refs + shifting later holes' refs.
+  and `removeBodyHole` cascading refs + shifting later holes' refs. **`addBodyHole`** (the
+  hole tool's model op): returned index, derived loop, mass subtraction, joints staying
+  anchored through the cut's centroid shift, < 3-point rejection, a 1-point offset spec
+  cutting a disk appended after existing holes, and world → local conversion on a
+  moved + rotated body.
 - **edit-utils.ts** — `rotateBody` (90° about the centroid carries the joint + ground anchor; a
   pivot node stays fixed), `mirrorBody` (joint reflected, centroid + area preserved), and
   copy/paste (`extractBody`/`insertBody`: independent offset duplicate, joints/grounds/sliders
@@ -1424,11 +1456,14 @@ Persistence:
   a definition with nothing grounded has no chassis — its instance placement is derived
   from the first body (fine, by design decision); the component browser is minimal (no
   thumbnails / drag-to-place).
-- **Hole follow-ups (tier 2, when needed)**: editable hole vertices (handles), measurements /
-  sketch constraints referencing hole geometry (needs a loop index in `MeasureRef`), a
-  hole-aware picking option (today clicking a cut-out deliberately still hits the body),
-  corner radius applied to hole loops. The v13 model/serialization already carries the
-  loops, so tier 2 is additive.
+- **Hole follow-ups**: ~~editable hole vertices, measurements / sketch constraints on hole
+  geometry, corner radius on holes~~ (all done in v16), ~~a UI to create holes~~ (done —
+  the hole tool). Remaining: a hole-aware picking option (today clicking a cut-out
+  deliberately still hits the body); hole-tool parity with the body tool (vertices snapping
+  onto existing joints/corners with auto-coincident, auto-H/V on near-axis hole edges);
+  no containment check of hole *edges* (only vertices are kept inside the body, so a
+  cut-out hugging a concave outer outline can poke outside — harmless: even-odd rendering,
+  still editable).
 - **DXF follow-ups**: SPLINE sampling, INSERT/block instancing, ellipses; DXF *export*.
 - More joint types as needed.
 - Joint containment covers placement + drags only (by choice): **reshaping** a body (corner

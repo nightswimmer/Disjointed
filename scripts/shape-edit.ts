@@ -1,6 +1,6 @@
 /** Corner filleting + body editing: radius changes and vertex moves keep joints anchored. */
 import { Scene } from "../src/model";
-import { filletPolygon, roundedConvexBody, polygonArea, dist } from "../src/geometry";
+import { filletPolygon, roundedConvexBody, polygonArea, dist, add, vec } from "../src/geometry";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -325,6 +325,30 @@ dScene.removeBodyHole(dBody.id, 0);
 check("removing a hole drops its refs' measurements", dScene.getMeasurement(dGone.id) === undefined, "cascaded");
 const dRef = dScene.getMeasurement(dKept.id)?.refA as { hole?: number } | undefined;
 check("later holes' refs shift down", dRef?.hole === 0 && dBody.holes?.length === 1, `hole ${dRef?.hole}`);
+
+// addBodyHole: cut a hole into an existing body (the UI hole tool's model op).
+const aScene = new Scene();
+const aBody = aScene.addBody(rect4(0, 0, 100, 100));
+const aJoint = aScene.addJoint(aBody.id, { x: 10, y: 10 });
+const aJw = aScene.jointWorld(aJoint);
+const aMassBefore = 1 / aBody.invMass;
+const aIdx = aScene.addBodyHole(aBody.id, rect4(30, 30, 70, 70));
+check("addBodyHole returns the new hole's index", aIdx === 0, `${aIdx}`);
+check("added hole derives its sampled loop", aBody.holesLocal?.length === 1 && (aBody.holesLocal[0].length ?? 0) >= 4);
+check("added hole subtracts from the mass", 1 / aBody.invMass < aMassBefore - 1000, `${(1 / aBody.invMass).toFixed(0)} < ${aMassBefore.toFixed(0)}`);
+check("joint stays anchored through the cut's centroid shift", dist(aJw, aScene.jointWorld(aJoint)) < 1e-9);
+check("too few points is rejected", aScene.addBodyHole(aBody.id, [{ x: 40, y: 40 }, { x: 60, y: 60 }]) === null && aBody.holes?.length === 1);
+const aDisk = aScene.addBodyHole(aBody.id, { control: [{ x: 80, y: 15 }], radius: 8, round: "offset" });
+check("a 1-point offset spec cuts a disk hole, appended after existing holes", aDisk === 1 && aBody.holes?.[1].round === "offset");
+// World → local conversion holds on a moved + rotated body.
+aScene.rotateBody(aBody.id, aBody.pos, Math.PI / 3);
+aScene.moveBody(aBody.id, { x: 25, y: -13 });
+const aTarget = aScene.jointWorld(aJoint); // a known world point inside the body
+const aIdx2 = aScene.addBodyHole(aBody.id, {
+  control: [aTarget, add(aTarget, vec(12, 0)), add(aTarget, vec(12, 12))].map((p) => vec(p.x, p.y)),
+});
+const aBack = aScene.bodyHoleControlWorld(aBody, aIdx2!)[0];
+check("hole control converts world → local on a rotated body", dist(aBack, aTarget) < 1e-9, `off ${dist(aBack, aTarget).toExponential(1)}`);
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
