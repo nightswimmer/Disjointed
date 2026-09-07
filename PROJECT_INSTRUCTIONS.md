@@ -222,6 +222,18 @@ first vertex / double-click / Enter closes the loop into an editable **radius-0 
 (`Scene.addBodyHole`, appended after existing holes so their refs keep their indices); the
 body is then selected so the new hole's handles show immediately. Esc aborts the draft. The
 in-progress polygon previews through the body tool's dashed-polyline render channel.
+**Fork a component instance / "make unique"** (no format change): pressing **⊞** with exactly
+one component instance selected no longer alerts — it **forks**: `Scene.makeInstanceUnique`
+deep-copies the instance's definition into a new component (named `"<source> copy"`, deduped
+with a counter) and re-points the instance's `defId` at the copy, so the two definitions
+evolve independently from then on. Nothing moves — the copy is byte-identical, so every
+provenance src id stays valid and no re-expansion is needed (a test verifies the reconcile
+is a drift-0 no-op). The instance stays selected, the component browser opens on the new
+definition, and the hint line announces the fork. Works inside definition-editing contexts
+(no cycle risk: the copy uses exactly the sub-definitions the original did — nested defs
+stay **shared**, the def DAG gains one node with the same out-edges). Undo/save needed no
+work (`canonicalData` already persists `scene.components`). A selection mixing an instance
+with other material still alerts, now explaining both options.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -346,6 +358,10 @@ in-progress polygon previews through the body tool's dashed-polyline render chan
     group). Key methods: `createComponentFromSelection(name, bodyIds, freeJointIds)` (packs
     the selection — via `extractSelection` with `drivenDims: true` — into a new def and
     replaces it with one instance in place), `instantiateComponent(defId, {pos, angle})`,
+    `makeInstanceUnique(instanceId)` (fork: deep-copies the instance's def into a new
+    component — name `"<source> copy"` deduped — and re-points the instance's `defId`;
+    the copy is identical so provenance maps stay valid and no re-expansion runs; nested
+    sub-definitions stay shared),
     `reexpandInstances(changedDefIds)` (the reconciling re-expansion: surviving elements
     keep scene ids; design fields — shape, colour, joint locals, constraint wiring — come
     from the def; poses of non-chassis parts are **instance state** and are kept; chassis
@@ -1003,7 +1019,11 @@ Select mode (default, no tool armed):
   live**, Esc (idle) or a breadcrumb exits. Grounding inside a definition = "fixed to the
   component frame" (the rigid chassis); grounding an instance's body in the assembly fixes
   its chassis in the world. The **component browser** (toolbar toggle) renames / inserts /
-  edits / deletes definitions.
+  edits / deletes definitions. **⊞ with exactly one instance selected forks it** ("make
+  unique"): the definition is copied into a new independent component and the selected
+  instance re-pointed at the copy — nothing moves, the selection is kept, the browser opens
+  on the new definition (`selectionInstance()` in main detects the pure single-instance
+  selection; mixed selections still alert).
 - **Rigid (Shift) drag**: hold **Shift** when starting a select-mode drag and the grabbed
   object — a body (with its whole group), the body a grabbed joint sits on, a lone free
   joint, or the whole multi-selection — moves **like in simulation** instead of being
@@ -1273,7 +1293,7 @@ Persistence:
   locked joints is a group-riding track (addSlider doesn't auto-ground them; riders slide
   and follow the towed group); serialize/load round-trip + legacy files; copy/paste carries
   group joints.
-- **components.ts** — hierarchical components end-to-end (~55 checks): creation from a
+- **components.ts** — hierarchical components end-to-end (~70 checks): creation from a
   selection (def carries sketch/measurements/grounded flags; assembly carries neither;
   instance replaces the originals exactly in place; sketch constraints on instance geometry
   rejected); joint-ground conversion (synthesized chassis anchor + pin; grounding the
@@ -1284,9 +1304,11 @@ Persistence:
   arrives in the instance's frame); **nested defs** (editing the inner def ripples through
   the outer def to the root; componentUses DAG direction); powered constraints inside a
   component (slider + actuator expand with no world grounds; anchors drive the rider along
-  the chassis track); removal / dissolve / removeComponent guards; serialize/load v14
-  round-trip, idempotent re-expansion after load, `reexpandData` on stored snapshots, and
-  pre-v14 files loading with no components.
+  the chassis track); removal / dissolve / removeComponent guards; **fork / make-unique**
+  (`makeInstanceUnique`: new def, re-pointed instance, sibling untouched, drift-0 no-op
+  reconcile, two-way edit independence after the fork, name dedup, nested defs stay shared
+  in the DAG); serialize/load v14 round-trip, idempotent re-expansion after load,
+  `reexpandData` on stored snapshots, and pre-v14 files loading with no components.
 - **grounded-bodies.ts** — grounded bodies/groups (20 checks): `toggleBodyGround` toggle
   semantics (lone body on/off, whole-group grounding/ungrounding through any member); a
   grounded body immovable under drag; a body pinned to one pivots about the pin while the

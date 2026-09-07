@@ -2252,6 +2252,33 @@ export class Scene {
   }
 
   /**
+   * Fork an instance's definition: deep-copy the definition into a new one and re-point
+   * the instance at the copy, so the two evolve independently from here on. The
+   * instance's expanded material is untouched — the copy is identical, so every
+   * provenance src id stays valid and no re-expansion is needed. Definitions the copy
+   * itself instantiates stay shared (the def DAG gains a node, edges unchanged).
+   * Returns the new definition, or null for an unknown instance / definition.
+   */
+  makeInstanceUnique(instanceId: number): ComponentDef | null {
+    const inst = this.instances.find((i) => i.id === instanceId);
+    const def = inst ? this.getComponent(inst.defId) : undefined;
+    if (!inst || !def) return null;
+    const defId = this.components.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+    let name = `${def.name} copy`;
+    for (let n = 2; this.components.some((c) => c.name === name); n++) {
+      name = `${def.name} copy ${n}`;
+    }
+    const copy: ComponentDef = {
+      id: defId,
+      name,
+      data: JSON.parse(JSON.stringify(def.data)) as SceneData,
+    };
+    this.components.push(copy);
+    inst.defId = defId;
+    return copy;
+  }
+
+  /**
    * Re-expand every instance whose definition is in `changed`, reconciling the expanded
    * elements against the (new) definition: surviving elements keep their scene identity
    * (ids, and — for mechanism parts — their current pose), chassis material snaps to the

@@ -338,6 +338,63 @@ function editDef(scene: Scene, defId: number, mutate: (s: Scene) => void): Set<n
   check("removeComponent works once unused", scene.removeComponent(defId) === true && scene.components.length === 0, "deleted");
 }
 
+// --- fork: make an instance unique --------------------------------------------------
+{
+  const scene = new Scene();
+  const b1 = square(scene, 0, 0);
+  scene.toggleBodyGround(b1.id);
+  const b2 = square(scene, 60, 0);
+  const res = scene.createComponentFromSelection("Widget", [b1.id, b2.id])!;
+  const inst2 = scene.instantiateComponent(res.def.id, { pos: { x: 200, y: 0 }, angle: 0 })!;
+
+  const posBefore = scene.bodies.map((b) => ({ ...b.pos }));
+  const copy = scene.makeInstanceUnique(inst2.id)!;
+  check("fork returns a new definition", copy !== null && copy.id !== res.def.id, `def ${copy?.id}`);
+  check("fork names the copy after the source", copy.name === "Widget copy", copy.name);
+  check("both definitions stored", scene.components.length === 2, `${scene.components.length} defs`);
+  check("instance re-pointed at the copy", inst2.defId === copy.id, `defId ${inst2.defId}`);
+  check("sibling instance keeps the original def", res.instance.defId === res.def.id, `defId ${res.instance.defId}`);
+  let drift = Math.max(...scene.bodies.map((b, i) => dist(b.pos, posBefore[i])));
+  check("fork moves nothing", drift === 0 && scene.bodies.length === 4, `drift ${drift}`);
+
+  // Provenance maps stay valid against the identical copy: reconcile is a no-op.
+  scene.reexpandInstances(new Set([copy.id]));
+  drift = Math.max(...scene.bodies.map((b, i) => dist(b.pos, posBefore[i])));
+  check("re-expansion after fork is a no-op", drift < 1e-9, `drift ${drift.toExponential(2)}`);
+
+  // From here the two defs evolve independently, in both directions.
+  editDef(scene, copy.id, (s) => { s.bodies[1].color = "#123456"; });
+  const inst2Ids = new Set(inst2.bodyMap.map((e) => e.id));
+  const recolored = scene.bodies.filter((b) => b.color === "#123456");
+  check("editing the copy cascades to the forked instance only",
+    recolored.length === 1 && inst2Ids.has(recolored[0].id), `${recolored.length} recolored`);
+  editDef(scene, res.def.id, (s) => { s.bodies[1].color = "#654321"; });
+  const recolored2 = scene.bodies.filter((b) => b.color === "#654321");
+  check("editing the original no longer touches the fork",
+    recolored2.length === 1 && !inst2Ids.has(recolored2[0].id), `${recolored2.length} recolored`);
+
+  // A second fork from the same source name dedupes.
+  const copy2 = scene.makeInstanceUnique(res.instance.id)!;
+  check("fork dedupes the copy name", copy2.name === "Widget copy 2", copy2.name);
+
+  // Forking an instance whose def nests another def shares the nested def (DAG node, no new edges).
+  const s2 = new Scene();
+  const ib = square(s2, 0, 0);
+  s2.toggleBodyGround(ib.id);
+  const inner = s2.createComponentFromSelection("Inner", [ib.id])!;
+  const ob = square(s2, 100, 0);
+  s2.toggleBodyGround(ob.id);
+  const outer = s2.createComponentFromSelection("Outer", [ob.id])!;
+  // put an Inner instance inside Outer's definition
+  editDef(s2, outer.def.id, (s) => {
+    s.instantiateComponent(inner.def.id, { pos: { x: 0, y: 80 }, angle: 0 });
+  });
+  const outerCopy = s2.makeInstanceUnique(outer.instance.id)!;
+  check("nested fork copies the outer def only", s2.components.length === 3, `${s2.components.length} defs`);
+  check("nested def stays shared", (outerCopy.data.instances ?? []).some((i) => i.defId === inner.def.id), "Inner referenced");
+  check("fork appears in the def DAG", s2.componentUses(outerCopy.id).has(inner.def.id), "Outer copy uses Inner");
+}
+
 // --- persistence -------------------------------------------------------------------
 {
   const scene = new Scene();

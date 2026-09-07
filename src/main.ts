@@ -710,6 +710,27 @@ function selectionTouchesInstance(): boolean {
   return false;
 }
 
+/** The single component instance the current selection consists of, or null when the
+ *  selection is empty, plain material, or mixes an instance with anything else.
+ *  (Instance selection is atomic, so a click on one selects exactly its members.) */
+function selectionInstance(): ComponentInstance | null {
+  const bodies = multiSel ? [...multiSel.bodies] : selection?.kind === "body" ? [selection.id] : [];
+  const joints = multiSel ? [...multiSel.joints] : selection?.kind === "joint" ? [selection.id] : [];
+  if (bodies.length + joints.length === 0) return null;
+  let inst: ComponentInstance | null = null;
+  for (const id of bodies) {
+    const i = scene.instanceOfBody(id);
+    if (!i || (inst && i.id !== inst.id)) return null;
+    inst = i;
+  }
+  for (const id of joints) {
+    const i = scene.instanceOfJoint(id);
+    if (!i || (inst && i.id !== inst.id)) return null;
+    inst = i;
+  }
+  return inst;
+}
+
 /** With 2+ members multi-selected: make (or extend) a permanent group over them
  *  (free joints become locked group members). */
 function groupSelection(): void {
@@ -1363,9 +1384,21 @@ function updateCompPanel(): void {
   }
 }
 
-/** Pack the current selection into a new component definition (replaced by an instance). */
+/** Pack the current selection into a new component definition (replaced by an instance).
+ *  With exactly one component instance selected, forks instead: the definition is copied
+ *  into a new independent component and the selected instance re-pointed at the copy. */
 function makeComponentFromSelection(): void {
   if (mode !== "draw") return;
+  const inst = selectionInstance();
+  if (inst) {
+    const copy = scene.makeInstanceUnique(inst.id);
+    if (copy) {
+      markDirty();
+      setCompPanelVisible(true);
+      hintEl.textContent = `Forked into new component “${copy.name}” — the selected instance now follows it.`;
+    }
+    return;
+  }
   const bodies = multiSel ? [...multiSel.bodies] : selection?.kind === "body" ? [selection.id] : [];
   const joints = multiSel ? [...multiSel.joints] : [];
   if (bodies.length === 0) {
@@ -1373,7 +1406,7 @@ function makeComponentFromSelection(): void {
     return;
   }
   if (selectionTouchesInstance()) {
-    window.alert("The selection contains component instances — a component can't be built over another instance's material.");
+    window.alert("The selection mixes component instances with other material — select exactly one instance to fork it, or plain bodies to build a new component.");
     return;
   }
   const name = `Component ${scene.components.length + 1}`;

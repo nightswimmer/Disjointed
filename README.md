@@ -222,6 +222,10 @@ through two points — CAD-style scaffolding for laying out a mechanism:
 - The **component browser** lists definitions: rename inline, **＋** inserts an instance (click
   the canvas to place it), **✎** edits, **×** deletes (refused while instances exist).
   Circular references are rejected.
+- **Fork an instance ("make unique")**: press **⊞** with a component instance selected and its
+  definition is copied into a new independent component (named *“&lt;source&gt; copy”*), with the
+  selected instance re-pointed at the copy — nothing moves, and from then on the two components
+  are edited completely independently. Components nested inside the definition stay shared.
 
 **Body colour.** A colour swatch in the toolbar sets the active colour: with **nothing selected**
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
