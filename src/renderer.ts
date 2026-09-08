@@ -121,6 +121,8 @@ const JOINT_R = 6;
 
 interface JointRoles {
   pinned: Set<number>;
+  /** Joints of a rigid pin (a weld — no relative rotation). Subset of `pinned`. */
+  welded: Set<number>;
   grounded: Set<number>;
   slider: Set<number>; // joints that ride a rail
   rail: Set<number>; // joints that define a rail
@@ -135,6 +137,7 @@ interface JointRoles {
 function collectRoles(scene: Scene): JointRoles {
   const roles: JointRoles = {
     pinned: new Set(),
+    welded: new Set(),
     grounded: new Set(),
     slider: new Set(),
     rail: new Set(),
@@ -146,6 +149,10 @@ function collectRoles(scene: Scene): JointRoles {
     if (c.kind === "pin") {
       roles.pinned.add(c.jointA);
       roles.pinned.add(c.jointB);
+      if (c.rigid === true) {
+        roles.welded.add(c.jointA);
+        roles.welded.add(c.jointB);
+      }
     } else if (c.kind === "ground") {
       roles.grounded.add(c.joint);
     } else if (c.kind === "slider") {
@@ -502,8 +509,17 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.stroke();
     ctx.setLineDash([]);
-    // Hollow center marks a revolute pin.
-    if (roles.pinned.has(j.id)) dot(ctx, p, px(2), theme.surface);
+    // Hollow center marks a revolute pin; a weld (rigid pin) gets a square center
+    // instead — no rotation, no circle — plus a square outline echoing it.
+    if (roles.welded.has(j.id)) {
+      const c = px(2.2);
+      ctx.fillStyle = theme.surface;
+      ctx.fillRect(p.x - c, p.y - c, c * 2, c * 2);
+      const h = px(JOINT_R + 3.5);
+      ctx.strokeStyle = "#4f9dff";
+      ctx.lineWidth = px(1.5);
+      ctx.strokeRect(p.x - h, p.y - h, h * 2, h * 2);
+    } else if (roles.pinned.has(j.id)) dot(ctx, p, px(2), theme.surface);
   }
 
   // Linear-actuator riders: a green dashed ring around the joint badges it as self-driving

@@ -1,8 +1,8 @@
 # Disjointed
 
 A simple web app for creating and simulating **2D planar mechanisms** — bodies (with editable,
-round-able shapes) coupled by joints (pins, grounds, rails with riders and sliders) that you can
-then drag and watch move.
+round-able shapes) coupled by joints (pins, welds, grounds, rails with riders and sliders) that
+you can then drag and watch move.
 
 > Status: working. Draw a mechanism (freehand or from joints), edit it, switch to simulate, and
 > drag any part of it to drive it. The solver and shape/edit logic are covered by headless tests.
@@ -24,6 +24,11 @@ then drag and watch move.
   point). A free joint can be grounded to make an anchor without needing a body.
 - **Constraints**
   - **Pin** — connect two joints on different bodies; they share a position but can rotate freely.
+  - **Weld** — a **rigid** pin: the two bodies share the position *and* keep their drawn relative
+    angle, locking them completely together (no relative motion at all). Placed with the Weld
+    tool (`W`) where bodies overlap, or by toggling an existing pinned joint; the welded-in
+    angle is whatever you drew, re-captured every time simulation starts. Welded joints show a
+    **square** centre instead of the revolute pin's hollow dot.
   - **Ground** — lock a joint's position; its body can still rotate about it. A **body (or a
     whole group)** can also be grounded, which fixes it completely in simulation — position
     and rotation.
@@ -76,6 +81,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
 | **Hole** | `U` | Cut a hole in a body. The **first click picks the body** (topmost under the cursor) and starts the cut-out polygon; further clicks add vertices — each kept **inside** that body (a grid snap that would land outside falls back to the exact click point). Close it by clicking the **first vertex**, **double-clicking**, or pressing **Enter** — the loop becomes an editable hole (sharp corners; round them with its radius handles afterwards), and the body is selected so the hole's handles show right away. Esc aborts. |
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **rail (or rail node)** and it's automatically attached to that rail as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
+| **Weld** | `W` | Click where **bodies overlap** to weld them rigidly together at that point — a joint in each, sharing the position **and** locked at the drawn relative angle (no relative rotation; the angle re-captures from the drawn pose on every sim entry, like a slider's lock). Click an **existing pinned joint** to toggle its pin(s) **weld ↔ revolute**. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed rail keeps its ground — the track must stay anchored). |
 | **Rail** | `K` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a rail. Attach riders with Connect / the Joint tool, or sliders with the Slider tool. |
@@ -254,7 +260,9 @@ and editing it recolours the body.
 end-to-end travel, sine for smooth ease in/out at the endstops).
 
 Joints are color-coded: **blue** = pinned, **yellow** = grounded, **green** = rail rider;
-rail-defining joints get a **green ring**, a **loose free joint a dashed ring**, and an
+rail-defining joints get a **green ring**, a **loose free joint a dashed ring**, a **welded**
+joint swaps the revolute pin's hollow centre for a **square** one (plus a blue square
+outline), and an
 **orientation-locked rider (a slider)** additionally shows a green rail-aligned **carriage
 rectangle**. Once a free joint is attached to a rail it's no longer loose, so it drops the
 dashed ring and shows as a normal (green) rider. While drawing, a constraint whose endpoints
@@ -346,7 +354,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, hierarchical components, slider orientation locks
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, hierarchical components, slider orientation locks, welds (rigid joints)
 ```
 
 ## How it works
@@ -366,9 +374,11 @@ re-solves the rest, then pulls the disabled ones as close as the freedom allows 
 as breaks — so a connected impossible piece doesn't corrupt the parts that can be solved. Rails
 are point-on-line constraints with end-stops; the rail is either a body (which moves) or a
 world-fixed line built from two grounded free joints. An **orientation-locked rider (slider)**
-adds the classic two-pin trick, synthesized: a phantom second point rigid in the rider's body is
-held on the infinite rail line, locking the body's angle relative to the rail at the drawn value
-(re-captured whenever the drawn layout changes). Body outlines are
+and a **weld (rigid pin)** each add a direct **angular projection**: the two rigid units rotate
+about the joint until their wrapped relative angle matches the value captured from the drawn
+pose (re-captured whenever the drawn layout changes) — the wrapped error has a unique zero, so
+a hard drag can neither flip a slider carriage 180° nor pull a welded assembly off its
+constraints. Body outlines are
 generated from a control polygon + corner radius (rounded corners via fillet or outward offset),
 with optional **per-corner radii** overriding the body default; arcs sample at 7.5° per segment.
 The fillet rounds convex and concave (reflex) corners correctly, and splits each edge between its

@@ -155,12 +155,22 @@ export interface Joint {
   local: Vec2;
 }
 
-/** Two joints (on different bodies) share a world position; free relative rotation. */
+/**
+ * Two joints (on different bodies) share a world position; free relative rotation —
+ * unless `rigid` (v18): a **weld**, which also locks the two bodies' relative angle,
+ * joining them completely (no relative motion at all). The welded-in relative angle is
+ * captured from the drawn pose when simulation starts (see solver.ts weld baselines) —
+ * the same philosophy as pins and slider locks: the drawn pose is the intended assembly.
+ * A weld where either joint is free (body-less) behaves as a plain pin until the joint
+ * gains a body (a free point has no orientation to lock).
+ */
 export interface PinConstraint {
   kind: "pin";
   id: number;
   jointA: number;
   jointB: number;
+  /** Present (true) only for welds; a plain revolute pin has no flag. */
+  rigid?: boolean;
 }
 
 /** A joint is locked to a fixed world point; the body may rotate about it. */
@@ -495,7 +505,7 @@ export interface SelectionClip {
   joints: { tmp: number; bodyTmp: number | null; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
   sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[] }[];
-  pins: { a: number; b: number }[];
+  pins: { a: number; b: number; rigid?: boolean }[];
   /** Powered constraints fully internal to the clip (slider/rider — body/joints — copied). */
   actuators: { slider: number; rider: number; speed: number; profile: "triangle" | "sine" }[];
   motors: { body: number; pivot: number; crank: number; speed: number }[];
@@ -508,7 +518,7 @@ export interface SelectionClip {
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
 }
 
-const FORMAT_VERSION = 17;
+const FORMAT_VERSION = 18;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -905,10 +915,26 @@ export class Scene {
     return body;
   }
 
-  addPin(jointA: number, jointB: number): PinConstraint {
+  addPin(jointA: number, jointB: number, rigid = false): PinConstraint {
     const c: PinConstraint = { kind: "pin", id: this.id(), jointA, jointB };
+    if (rigid) c.rigid = true;
     this.constraints.push(c);
     return c;
+  }
+
+  /** Toggle a pin between revolute (default) and weld (`rigid` — no relative rotation). */
+  setPinRigid(pinId: number, rigid: boolean): void {
+    const c = this.constraints.find((x) => x.id === pinId);
+    if (!c || c.kind !== "pin") return;
+    if (rigid) c.rigid = true;
+    else delete c.rigid;
+  }
+
+  /** Every pin constraint a joint participates in (either end). */
+  pinsOfJoint(jointId: number): PinConstraint[] {
+    return this.constraints.filter(
+      (c): c is PinConstraint => c.kind === "pin" && (c.jointA === jointId || c.jointB === jointId)
+    );
   }
 
   addGround(joint: number, anchor: Vec2): GroundConstraint {
@@ -1973,7 +1999,7 @@ export class Scene {
           locked: c.locked.filter((r) => owned.has(r)),
         });
       } else if (c.kind === "pin" && owned.has(c.jointA) && owned.has(c.jointB)) {
-        pins.push({ a: c.jointA, b: c.jointB });
+        pins.push({ a: c.jointA, b: c.jointB, rigid: c.rigid === true });
       }
     }
     // Powered constraints travel when everything they reference does.
@@ -2138,7 +2164,7 @@ export class Scene {
     for (const p of clip.pins) {
       const a = idMap.get(p.a);
       const b = idMap.get(p.b);
-      if (a !== undefined && b !== undefined) this.addPin(a, b);
+      if (a !== undefined && b !== undefined) this.addPin(a, b, p.rigid === true);
     }
     for (const a of clip.actuators ?? []) {
       const slider = sliderIdMap.get(a.slider);
@@ -2690,9 +2716,12 @@ export class Scene {
         if (sc && sc.kind === "pin") {
           sc.jointA = a;
           sc.jointB = b;
+          // Rigidity is a design field — the definition is the reference.
+          if (dc.rigid === true) sc.rigid = true;
+          else delete sc.rigid;
           keep(dc.id, sc.id);
         } else {
-          keep(dc.id, this.addPin(a, b).id);
+          keep(dc.id, this.addPin(a, b, dc.rigid === true).id);
         }
       } else if (dc.kind === "slider") {
         const a = jointIdMap.get(dc.railA);
@@ -3038,6 +3067,13 @@ export class Scene {
     this.constraints = data.constraints
       .filter((c) => c.kind !== "slider" || (c as { railA?: number }).railA !== undefined)
       .map((c) => {
+        if (c.kind === "pin") {
+          // Welds (`rigid`) arrived in v18 — older files simply have revolute pins.
+          // Sanitize: the flag is present (true) or absent, never any other value.
+          const p: PinConstraint = { kind: "pin", id: c.id, jointA: c.jointA, jointB: c.jointB };
+          if ((c as PinConstraint).rigid === true) p.rigid = true;
+          return p;
+        }
         if (c.kind !== "slider") return { ...c };
         const s = c as SliderConstraint & { slider?: number };
         const riders = Array.isArray(s.riders)

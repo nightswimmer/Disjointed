@@ -26,6 +26,8 @@ export interface AnalyzerEdge {
   b: number;
   /** Slider edges only: the rider is orientation-locked (prismatic) — removes 2 DOF, not 1. */
   locked?: boolean;
+  /** Pin edges only: the pin is a weld (rigid — no relative rotation) — removes 3 DOF, not 2. */
+  rigid?: boolean;
 }
 
 /** One node visited during the propagation walk: the node, its BFS depth, and the edge used to reach it. */
@@ -78,7 +80,7 @@ export interface ComponentReport {
   anchoredNodes: number[];   // node keys with ≥1 ground constraint (or world-fixed-rail equivalent)
   groundCount: number;       // total ground constraints touching this component
   cycles: number;            // cyclomatic complexity (edges − nodes + 1); 0 = tree, ≥1 = closed loops
-  dofEstimate: number;       // Grübler-Kutzbach M (planar): 3·B + 2·F − 2·(pins + grounds) − sliderRiders
+  dofEstimate: number;       // Grübler-Kutzbach M (planar): 3·B + 2·F − 2·(pins + grounds) − welds − sliderRiders − lockedRiders
   /** Propagation order (distance from anchors, BFS). Seeds get distance 0. */
   bfsOrder: BfsStep[];
   /** Edges that close cycles — not part of the BFS tree. Empty for a tree component. */
@@ -244,7 +246,7 @@ export function analyzeScene(scene: Scene): AnalysisReport {
       const a = ownerOf.get(c.jointA);
       const b = ownerOf.get(c.jointB);
       if (a === undefined || b === undefined || a === b) continue;
-      edges.push({ via: "pin", constraintId: c.id, joints: [c.jointA, c.jointB], a, b });
+      edges.push({ via: "pin", constraintId: c.id, joints: [c.jointA, c.jointB], a, b, rigid: c.rigid === true });
     } else if (c.kind === "slider") {
       const railOwner = ownerOf.get(c.railA);
       if (railOwner === undefined) continue;
@@ -332,16 +334,19 @@ export function analyzeScene(scene: Scene): AnalysisReport {
     const cycles = Math.max(0, edgeCount + groundCount - (nodeCount + worldNode) + 1);
 
     // DOF: planar Grübler-Kutzbach. Pins and grounds each remove 2 DOF (a point coincidence /
-    // a point locked to world). A slider rider is a point-on-line contact — it slides AND
-    // rotates freely (one equality constraint in the solver) — so it removes only 1 DOF;
-    // an orientation-locked rider (a prismatic slider) also removes the rotation, so 2.
+    // a point locked to world); a weld (rigid pin) also removes the relative rotation, so 3.
+    // A slider rider is a point-on-line contact — it slides AND rotates freely (one equality
+    // constraint in the solver) — so it removes only 1 DOF; an orientation-locked rider
+    // (a prismatic slider) also removes the rotation, so 2.
     const pinEdges = bucket.edges.filter((e) => e.via === "pin").length;
+    const weldEdges = bucket.edges.filter((e) => e.via === "pin" && e.rigid).length;
     const sliderEdges = bucket.edges.filter((e) => e.via === "slider").length;
     const lockedSliderEdges = bucket.edges.filter((e) => e.via === "slider" && e.locked).length;
     const dofEstimate =
       3 * bucket.bodies.length +
       2 * bucket.freeJoints.length -
       2 * (pinEdges + groundCount) -
+      weldEdges -
       sliderEdges -
       lockedSliderEdges;
 

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "tsx scripts/solver-smoke.ts && tsx scripts/ground-drag.ts && tsx scripts/impossible-assembly.ts && tsx scripts/persistence.ts && tsx scripts/build-body.ts && tsx scripts/shape-edit.ts && tsx scripts/free-rail.ts && tsx scripts/slider-locks.ts &&tsx scripts/edit-utils.ts && tsx scripts/actuators.ts && tsx scripts/measurements.ts && tsx scripts/sketch.ts && tsx scripts/groups.ts && tsx scripts/group-joints.ts && tsx scripts/grounded-bodies.ts && tsx scripts/freeze-drag.ts && tsx scripts/guides.ts && tsx scripts/dxf.ts && tsx scripts/components.ts"
+    "test": "tsx scripts/solver-smoke.ts && tsx scripts/ground-drag.ts && tsx scripts/impossible-assembly.ts && tsx scripts/persistence.ts && tsx scripts/build-body.ts && tsx scripts/shape-edit.ts && tsx scripts/free-rail.ts && tsx scripts/slider-locks.ts && tsx scripts/welds.ts && tsx scripts/edit-utils.ts && tsx scripts/actuators.ts && tsx scripts/measurements.ts && tsx scripts/sketch.ts && tsx scripts/groups.ts && tsx scripts/group-joints.ts && tsx scripts/grounded-bodies.ts && tsx scripts/freeze-drag.ts && tsx scripts/guides.ts && tsx scripts/dxf.ts && tsx scripts/components.ts"
   },
   "devDependencies": {
     "tsx": "^4.22.3",

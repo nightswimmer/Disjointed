@@ -21,7 +21,7 @@ import {
   reexpandData,
 } from "./model";
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
-import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig, resetSliderLockBaselines } from "./solver";
+import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig, resetPoseBaselines } from "./solver";
 import {
   solveSketch, applyDrivingDimension, tryAddConstraint, autoConstrainBody, SketchBreak,
   anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
@@ -32,7 +32,7 @@ import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from
 
 type Mode = "draw" | "sim";
 type Tool =
-  | "body" | "hole" | "joint" | "connect" | "ground" | "rail" | "slider" | "rotate" | "guide"
+  | "body" | "hole" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate" | "guide"
   | "linearActuator" | "motor" | "measure"
   | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
 /** An existing element picked in normal/select mode. */
@@ -848,6 +848,7 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   hole: "Click inside a body to start a cut-out, then click more vertices (all inside that body). Click the first vertex (or press Enter) to close the hole.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
+  weld: "Click where bodies overlap to weld them rigidly together at that point (no relative rotation) — or click an existing pinned joint to toggle it weld ↔ pin.",
   connect: "Click a joint, then another joint to pin them — or a rail to attach the joint to it as a rider.",
   ground: "Click a joint to lock its position (it can still rotate), or a body / group to fix it entirely; click again to unground.",
   rail: "Click two joints on the same body (a moving rail) — or two free joints (a fixed track) — to create a rail that joints and sliders can ride along.",
@@ -1024,7 +1025,7 @@ function setMode(next: Mode): void {
   resetTransient();
   if (next === "sim") {
     savedPoses = scene.snapshotPoses();
-    resetSliderLockBaselines(); // slider locks capture the drawn relative angles afresh
+    resetPoseBaselines(); // slider locks + welds capture the drawn relative angles afresh
     timedSolve("settle", null, 40); // settle so pins/grounds/rails are satisfied
   } else if (savedPoses) {
     scene.restorePoses(savedPoses); // restore the drawn layout for editing
@@ -1190,7 +1191,7 @@ function pushHistory(): void {
 function markDirty(): void {
   // The drawn layout changed, so any captured slider-lock baselines are stale: the next
   // solve (sim entry, or a rigid Shift-drag) re-locks the relative angles as now drawn.
-  resetSliderLockBaselines();
+  resetPoseBaselines();
   syncComponentContext();
   pushHistory();
   scheduleAutosave();
@@ -1199,7 +1200,7 @@ function markDirty(): void {
 
 /** Load a whole document and re-enter the given editing path (root when empty). */
 function setDocument(doc: SceneData, path: number[]): void {
-  resetSliderLockBaselines(); // new document, new drawn poses — stale baselines must go
+  resetPoseBaselines(); // new document, new drawn poses — stale baselines must go
   scene.load(doc); // validates; loads the root context + component definitions
   editPath = [];
   rootData = null;
@@ -1666,6 +1667,36 @@ function handleDrawClick(p: Vec2): void {
           scene.attachSliderRider(onSlider.id, created.id);
         }
       }
+      placed = true;
+      break;
+    }
+    case "weld": {
+      // On an existing joint: toggle the rigidity of every pin it participates in
+      // (weld ↔ revolute), mirroring how the Slider tool toggles a rider's lock.
+      const j = scene.jointAt(p, pickRadius());
+      if (j) {
+        const pins = scene.pinsOfJoint(j.id);
+        if (pins.length > 0) {
+          // Mixed state → make all rigid; all rigid → back to revolute.
+          const makeRigid = pins.some((c) => c.rigid !== true);
+          for (const c of pins) scene.setPinRigid(c.id, makeRigid);
+          selection = { kind: "joint", id: j.id };
+          placed = true;
+        }
+        break;
+      }
+      // Same placement as the Joint tool, but the joints are welded (rigid pins): the
+      // bodies lock completely together at that point. Needs ≥ 2 overlapping bodies —
+      // a lone joint has nothing to weld to.
+      const bodies = scene.bodiesAt(p);
+      if (bodies.length < 2) break;
+      // Place on the grid; hit-test against the raw click point (same fallback as the
+      // Joint tool: a snap that would leave a hit body uses the exact click point).
+      let at = snap(p);
+      if (!bodies.every((b) => scene.pointInBody(b, at))) at = p;
+      const joints = bodies.map((b) => scene.addJoint(b.id, at));
+      for (let i = 1; i < joints.length; i++) scene.addPin(joints[0].id, joints[i].id, true);
+      selection = { kind: "joint", id: joints[0].id };
       placed = true;
       break;
     }
@@ -3335,6 +3366,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   b: "body",
   u: "hole", // cUt-out (H is the horizontal constraint)
   j: "joint",
+  w: "weld",
   c: "connect",
   g: "ground",
   s: "slider", // S is the slider itself (the prismatic carriage that rides a rail)

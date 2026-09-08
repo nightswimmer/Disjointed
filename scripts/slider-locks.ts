@@ -6,7 +6,7 @@
  * cascade removal, copy/paste, and break reporting when the lock is unreachable.
  */
 import { Scene } from "../src/model";
-import { solve, resetSliderLockBaselines } from "../src/solver";
+import { solve, resetPoseBaselines } from "../src/solver";
 import { dist } from "../src/geometry";
 
 let failures = 0;
@@ -25,7 +25,7 @@ function angDiff(a: number, b: number): number {
 
 // --- 1. Locked rider on a world-fixed track: slides, never rotates ------------
 {
-  resetSliderLockBaselines();
+  resetPoseBaselines();
   const scene = new Scene();
   const railA = scene.addFreeJoint({ x: 0, y: 0 });
   const railB = scene.addFreeJoint({ x: 200, y: 0 });
@@ -58,7 +58,7 @@ function angDiff(a: number, b: number): number {
 
   // Control: unlock it — the same drag must now rotate the body (pin-in-slot).
   scene.setSliderRiderLocked(rail.id, rider.id, false);
-  resetSliderLockBaselines();
+  resetPoseBaselines();
   let maxAngle = 0;
   for (let i = 0; i < 24; i++) {
     const a = (i / 24) * Math.PI * 2;
@@ -71,7 +71,7 @@ function angDiff(a: number, b: number): number {
 
 // --- 2. Baseline captures the DRAWN relative angle (including a tilted one) ---
 {
-  resetSliderLockBaselines();
+  resetPoseBaselines();
   const scene = new Scene();
   const railA = scene.addFreeJoint({ x: 0, y: 0 });
   const railB = scene.addFreeJoint({ x: 200, y: 0 });
@@ -97,7 +97,7 @@ function angDiff(a: number, b: number): number {
 
 // --- 3. Moving rail: rider body keeps its angle RELATIVE to the rail ----------
 {
-  resetSliderLockBaselines();
+  resetPoseBaselines();
   const scene = new Scene();
   // Rail body, grounded at one end so it can pivot about it.
   const railBody = scene.addBody([
@@ -212,7 +212,7 @@ function angDiff(a: number, b: number): number {
 
 // --- 7. Unreachable lock/rider reports a break, grounds hold -------------------
 {
-  resetSliderLockBaselines();
+  resetPoseBaselines();
   const scene = new Scene();
   // Fixed track along y = 40.
   const railA = scene.addFreeJoint({ x: 0, y: 40 });

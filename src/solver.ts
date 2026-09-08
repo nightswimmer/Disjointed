@@ -8,7 +8,7 @@
  *     angle += invInertia  * cross(r, λ)
  * Looping over all constraints several times converges the whole mechanism.
  */
-import { Body, Joint, Scene } from "./model";
+import { Body, Joint, PinConstraint, Scene } from "./model";
 import { Vec2, add, rotate, cross, perp, scale, sub, len, lenSq, dot } from "./geometry";
 
 /**
@@ -447,16 +447,29 @@ function solveSliderRail(rider: Host, pA: Vec2, pB: Vec2, rail: RailHost, relax:
  * Baseline for each orientation-locked rider (`SliderConstraint.locked`): the rail's
  * direction expressed in the rider body's frame (railAngle − body.angle) at capture
  * time. Captured lazily by the first solve that sees the lock and kept until
- * `resetSliderLockBaselines` — main resets on every draw-mode edit and on entering sim,
+ * `resetPoseBaselines` — main resets on every draw-mode edit and on entering sim,
  * so simulation locks the relative angle **as drawn** (the same philosophy as pins: the
  * drawn pose is the intended assembly). Module-level like `groupCtx` (solve isn't
  * reentrant). A free (body-less) rider has no orientation — no baseline, lock inert.
  */
 const lockBaselines = new Map<number, number>();
 
-/** Forget all captured lock baselines; the next solve re-captures from the current pose. */
-export function resetSliderLockBaselines(): void {
+/**
+ * Baseline for each weld (a `rigid` pin): the two bodies' angle offsets at capture time
+ * (`da`/`db` are chosen so `bodyA.angle + da === bodyB.angle + db` at capture — the weld
+ * then drives that equality forever) plus the phantom arm length `arm` used to turn the
+ * angular error into a positional one. Same lifecycle as `lockBaselines`: captured lazily
+ * per solve, cleared by `resetPoseBaselines`, so a weld locks the relative angle **as
+ * drawn**. A weld with a free (body-less) joint on either side has no baseline — it
+ * behaves as a plain pin until the joint gains a body.
+ */
+const weldBaselines = new Map<number, { da: number; db: number; arm: number }>();
+
+/** Forget all captured pose baselines (slider orientation locks + weld angles); the next
+ *  solve re-captures them from the current — i.e. drawn — pose. */
+export function resetPoseBaselines(): void {
   lockBaselines.clear();
+  weldBaselines.clear();
 }
 
 /** Capture a baseline for every orientation-locked rider that doesn't have one yet. */
@@ -480,20 +493,21 @@ function captureLockBaselines(scene: Scene): void {
 }
 
 /**
- * The phantom point that enforces one orientation lock: a point rigid in the rider's
- * body, offset from the rider along the direction the rail had in the body's frame at
- * capture. Holding it on the infinite rail line locks the body's angle relative to the
- * rail (the classic two-pins-on-one-rail trick, with the second pin synthesized). The
- * offset is half the rail length, so the phantom's positional error is
- * `(dl/2)·sin(angle error)` — commensurate with the other units' errors and tolerances.
- * Returns null when the lock is inert (free rider, no baseline, degenerate rail).
+ * One orientation lock's error, measured through a phantom point: a point rigid in the
+ * rider's body, offset from the rider along the direction the rail had in the body's
+ * frame at capture (`dAng` is the wrapped angular error itself). The positional `err` is
+ * the rider's own off-line distance plus `(dl/2)·dAng` — commensurate with the other
+ * units' errors and tolerances, and, unlike the raw phantom-to-line distance (which is
+ * `sin`-based and also vanishes at a 180° flip), zero ONLY at the locked-in angle, so a
+ * violently dragged carriage can't settle silently into a flipped pose. Returns null
+ * when the lock is inert (free rider, no baseline, degenerate rail).
  */
 function lockPhantom(
   scene: Scene,
   jq: Joint,
   pA: Vec2,
   pB: Vec2
-): { phantom: Vec2; body: Body; n: Vec2; err: number } | null {
+): { phantom: Vec2; body: Body; n: Vec2; err: number; dAng: number } | null {
   if (jq.bodyId === null) return null;
   const delta = lockBaselines.get(jq.id);
   if (delta === undefined) return null;
@@ -507,20 +521,170 @@ function lockPhantom(
   const off = dl / 2;
   const q = scene.jointWorld(jq);
   const phantom = add(q, { x: off * Math.cos(ang), y: off * Math.sin(ang) });
-  return { phantom, body, n, err: dot(sub(phantom, pA), n) };
+  const dAng = wrapAngle(ang - Math.atan2(d.y, d.x));
+  return { phantom, body, n, err: dot(sub(q, pA), n) + off * dAng, dAng };
 }
 
 /**
- * Project one orientation lock: drive the phantom onto the rail line. The phantom is
- * body material, so the impulse translates + rotates the rider's body (or its whole
- * group; a fixed body makes the correction one-sided onto the rail) — combined with the
- * rider's own on-rail projection, the body's angle relative to the rail converges to
- * the captured baseline without moving the rider off the rail.
+ * Project one orientation lock: rotate the rider's rigid unit (body or group) against
+ * the rail's unit about the rider point until the relative angle matches the captured
+ * baseline, the correction split by inverse inertia about that point (a fixed side —
+ * a grounded rail body, a world-fixed track — makes it one-sided). Pivoting at the
+ * rider leaves the on-rail position untouched, so the angular error dies in one
+ * projection; the earlier phantom-on-line formulation (`solveAxis` on `lockPhantom`)
+ * both converged slowly against welds/pins and, being `sin`-based, accepted a 180°
+ * flip as satisfied.
  */
-function solveLockedRider(scene: Scene, jq: Joint, pA: Vec2, pB: Vec2, rail: RailHost, relax: number): void {
+function solveLockedRider(scene: Scene, jq: Joint, railJa: Joint, pA: Vec2, pB: Vec2, relax: number): void {
   const lp = lockPhantom(scene, jq, pA, pB);
-  if (!lp) return;
-  solveAxis(bodyHostAt(lp.body, lp.phantom), rail, lp.n, lp.err, relax);
+  if (!lp || lp.dAng === 0) return;
+  const q = scene.jointWorld(jq);
+  const hr = unitAngHost(scene, jq, q);
+  if (!hr) return;
+  // A rail of grounded free joints has no angular host — an immovable world line.
+  const hRail = unitAngHost(scene, railJa, q) ?? ANG_FIXED;
+  const w = hr.invI + hRail.invI;
+  if (w < 1e-12) return; // both sides immovable — leave the error for break reporting
+  const lambda = (lp.dAng / w) * relax;
+  hr.rotate(-lambda * hr.invI);
+  hRail.rotate(lambda * hRail.invI);
+}
+
+// --- welds (rigid pins) -------------------------------------------------------
+/**
+ * Capture a baseline for every weld (`rigid` pin) that doesn't have one yet: the two
+ * bodies' angle offsets at capture (an arbitrary shared reference direction — 0 — expressed
+ * in each body's frame; the weld holds those two directions equal from then on), plus the
+ * phantom arm length: the mean characteristic radius of the two bodies (√(area/π), area
+ * = 1/invMass), so the weld's positional error ≈ arm·(angle error) — commensurate with
+ * the other units' errors and tolerances. Only pins with a body on both ends capture.
+ */
+function captureWeldBaselines(scene: Scene): void {
+  for (const con of scene.constraints) {
+    if (con.kind !== "pin" || con.rigid !== true || weldBaselines.has(con.id)) continue;
+    const ja = scene.getJoint(con.jointA);
+    const jb = scene.getJoint(con.jointB);
+    if (!ja || !jb || ja.bodyId === null || jb.bodyId === null) continue;
+    const ba = scene.getBody(ja.bodyId);
+    const bb = scene.getBody(jb.bodyId);
+    if (!ba || !bb) continue;
+    const r = (b: Body) =>
+      b.invMass > 0 && Number.isFinite(b.invMass) ? Math.sqrt(1 / (Math.PI * b.invMass)) : 20;
+    const arm = Math.max(1e-6, (r(ba) + r(bb)) / 2);
+    weldBaselines.set(con.id, { da: -ba.angle, db: -bb.angle, arm });
+  }
+}
+
+/**
+ * The phantom point pair that enforces one weld: a point rigid in each body, offset `arm`
+ * from that body's own weld joint along the direction the shared reference had in the
+ * body's frame at capture. The two phantoms coincide exactly when the bodies sit at the
+ * welded-in relative angle (and the pin is closed), so driving them coincident locks the
+ * relative rotation — the two-pin trick with the second pin synthesized, like slider
+ * locks. Returns null when the weld is inert (free joint, missing body, no baseline).
+ */
+function weldPhantoms(
+  scene: Scene,
+  con: PinConstraint,
+  ja: Joint,
+  jb: Joint
+): { ba: Body; bb: Body; pa: Vec2; pb: Vec2 } | null {
+  const wb = weldBaselines.get(con.id);
+  if (!wb || ja.bodyId === null || jb.bodyId === null) return null;
+  const ba = scene.getBody(ja.bodyId);
+  const bb = scene.getBody(jb.bodyId);
+  if (!ba || !bb) return null;
+  const ua = ba.angle + wb.da;
+  const ub = bb.angle + wb.db;
+  const pa = add(scene.jointWorld(ja), { x: wb.arm * Math.cos(ua), y: wb.arm * Math.sin(ua) });
+  const pb = add(scene.jointWorld(jb), { x: wb.arm * Math.cos(ub), y: wb.arm * Math.sin(ub) });
+  return { ba, bb, pa, pb };
+}
+
+/** Wrap an angle difference into [-π, π]. */
+function wrapAngle(d: number): number {
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+/** Rotate a body rigidly about a fixed world point (pose only — joints are body-local). */
+function rotateBodyAbout(body: Body, p: Vec2, dt: number): void {
+  body.pos = add(p, rotate(sub(body.pos, p), dt));
+  body.angle += dt;
+}
+
+/** Rotate a whole group rigidly about a fixed world point (locked free joints included). */
+function rotateGroupAbout(g: RigidGroup, p: Vec2, dt: number): void {
+  for (const body of g.bodies) rotateBodyAbout(body, p, dt);
+  for (const j of g.joints) j.local = add(p, rotate(sub(j.local, p), dt));
+}
+
+/** An angular host whose unit is immovable this solve (fixed body/group, world track). */
+const ANG_FIXED: { invI: number; rotate: (dt: number) => void } = { invI: 0, rotate() {} };
+
+/** Angular host of a whole group about pivot `p` (immovable when the group is fixed). */
+function groupAngHost(g: RigidGroup, p: Vec2): { invI: number; rotate: (dt: number) => void } {
+  if (fixedGroups.has(g.id)) return ANG_FIXED;
+  const { c, invMass, invInertia } = groupProps(g);
+  const invI = 1 / (1 / invInertia + lenSq(sub(c, p)) / invMass);
+  return { invI, rotate: (dt) => rotateGroupAbout(g, p, dt) };
+}
+
+/**
+ * The purely angular host of a joint's rigid unit about pivot `p`: its body (or that
+ * body's whole group), or the group a free joint is locked to. `invI` is the unit's
+ * inverse inertia about `p` (parallel-axis; 0 for a fixed unit, making an angular
+ * constraint's correction one-sided). Null for a loose free joint — a bare point has
+ * no orientation. Used by welds and slider orientation locks.
+ */
+function unitAngHost(
+  scene: Scene,
+  joint: Joint,
+  p: Vec2
+): { invI: number; rotate: (dt: number) => void } | null {
+  if (joint.bodyId === null) {
+    const g = groupCtx.byJoint.get(joint.id);
+    return g ? groupAngHost(g, p) : null;
+  }
+  const body = scene.getBody(joint.bodyId);
+  if (!body) return null;
+  if (fixedBodies.has(body.id)) return ANG_FIXED;
+  const g = groupCtx.byBody.get(body.id);
+  if (g) return groupAngHost(g, p);
+  const invI = 1 / (1 / body.invInertia + lenSq(sub(body.pos, p)) / body.invMass);
+  return { invI, rotate: (dt) => rotateBodyAbout(body, p, dt) };
+}
+
+/**
+ * Project one weld's orientation: rotate the two bodies (or their whole groups) about the
+ * weld point until the relative angle matches the captured baseline, the correction split
+ * by inverse inertia about that point (a fixed side makes it one-sided). Rotating each
+ * side about the shared joint leaves the pin's coincidence untouched, so the angular
+ * error dies in one projection instead of leaking through a pair of nearby point
+ * constraints — the phantom-pair formulation (see `weldPhantoms`, kept as the error
+ * *metric*) converges far too slowly for that: two coincident-ish pins between the same
+ * two bodies condition the rotation badly, and a long drag could exhaust the cleanup
+ * budget and misreport reachable constraints as breaks.
+ */
+function solveWeld(scene: Scene, con: PinConstraint, ja: Joint, jb: Joint, relax: number): void {
+  const wb = weldBaselines.get(con.id);
+  if (!wb || ja.bodyId === null || jb.bodyId === null) return;
+  const ba = scene.getBody(ja.bodyId);
+  const bb = scene.getBody(jb.bodyId);
+  if (!ba || !bb) return;
+  const err = wrapAngle(bb.angle + wb.db - (ba.angle + wb.da));
+  if (err === 0) return;
+  // Pivot at the midpoint of the two weld joints (they coincide once the pin is closed).
+  const p = scale(add(scene.jointWorld(ja), scene.jointWorld(jb)), 0.5);
+  const ha = unitAngHost(scene, ja, p);
+  const hb = unitAngHost(scene, jb, p);
+  if (!ha || !hb) return;
+  const w = ha.invI + hb.invI;
+  if (w < 1e-12) return; // both sides immovable — leave the error for break reporting
+  const lambda = (err / w) * relax;
+  ha.rotate(lambda * ha.invI);
+  hb.rotate(-lambda * hb.invI);
 }
 
 /**
@@ -596,14 +760,20 @@ function sweepStructural(
 ): void {
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
-      if (skip.has(con.id)) continue;
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
       // A pin inside one rigid unit (a body, or a group — locked free joints included) is
       // inert: the unit is rigid, so the pin can't change the members' relative pose.
       if (sameRigid(ja, jb)) continue;
-      solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
+      if (!skip.has(con.id)) {
+        solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
+      }
+      // A weld's orientation is its own unit keyed by the NEGATED pin id (unique — scene
+      // ids are positive), so Phase B can disable it independently of the pin itself.
+      if (con.rigid === true && !skip.has(-con.id)) {
+        solveWeld(scene, con, ja, jb, relax);
+      }
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
       if (!j) continue;
@@ -632,7 +802,7 @@ function sweepStructural(
         // id (unique — scene ids are positive), so Phase B can disable it independently
         // of the rider's on-rail unit.
         if (con.locked.includes(riderId) && !skip.has(-riderId)) {
-          solveLockedRider(scene, jq, scene.jointWorld(ja), scene.jointWorld(jb), rail.host, relax);
+          solveLockedRider(scene, jq, ja, scene.jointWorld(ja), scene.jointWorld(jb), relax);
         }
       }
     }
@@ -786,6 +956,21 @@ function eachUnit(
       const a = scene.jointWorld(ja);
       const b = scene.jointWorld(jb);
       visit({ id: con.id, a, b, error: len(sub(a, b)), ground: false, joints: [con.jointA, con.jointB] });
+      // A weld's orientation is its own unit under the negated pin id: the two phantom
+      // points that coincide exactly at the welded-in relative angle (see weldPhantoms).
+      if (con.rigid === true) {
+        const wp = weldPhantoms(scene, con, ja, jb);
+        if (wp) {
+          visit({
+            id: -con.id,
+            a: wp.pa,
+            b: wp.pb,
+            error: len(sub(wp.pa, wp.pb)),
+            ground: false,
+            joints: [con.jointA, con.jointB],
+          });
+        }
+      }
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
       if (!j) continue;
@@ -896,10 +1081,16 @@ function settle(
 function applyBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>, relax: number): void {
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
-      if (!broken.has(con.id)) continue;
+      const isBrokenPin = broken.has(con.id);
+      const isBrokenWeld = con.rigid === true && broken.has(-con.id);
+      if (!isBrokenPin && !isBrokenWeld) continue;
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
-      if (ja && jb) solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
+      if (!ja || !jb) continue;
+      if (isBrokenPin) {
+        solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
+      }
+      if (isBrokenWeld) solveWeld(scene, con, ja, jb, relax);
     } else if (con.kind === "slider") {
       const ja = scene.getJoint(con.railA);
       const jb = scene.getJoint(con.railB);
@@ -922,7 +1113,7 @@ function applyBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<nu
           );
         }
         if (isBrokenLock) {
-          solveLockedRider(scene, jq, scene.jointWorld(ja), scene.jointWorld(jb), rail.host, relax);
+          solveLockedRider(scene, jq, ja, scene.jointWorld(ja), scene.jointWorld(jb), relax);
         }
       }
     }
@@ -1014,10 +1205,11 @@ export function solve(
   // Grounded bodies/groups — plus anything a scoped solve freezes — are immovable this solve.
   buildFixed(scene, freeze);
   freezeActive = freeze !== undefined;
-  // Orientation-locked riders without a baseline lock in their current relative angle
-  // (main resets the baselines whenever the drawn layout changes, so a new sim session
-  // — or a rigid drag — always locks the angle as drawn).
+  // Orientation-locked riders and welds without a baseline lock in their current relative
+  // angle (main resets the baselines whenever the drawn layout changes, so a new sim
+  // session — or a rigid drag — always locks the angles as drawn).
   captureLockBaselines(scene);
+  captureWeldBaselines(scene);
   const grounded = groundedJoints(scene, anchors);
   // Frozen free joints are held exactly where they are: fixed hosts, like grounded ones.
   if (freeze?.joints) for (const id of freeze.joints) grounded.add(id);

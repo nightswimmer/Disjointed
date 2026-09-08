@@ -258,14 +258,15 @@ otherwise — a lock on a free rider is **inert until the joint gains a body** (
 by build-body-from-joints). Clicking an existing rider with the tool **toggles** its lock;
 clicking a loose joint near a rail attaches it as a locked rider. The locked-in relative
 angle is **captured from the drawn pose** when simulation starts (or a rigid Shift-drag
-begins) — `resetSliderLockBaselines()` is called from `markDirty` / sim entry /
-`setDocument`, and the solver lazily captures missing baselines per locked rider — so
-rotating the body in draw mode re-locks the new angle (the drawn pose is the intended
-assembly, same philosophy as pins). Solver implementation: the classic two-pin trick,
-synthesized — a **phantom point** rigid in the rider's body (offset dl/2 along the
-direction the rail had in the body's frame at capture) is held on the **infinite** rail
-line via `solveAxis`, so the error is `(dl/2)·sin(Δangle)`, commensurate with positional
-tolerances; works on moving rails, groups, fixed tracks, and under anchors. Each lock is
+begins) — `resetPoseBaselines()` (named `resetSliderLockBaselines` pre-v18) is called from
+`markDirty` / sim entry / `setDocument`, and the solver lazily captures missing baselines
+per locked rider — so rotating the body in draw mode re-locks the new angle (the drawn
+pose is the intended assembly, same philosophy as pins). Solver implementation (reworked
+in v18 — see the welds paragraph): a **direct angular projection** rotates the rider's
+unit against the rail's unit about the rider point until the wrapped relative angle
+matches the baseline; the error metric stays positional — rider off-line distance plus
+`(dl/2)·Δangle` — commensurate with positional tolerances; works on moving rails, groups,
+fixed tracks, and under anchors. Each lock is
 its own Phase-B unit keyed by the **negated rider id** (unique — scene ids are positive),
 so an unreachable lock is disabled/reported independently of the rider's on-rail unit.
 Rendering: a green rail-aligned **carriage rectangle** on each locked rider.
@@ -300,6 +301,28 @@ the stranded joints **error-red with a dashed ring** (vs the solid red ring of a
 break), and the hint line prepends a warning ("⚠ N joints lie outside their bodies…")
 while any exist. Deliberately **nothing is auto-moved** — the user drags the joint back
 (drags clamp to the outline) or fixes the shape / definition, and the flag clears itself.
+**Welds — rigid joints (v18)**: a weld is a **pin with a `rigid` flag** (`PinConstraint.rigid`,
+present only when true), so it rides every existing pin pathway — cascade deletion, undo,
+copy/paste (`SelectionClip.pins[].rigid`), component expansion (the def is the reference:
+toggling rigid in a definition cascades), save/load (pre-v18 pins load revolute). Besides the
+pin's coincidence it locks the two bodies' **relative angle**, joining them completely; the
+angle is captured **from the drawn pose** at sim entry / rigid drag (weld baselines live next
+to the slider-lock baselines, both cleared by the renamed `resetPoseBaselines()`). A weld
+with a free (body-less) joint on either side acts as a plain pin until the joint gains a
+body. New **Weld tool (`W`)**: click where bodies overlap → a joint in each, welded together
+(same placement mechanics as the Joint tool); click an **existing pinned joint** → toggles
+its pin(s) weld ↔ revolute (mirroring the Slider tool's lock toggle). Rendering: welded
+joints keep the pin blue but get a **square** center (no hollow revolute dot) plus a blue
+square outline. Analyzer: a weld removes 3 DOF (pin 2). Solver: the weld's orientation is
+its own Phase-B unit keyed by the **negated pin id** (like slider locks use negated rider
+ids), solved by a **direct angular projection** — the two bodies (or groups) rotate about
+the weld point, split by inverse inertia about it (a fixed side is one-sided) — after the
+first phantom-pair implementation converged pathologically slowly (see the bug list: drags
+could exhaust the cleanup budget and falsely break the assembly). The same drag-yield bug
+hunt also made **slider locks flip-proof**: the lock error is now the **wrapped relative
+angle** (unique zero — the old phantom-on-line `sin` error was also satisfied by a 180°
+flip) enforced by the same angular projection (rider unit vs rail unit about the rider
+point). New test script `scripts/welds.ts` (17 checks).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -362,7 +385,10 @@ while any exist. Deliberately **nothing is auto-moved** — the user drags the j
   - `Joint` = a point with `bodyId` + `local`. If `bodyId` is a body, `local` is the offset
     from that body's centroid; if `bodyId === null` it is a **free joint** and `local` is its
     own world position (the solver treats it as a movable point particle).
-  - Constraints: `pin` (two joints coincide, free rotation), `ground` (a joint locked to a
+  - Constraints: `pin` (two joints coincide, free rotation — or a **weld** when `rigid`
+    (v18): the relative angle locks too, joining the bodies completely; `addPin(a, b,
+    rigid?)`, `setPinRigid(id, on)`, `pinsOfJoint(id)`; the flag is present only when
+    true), `ground` (a joint locked to a
     fixed world point — grounding a free joint makes a body-less anchor), `slider` (a **rail**
     in the UI: two joints `railA`/`railB`, plus a `riders` list of joints confined to the
     segment between them, with end-stops, and a `locked` list (v17, ⊆ riders) naming the
@@ -555,7 +581,7 @@ while any exist. Deliberately **nothing is auto-moved** — the user drags the j
     `UNIT_TO_MM` (both exported) — a declaration of what one world unit means; changing it
     never moves geometry. Used for measurement display and DXF import conversion.
   - `serialize()` / `load(SceneData)` for save / load / autosave (versioned plain-data
-    snapshot, `FORMAT_VERSION = 17`; `load` deep-copies, recomputes `nextId`, drops legacy
+    snapshot, `FORMAT_VERSION = 18`; `load` deep-copies, recomputes `nextId`, drops legacy
     origin+dir sliders, migrates older single-`slider` → `riders`, and back-fills
     `controlLocal`/`radius`/`round` for pre-v5 bodies; pre-v6 files simply have no
     actuator/motor constraints, pre-v7 files no measurements, pre-v8 files no sketch
@@ -566,12 +592,13 @@ while any exist. Deliberately **nothing is auto-moved** — the user drags the j
     baked `holesLocal` loops (loaded as radius-0 editable holes; v16 loads sanitize `holes`
     and **re-derive** `holesLocal` from the controls, so the two can never disagree), and
     pre-v17 sliders have no `locked` riders (a hand-edited lock on a non-rider is dropped:
-    locked ⊆ riders is a load invariant) —
+    locked ⊆ riders is a load invariant), and pre-v18 pins have no `rigid` flag (loaded
+    revolute; a non-boolean hand-edited value is sanitized away) —
     all load fine as-is; loaded groups/instances are pruned against the loaded elements).
     The `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its
     colour, per-corner `radii`, and **hole shapes** (`bodies[].holes`: world control +
-    radius/radii/round each), pins/grounds/sliders internal to the selection (rails with
-    their riders **and locked lists**),
+    radius/radii/round each), pins/grounds/sliders internal to the selection (pins with
+    their **rigid/weld flag**, rails with their riders **and locked lists**),
     **actuators + motors** (when their slider/body travels), groups (bodies + locked
     joints), internal sketch constraints and dimensions (driving always; driven only for
     component creation via `opts.drivenDims`).
@@ -616,18 +643,41 @@ while any exist. Deliberately **nothing is auto-moved** — the user drags the j
   or mixes: a chassis track that moves with a component instance) — or when both are
   grounded free joints (world-fixed track); the rail host is the body / group / immovable
   line accordingly, and a fixed group makes its rails immovable lines.
-  **Slider orientation locks (v17)**: a module-level `lockBaselines` map (rider id → the
-  rail direction expressed in the rider body's frame at capture) is captured lazily by
-  `captureLockBaselines` at the top of every `solve` and cleared by the exported
-  `resetSliderLockBaselines()` (main calls it from `markDirty`, sim entry, and
-  `setDocument`, so a sim session / rigid drag locks the relative angle **as drawn**).
-  `lockPhantom` builds the enforcement point — rigid in the rider's body, offset dl/2
-  along the captured direction — and `solveLockedRider` projects it onto the infinite
-  rail line via `solveAxis` (host = `bodyHostAt`, so groups and fixed bodies behave; the
-  rail host carries the reaction). Each lock is a `StructuralUnit` keyed by the **negated
-  rider id**, so Phase B can disable / Phase C can close a lock independently of its
-  rider; a lock on a free rider, a degenerate rail, or a rider rigid to the rail unit is
-  inert.
+  **Slider orientation locks (v17, enforcement reworked in v18)**: a module-level
+  `lockBaselines` map (rider id → the rail direction expressed in the rider body's frame
+  at capture) is captured lazily by `captureLockBaselines` at the top of every `solve` and
+  cleared by the exported `resetPoseBaselines()` (main calls it from `markDirty`, sim
+  entry, and `setDocument`, so a sim session / rigid drag locks the relative angle **as
+  drawn**; it also clears the weld baselines below). `solveLockedRider` is a **direct
+  angular projection**: `unitAngHost` resolves each side's rigid unit (body / group /
+  fixed) into an angular host about the rider point — inverse inertia about that pivot,
+  parallel-axis — and the rider's unit rotates against the rail's unit until the
+  **wrapped** relative angle matches the baseline (pivoting at the rider leaves the
+  on-rail position untouched). `lockPhantom` remains as the error **metric**: rider
+  off-line distance + `(dl/2)·wrapAngle(Δ)` — unlike the original phantom-on-rail-line
+  `sin` error, zero ONLY at the locked angle, so a violently dragged carriage can no
+  longer settle silently into a 180°-flipped pose. Each lock is a `StructuralUnit` keyed
+  by the **negated rider id**, so Phase B can disable / Phase C can close a lock
+  independently of its rider; a lock on a free rider, a degenerate rail, or a rider rigid
+  to the rail unit is inert.
+  **Welds (v18, `PinConstraint.rigid`)**: `weldBaselines` (pin id → the two bodies' angle
+  offsets + a phantom arm length = mean characteristic body radius √(area/π)) is captured
+  lazily by `captureWeldBaselines` next to the lock capture and cleared by the same
+  `resetPoseBaselines()` — a weld locks the relative angle **as drawn**, and one with a
+  free joint on either side has no baseline (plain pin until the joint gains a body).
+  `solveWeld` is the same direct angular projection: both sides' units rotate about the
+  weld point (midpoint of the two joints), split by inverse inertia about it, a fixed side
+  one-sided, both fixed → left for break reporting. `weldPhantoms` is the error metric (two
+  points rigid in the bodies, offset `arm` along the captured shared direction — coincident
+  exactly at the welded angle, so the unit error ≈ `arm·Δangle`). Each weld's orientation
+  is its own `StructuralUnit` keyed by the **negated pin id** (unique — scene ids are
+  positive), disabled/closed independently of the pin itself; a weld inside one rigid unit
+  is inert (`sameRigid`). The first implementation enforced the weld as a phantom **second
+  pin** near the real one — two nearby point-coincidences between the same two bodies
+  condition the rotation so badly that Gauss-Seidel needed hundreds of sweeps in benign
+  poses, and an unreachable drag exhausted `maxCleanupSweeps`, letting Phase B misreport
+  reachable riders/locks as breaks (the "drag pulls the rod off its rail" bug); the
+  angular projection killed both.
   **Grounded bodies** (`fixedBodies` + `fixedGroups`, rebuilt per solve by `buildFixed`):
   every `grounded` body — expanded to whole groups, with the group's locked free joints
   becoming immovable too — is an **immovable fixed host** in `bodyHostAt` / `railInfo` and
@@ -683,8 +733,9 @@ while any exist. Deliberately **nothing is auto-moved** — the user drags the j
   exploration; not yet imported by the app — call `formatReport(analyzeScene(scene), scene)`
   from a console/debug hook). Builds a constraint graph (bodies + free joints as nodes; pins +
   slider-rider couplings as edges), finds kinematic islands (union-find), and per island
-  reports: Grübler-Kutzbach DOF (pins/grounds remove 2 DOF, a slider rider — point-on-line —
-  removes 1), cyclomatic loop count (grounds modeled as edges to a virtual world node so
+  reports: Grübler-Kutzbach DOF (pins/grounds remove 2 DOF, a **weld** — rigid pin — 3, a
+  slider rider — point-on-line — 1, an orientation-locked rider 2), cyclomatic loop count
+  (grounds modeled as edges to a virtual world node so
   loops-through-ground are counted), BFS propagation order from anchors, back-edges, and a
   Tarjan **bridge / biconnected-component decomposition** classifying bodies into loop cores
   (must be solved together) vs propagatable tree branches, with articulation bodies joining
@@ -725,7 +776,9 @@ while any exist. Deliberately **nothing is auto-moved** — the user drags the j
   rectangle** (`drawCarriage`, drawn with the rail so it exists in both modes),
   ground symbols (per ground constraint, plus one at the **centroid of every grounded
   body** — each member of a grounded group carries the flag, so each shows its own),
-  joints (color-coded: blue = pinned, yellow = grounded, green = slider rider;
+  joints (color-coded: blue = pinned, yellow = grounded, green = slider rider; a **welded**
+  joint — on a `rigid` pin — keeps the pin blue but swaps the hollow revolute centre for a
+  **square** centre plus a blue square outline;
   rail joints get a green ring; **a loose free joint gets a muted dashed ring — but a free joint
   that rides a slider or defines a rail drops the dashed ring and renders as anchored**), corner-handle squares
   for the selected body, plus draft overlays (freehand polygon, build-from-joints outline +
@@ -812,6 +865,13 @@ while any exist. Deliberately **nothing is auto-moved** — the user drags the j
     (`attachSliderRider(id, jid, true)`). Selects the resulting joint. The rail tool is
     `K` (renamed from "Slider", which took the `S` key with it; tool id `"rail"`,
     selection kind `"rail"`, renderer input `railDraft`).
+  - **Weld tool** (`W`, draw mode, one-shot): on an existing **joint** → toggles the
+    rigidity of every pin it participates in (`pinsOfJoint` + `setPinRigid`; a mixed set
+    goes all-rigid first, all-rigid goes back to revolute — mirrors the Slider tool's
+    lock toggle); otherwise, where **≥ 2 bodies overlap** → mints a joint in each (same
+    grid-snap + containment fallback as the Joint tool) and welds them together with
+    rigid pins (`addPin(a, b, true)`). A single body / empty space does nothing (a lone
+    joint has nothing to weld to). Selects the resulting joint.
   - **Guideline tool** (`L`, draw mode; the actuator's shortcut moved to `A`): two clicks
     through `guidePlacementAt` — exactly on a picked point element (joint / body corner /
     guide point; recorded and turned into an **auto-coincident** via `tryAddConstraint`),
@@ -1025,8 +1085,8 @@ while any exist. Deliberately **nothing is auto-moved** — the user drags the j
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or shortcut —
-`B`/`U` hole/`J`/`C`/`G`/`K` rail/`S` slider/`L` guideline/`A` actuator/`M`) lets you place one
-element, then it returns to **Select** mode. `Esc` aborts the current placement.
+`B`/`U` hole/`J`/`W` weld/`C`/`G`/`K` rail/`S` slider/`L` guideline/`A` actuator/`M`) lets you
+place one element, then it returns to **Select** mode. `Esc` aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
   **existing joint**: build a body *from joints* — click joints to outline (loose free joints
@@ -1050,6 +1110,11 @@ element, then it returns to **Select** mode. `Esc` aborts the current placement.
 - **Joint** (`J`) — click inside a body to attach a joint; click where bodies overlap to drop
   a joint in each and pin them together; click **empty space** to place a free (body-less) joint.
   A node placed on a **slider rail (or rail node)** is auto-attached to that slider as a rider.
+- **Weld** (`W`) — click where **bodies overlap** to weld them rigidly together at that point
+  (a joint in each, joined with **rigid pins**: shared position AND locked relative angle — no
+  relative motion at all; the angle is whatever you drew, re-captured on every sim entry /
+  rigid drag like a slider's lock). Click an **existing pinned joint** to toggle its pin(s)
+  weld ↔ revolute. Welded joints show a **square** centre instead of the revolute's hollow dot.
 - **Connect** (`C`) — click a joint, then another joint on a *different* body to pin them, or a
   *slider rail* to attach the joint to it as a rider.
 - **Ground** (`G`) — click a joint to lock its world position (grounding a free joint makes a
@@ -1287,11 +1352,15 @@ Persistence:
   grounded free joints), or `null` (unsolvable) — the sweep and the residual check share it so
   they agree. The body-rail angular Jacobian reduces to `cross(u, pQ − posR)`; the fixed rail is
   just the zero-mass degenerate case (single-sided, like a grounded body). A rider may be a body
-  joint or a free joint. An **orientation-locked rider** (v17) adds one more scalar projection:
-  a phantom point rigid in the rider's body is held on the infinite rail line (the two-pin
-  trick synthesized), locking the body's angle relative to the rail at the value captured from
-  the drawn pose — baselines live in the solver module and are reset by main whenever the
-  drawn layout changes.
+  joint or a free joint. An **orientation-locked rider** (v17) adds one more projection —
+  since v18 a **direct angular one**: the rider's rigid unit rotates against the rail's unit
+  about the rider point until the *wrapped* relative angle matches the value captured from
+  the drawn pose (baselines live in the solver module and are reset by main whenever the
+  drawn layout changes). **Welds** (`rigid` pins, v18) use the same angular projection about
+  the weld point, locking two bodies' relative angle at the drawn value on top of the pin's
+  coincidence. Angular errors are wrapped to [-π, π] with a unique zero, so neither a lock
+  nor a weld can settle into a flipped pose; each is its own break-reportable unit (negated
+  rider id / negated pin id).
 - **Host abstraction** (`hostFor`): every constraint participant is reduced to a `{ point, pos,
   invMass, invInertia, apply }` host — a body (translate + rotate), a free joint (translate
   only, zero inertia), or a fixed world point (immovable). This unifies pin/ground/slider/driver
@@ -1330,6 +1399,17 @@ Persistence:
   *relative to* a moving (pivoting) rail; save/load keeps `locked` and legacy sliders load
   with none; deleting the rider sheds rider + lock; copy/paste recreates the lock on the
   pasted rider; an impossible lock+ground reports a break with the ground unmoved.
+- **welds.ts** — rigid pins / welds (v18, 17 checks): a welded pair keeps its drawn relative
+  angle under dragging while still moving as one (and the same pin toggled back to revolute
+  folds); the baseline re-captures a newly drawn relative angle; a weld to a free joint acts
+  as a plain pin; persistence (rigid survives save/load, non-boolean values sanitized away);
+  copy/paste carries the flag; an unreachable weld between two fixed bodies reports a break
+  naming both joints with neither body moved; component expansion carries the flag and
+  un-welding the definition cascades to the instance; the analyzer counts a weld as 3 DOF
+  removed vs a pin's 2; and the **drag-yield regression** — unreachable drags (far
+  perpendicular, past the end-stop, both) on a rod locked to a fixed track and welded to a
+  second body never report breaks, never pull the rod off the rail line, and never rotate
+  it off its lock (the flip check).
 - **ground-drag.ts** — drags a joint on a grounded body to far/off-axis/unreachable targets;
   asserts the ground never moves and the joint snaps to the nearest reachable angle.
 - **persistence.ts** — round-trips a scene through `serialize → JSON → load`; asserts counts,
@@ -1605,6 +1685,26 @@ Persistence:
   `solveSketchLive` immediately falls back to a symmetric solve when the anchored one
   can't converge, so constraints hold every frame and the drag only moves things along
   the free directions.
+- **Dragging a welded assembly could pull a slider off its rail (false breaks).** The first
+  weld implementation (same-day fix, v18) enforced the locked angle as a phantom **second
+  pin** right next to the real one — the worst conditioning for Gauss-Seidel (rotation is
+  barely observable from two nearby points), so convergence took hundreds of sweeps in
+  benign poses and an unreachable drag (grabbing the welded body at a lever and pulling
+  perpendicular / past the end-stop) exhausted `maxCleanupSweeps`. The still-large residual
+  sent the solver into Phase B, which **disabled perfectly reachable rider/lock units and
+  reported them as breaks** — the rod visibly popped off its rail. The drag-yield design
+  (driver yields via post-drive convergence) was sound; the weld just converged too slowly
+  to fit the budget. Fixed by solving the weld's angle **directly**: rotate the two rigid
+  units about the weld point by the wrapped angular error split by inverse inertia
+  (`solveWeld` + `unitAngHost`); worst case dropped from 1000+ sweeps (failed) to ~270
+  (converged), benign case 435 → 27. Regression-tested in `scripts/welds.ts`.
+- **A violently dragged slider carriage could settle 180° flipped.** Pre-existing v17 flaw
+  surfaced by the weld work: the lock's phantom-on-the-infinite-rail-line error is
+  `(dl/2)·sin(Δ)` — zero at Δ = π too, so a wild drag could tunnel the locked body through
+  a half-turn and the flipped pose reported **zero error** (no break, no snap-back). Fixed
+  alongside the weld: the lock now measures the **wrapped** relative angle (unique zero)
+  and enforces it with the same direct angular projection, so a flip reads as a large
+  error and is pulled back.
 
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);
@@ -1644,7 +1744,18 @@ Persistence:
   still editable).
 - **DXF follow-ups**: SPLINE sampling, INSERT/block instancing, ellipses; DXF *export*.
 - More joint types as needed. (~~A prismatic / no-rotation slide joint~~ — done in v17: the
-  Slider tool's orientation-locked riders.) **Slider follow-ups**: the locked angle is always
+  Slider tool's orientation-locked riders. ~~A rigid / weld joint~~ — done in v18: the Weld
+  tool's rigid pins.) **Weld follow-ups**: the Connect tool doesn't create welds directly
+  (pin with `C`, then toggle with a `W` click on the joint); the weld toggle on an
+  instance-owned pin isn't blocked (like the slider-lock toggle — a definition cascade
+  overwrites it); a weld between a body and a *group-locked* free joint stays inert (the
+  joint has a group orientation, but baselines only capture body pairs — weld a body of the
+  group instead). **Drag-yield caveat**: "a drag never breaks constraints" is enforced by
+  convergence, not by construction — a pathologically slow-converging mechanism could still
+  exhaust `maxCleanupSweeps` under an unreachable drag and false-break like the phantom-pair
+  weld did; if it ever recurs, the candidate hardening is to skip Phase B entirely for pure
+  mouse-driver solves (breaks would then come only from sim-entry / animation solves).
+  **Slider follow-ups**: the locked angle is always
   re-captured from the drawn pose (by design — no stored angle parameter); if an explicit,
   persistent relative angle is ever wanted, store a per-lock phase in the constraint instead
   of the solver-side baseline map. A group-locked *free* rider has no orientation, so its
