@@ -26,7 +26,7 @@ import {
   solveSketch, tryAddConstraint, autoConstrainBody, SketchBreak,
   anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
 } from "./sketch";
-import { applyDimensionValue, enforcePoseDims } from "./pose";
+import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolated } from "./pose";
 import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from "./view";
@@ -1326,9 +1326,9 @@ function exitComponent(levels = 1): void {
     }
   }
   // The cascade snapped instance poses back to their definitions — re-assert the pose
-  // dimensions in the context we landed in (one that can't hold renders violated),
-  // then let free geometry follow the moved instances.
-  enforcePoseDims(scene);
+  // dimensions + constraints in the context we landed in (one that can't hold renders
+  // violated), then let free geometry follow the moved instances.
+  enforcePose(scene);
   solveSketch(scene);
   resetTransient();
   updateCrumbBar();
@@ -2073,9 +2073,11 @@ function handleConstraintClick(p: Vec2): void {
   commitConstraint(kind, constraintPicks[0], ref);
 }
 
-/** Add + solve a sketch constraint; on an unsatisfiable solve it's removed again and flashes. */
+/** Add + solve a sketch constraint; on an unsatisfiable solve it's removed again and flashes.
+ *  Every end on component-instance geometry makes it a pose constraint (rigid parts move
+ *  instead of shape — pose.ts routes it). */
 function commitConstraint(kind: SketchConstraintKind, refA: MeasureRef, refB?: MeasureRef): void {
-  const { constraint, breaks } = tryAddConstraint(scene, kind, refA, refB);
+  const { constraint, breaks } = placeConstraint(scene, kind, refA, refB);
   disarmTool(); // clears the picks (and, via resetTransient, the selection)
   if (!constraint) {
     if (breaks.length) flashSketchItems(breaks);
@@ -2123,11 +2125,11 @@ function sketchActive(): boolean {
  */
 function solveSketchLive(): void {
   if (mode !== "draw" || !sketchActive()) return;
-  // Pose dimensions first: partner instances translate so the dims keep holding while
-  // the user drags (the dragged instances are anchored — partners follow, never the
-  // other way). A dim that can't hold (grounded partner) just renders violated. The
-  // sketch solve below then adapts free geometry to the moved instances.
-  enforcePoseDims(scene, draggedInstanceIds());
+  // Pose dimensions + constraints first: partner instances move rigidly so they keep
+  // holding while the user drags (the dragged instances are anchored — partners follow,
+  // never the other way). One that can't hold (grounded partner) just renders violated.
+  // The sketch solve below then adapts free geometry to the moved instances.
+  enforcePose(scene, draggedInstanceIds());
   const anchors = dragAnchorVars();
   if (!anchors) {
     solveSketch(scene);
@@ -3967,7 +3969,10 @@ function sketchGlyphsView(): SketchGlyphView[] {
       cursor !== null &&
       (allRefs.some((ref) => refHovered(ref, cursor!)) ||
         badges.some((b) => dist(b, cursor!) <= GLYPH_PICK_RADIUS / view.scale));
-    out.push({ id: c.id, kind: c.kind, badges, faded: !hot });
+    // A pose constraint that can't currently hold (grounded partner, a def-edit reset,
+    // an instance rotated against it) shows in the error style, like a violated dim.
+    const violated = poseConstraintViolated(scene, c);
+    out.push({ id: c.id, kind: c.kind, badges, faded: !hot && !violated, violated });
   }
   sketchGlyphCache = out;
   return out;

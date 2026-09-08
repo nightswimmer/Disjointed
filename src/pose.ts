@@ -1,16 +1,24 @@
 /**
- * Pose-level driving dimensions: draw-mode dimensions whose BOTH ends live on
- * component-instance geometry. Instance shape is design-locked (the definition owns
- * it), so the sketch (shape) solver never touches it — but the *pose* of instances,
- * and of the mobile parts inside them, is assembly state, and that is what these
- * dimensions drive. Components stay a transparent grouping: dimensioning works as if
- * everything were flat.
+ * Pose-level sketch: draw-mode driving dimensions AND sketch constraints whose every
+ * end lives on component-instance geometry. Instance shape is design-locked (the
+ * definition owns it), so the sketch (shape) solver never touches it — but the *pose*
+ * of instances, and of the mobile parts inside them, is assembly state, and that is
+ * what these items drive. Components stay a transparent grouping: dimensioning and
+ * constraining work as if everything were flat.
  *
- * - Ends on two DIFFERENT instances → one instance translates rigidly to the target
- *   (the same motion dragging it makes — draw-mode placement is free; pins render
- *   dotted until sim closes them). A grounded instance never moves. All pose
- *   dimensions are enforced together (Gauss-Seidel rounds over closed-form
- *   translations), so an edit that conflicts with another driving dimension rejects.
+ * Every pose item reduces to a closed-form rigid correction (`PoseMove`):
+ * - distances, coincident, point-on-line and point-pair H/V → a **translation**;
+ * - line H/V, parallel, perpendicular → a **rotation** about the constrained line's
+ *   midpoint (which keeps the line in place while aligning it — translations and
+ *   rotations then alternate in the same Gauss-Seidel rounds; each is exact, so a
+ *   mixed set settles in a couple of rounds);
+ * - "equal" between two locked shapes has no pose solution and is rejected at
+ *   creation (model.ts).
+ *
+ * - Ends on two DIFFERENT instances → one instance moves rigidly (the same motion
+ *   dragging / rotating it makes — draw-mode placement is free; pins render dotted
+ *   until sim closes them). A grounded instance never moves. All pose items are
+ *   enforced together, so an edit that conflicts with another one rejects.
  * - Ends on two mobile parts of ONE instance → the rigid-drag machinery re-poses the
  *   internal mechanism: the sim solver drives one part's ref point while everything
  *   outside the instance, plus the other end's rigid unit, is frozen — pins hold.
@@ -19,16 +27,33 @@
  *   level" falls out of unreachability instead of needing special detection.
  *
  * Failure semantics mirror sketch.ts: **reject** — the scene is left untouched and
- * the offending dimensions are returned as `SketchBreak`s (the UI flashes them red).
+ * the offending items are returned as `SketchBreak`s (the UI flashes them red).
  *
- * `enforcePoseDims` also runs live during draw-mode drags (main.ts): dragging a
- * component pulls its dimensioned partner instances along, CAD-style. A dimension
- * that can't hold (grounded partner, internal pose reset by a definition edit)
- * renders **violated** (see `MeasureInfo.violated`) until re-applied.
+ * `enforcePose` also runs live during draw-mode drags (main.ts): dragging a
+ * component pulls its dimensioned / constrained partner instances along, CAD-style.
+ * An item that can't hold (grounded partner, internal pose reset by a definition
+ * edit, an instance rotated against its H constraint) renders **violated** (see
+ * `MeasureInfo.violated` / `SketchGlyphView.violated`) until re-applied — the
+ * un-anchored settle on drag end re-asserts what it can.
  */
-import { Scene, Measurement, MeasureRef, ComponentInstance } from "./model";
+import {
+  Scene,
+  Measurement,
+  MeasureRef,
+  ComponentInstance,
+  SketchConstraint,
+  SketchConstraintKind,
+  DIM_VIOLATION_TOL,
+  sameMeasureRef,
+} from "./model";
 import { solve, Driver, SolveFreeze, resetPoseBaselines } from "./solver";
-import { SketchBreak, sketchConfig, solveSketch, applyDrivingDimension } from "./sketch";
+import {
+  SketchBreak,
+  sketchConfig,
+  solveSketch,
+  applyDrivingDimension,
+  tryAddConstraint,
+} from "./sketch";
 import { Vec2, vec, add, sub, scale, len, dot, perp, rotate } from "./geometry";
 
 /** Whether a dimension is pose-level: draw-mode with both ends on instance geometry. */
@@ -38,6 +63,13 @@ export function isPoseDim(scene: Scene, m: Measurement): boolean {
     scene.instanceOfRef(m.refA) !== undefined &&
     scene.instanceOfRef(m.refB) !== undefined
   );
+}
+
+/** Whether a sketch constraint is pose-level: every end on instance geometry (a
+ *  single-line H/V included). One free end makes it ordinary shape material instead —
+ *  the sketch solver moves the free side, instance variables being immovable there. */
+export function isPoseConstraint(scene: Scene, c: SketchConstraint): boolean {
+  return scene.refInstanceOwned(c.refA) && (c.refB === null || scene.refInstanceOwned(c.refB));
 }
 
 /**
@@ -56,7 +88,72 @@ export function applyDimensionValue(
 }
 
 /**
- * World translation of the **refB side** that would satisfy the dimension at `target`
+ * Route a constraint placement the same way: every end on instance geometry → pose
+ * constraint (rigid parts move, here); otherwise the sketch's `tryAddConstraint`
+ * (shape solve). Both return the created constraint, or null plus the conflicts.
+ */
+export function placeConstraint(
+  scene: Scene,
+  kind: SketchConstraintKind,
+  refA: MeasureRef,
+  refB?: MeasureRef
+): { constraint: SketchConstraint | null; breaks: SketchBreak[] } {
+  const pose = scene.refInstanceOwned(refA) && (!refB || scene.refInstanceOwned(refB));
+  if (!pose) return tryAddConstraint(scene, kind, refA, refB);
+  return applyPoseConstraint(scene, kind, refA, refB);
+}
+
+/** Whether a pose constraint currently fails to hold (rendered in the error style). */
+export function poseConstraintViolated(scene: Scene, c: SketchConstraint): boolean {
+  if (!isPoseConstraint(scene, c)) return false;
+  const err = constraintItem(scene, c).error();
+  return err === null || err > DIM_VIOLATION_TOL;
+}
+
+// --- pose items ------------------------------------------------------------------
+
+/**
+ * A closed-form rigid correction. As given it applies to the **refB side**; the refA
+ * side takes the inverse (negated translation, or the negated angle about its own
+ * pivot). A single-ref item (line H/V) only has a refA side.
+ */
+type PoseMove =
+  | { kind: "translate"; delta: Vec2 }
+  | { kind: "rotate"; angle: number; pivotA: Vec2; pivotB: Vec2 };
+
+/** One enforceable pose item: a driving pose dimension or a pose constraint. Geometry
+ *  is re-resolved on every call, so items stay valid across the solve rounds. */
+interface PoseItem {
+  id: number;
+  kind: "constraint" | "dimension";
+  refA: MeasureRef;
+  refB: MeasureRef | null;
+  /** Side-aware residual in world units; null when unresolvable / not enforceable. */
+  error(): number | null;
+  /** The move that would zero the residual, or null when none exists. */
+  correction(): PoseMove | null;
+}
+
+type Line = { kind: "line"; a: Vec2; b: Vec2 };
+type Point = { kind: "point"; p: Vec2 };
+
+/** Wrap an angle difference into (-π/2, π/2] — direction mismatch modulo a half-turn. */
+function wrapHalfPi(a: number): number {
+  let d = ((a % Math.PI) + Math.PI) % Math.PI;
+  if (d > Math.PI / 2) d -= Math.PI;
+  return d;
+}
+
+const lineAngle = (l: Line): number => Math.atan2(l.b.y - l.a.y, l.b.x - l.a.x);
+const lineMid = (l: Line): Vec2 => scale(add(l.a, l.b), 0.5);
+const lineLen = (l: Line): number => len(sub(l.b, l.a));
+
+/** Displacement-scale residual of an angular mismatch on lines of the given length
+ *  (same metric as the sketch solver's parallel projection). */
+const angularError = (dd: number, l: number): number => Math.abs(Math.sin(dd)) * (l / 2);
+
+/**
+ * World translation of the **refB side** that would satisfy a dimension at `target`
  * (moving the refA side instead uses the negation). Null when no translation can
  * satisfy it (degenerate geometry; angle-mode pairs are filtered by the callers via
  * `measureInfo`). The math mirrors `measureInfo`'s value semantics per kind/axis, and
@@ -87,15 +184,13 @@ function poseCorrection(scene: Scene, m: Measurement, target: number): Vec2 | nu
     const l1 = len(d1);
     if (l1 < 1e-9) return null;
     const n = perp(scale(d1, 1 / l1));
-    const midA = scale(add(a.a, a.b), 0.5);
-    const midB = scale(add(b.a, b.b), 0.5);
-    const s = dot(sub(midB, midA), n);
+    const s = dot(sub(lineMid(b), lineMid(a)), n);
     const sg = m.side ?? (s === 0 ? 1 : Math.sign(s));
     return scale(n, sg * target - s);
   }
   // Point + line (either order): perpendicular distance to the infinite line.
-  const pt = a.kind === "point" ? a : (b as { kind: "point"; p: Vec2 });
-  const ln = a.kind === "line" ? a : (b as { kind: "line"; a: Vec2; b: Vec2 });
+  const pt = a.kind === "point" ? a : (b as Point);
+  const ln = a.kind === "line" ? a : (b as Line);
   const d = sub(ln.b, ln.a);
   const l = len(d);
   if (l < 1e-9) return null;
@@ -108,70 +203,220 @@ function poseCorrection(scene: Scene, m: Measurement, target: number): Vec2 | nu
   return a.kind === "point" ? scale(deltaPoint, -1) : deltaPoint;
 }
 
+/** A driving pose dimension as an item (at `target`, which may differ from `m.target`
+ *  while an edit is being tried). */
+function dimItem(scene: Scene, m: Measurement, target: number): PoseItem {
+  return {
+    id: m.id,
+    kind: "dimension",
+    refA: m.refA,
+    refB: m.refB,
+    error() {
+      // Side-aware: a pose at the right absolute distance but on the flipped side
+      // reads as (value + target), never as satisfied.
+      const info = scene.measureInfo(m);
+      if (!info || info.kind !== "distance") return null;
+      const delta = poseCorrection(scene, m, target);
+      return delta ? len(delta) : Math.abs(info.value - target);
+    },
+    correction() {
+      const delta = poseCorrection(scene, m, target);
+      return delta ? { kind: "translate", delta } : null;
+    },
+  };
+}
+
+/** Build an item from a shift function: the translation that moves the refB side
+ *  onto satisfaction (null = unresolvable); its length is the residual. */
+function translateItem(c: SketchConstraint, shift: () => Vec2 | null): PoseItem {
+  return {
+    id: c.id,
+    kind: "constraint",
+    refA: c.refA,
+    refB: c.refB,
+    error() {
+      const d = shift();
+      return d ? len(d) : null;
+    },
+    correction() {
+      const d = shift();
+      return d ? { kind: "translate", delta: d } : null;
+    },
+  };
+}
+
+/** A pose constraint as an item. Point pairs and point-on-line translate; lines rotate
+ *  about their own midpoint. Geometry is resolved afresh on every call. */
+function constraintItem(scene: Scene, c: SketchConstraint): PoseItem {
+  const resolveA = () => scene.resolveMeasureRef(c.refA);
+  const resolveB = () => (c.refB ? scene.resolveMeasureRef(c.refB) : null);
+  switch (c.kind) {
+    case "coincident":
+      // Point–point: bring B onto A. Point–line (either order): zero the point's signed
+      // distance off the infinite line; the point side moves along the normal.
+      return translateItem(c, () => {
+        const a = resolveA();
+        const b = resolveB();
+        if (!a || !b) return null;
+        if (a.kind === "point" && b.kind === "point") return sub(a.p, b.p);
+        if (a.kind === "line" && b.kind === "line") return null;
+        const pt = a.kind === "point" ? a : (b as Point);
+        const ln = a.kind === "line" ? a : (b as Line);
+        const d = sub(ln.b, ln.a);
+        const l = len(d);
+        if (l < 1e-9) return null;
+        const n = perp(scale(d, 1 / l));
+        const s = dot(sub(pt.p, ln.a), n);
+        const deltaPoint = scale(n, -s);
+        return a.kind === "point" ? scale(deltaPoint, -1) : deltaPoint;
+      });
+    case "horizontal":
+    case "vertical": {
+      const axis: "x" | "y" = c.kind === "horizontal" ? "y" : "x";
+      if (c.refB) {
+        // Point pair: level B with A along the constrained axis.
+        return translateItem(c, () => {
+          const a = resolveA();
+          const b = resolveB();
+          if (!a || !b || a.kind !== "point" || b.kind !== "point") return null;
+          const d = a.p[axis] - b.p[axis];
+          return axis === "y" ? vec(0, d) : vec(d, 0);
+        });
+      }
+      // A single line: rotate its instance about the line's midpoint onto the axis.
+      const targetAng = c.kind === "horizontal" ? 0 : Math.PI / 2;
+      const mismatch = (): { dd: number; ln: Line } | null => {
+        const a = resolveA();
+        if (!a || a.kind !== "line" || lineLen(a) < 1e-9) return null;
+        return { dd: wrapHalfPi(targetAng - lineAngle(a)), ln: a };
+      };
+      return {
+        id: c.id,
+        kind: "constraint",
+        refA: c.refA,
+        refB: null,
+        error() {
+          const mm = mismatch();
+          return mm ? angularError(mm.dd, lineLen(mm.ln)) : null;
+        },
+        correction() {
+          const mm = mismatch();
+          if (!mm) return null;
+          // Only a refA side exists: it takes the negated angle, i.e. +dd.
+          const mid = lineMid(mm.ln);
+          return { kind: "rotate", angle: -mm.dd, pivotA: mid, pivotB: mid };
+        },
+      };
+    }
+    case "parallel":
+    case "perpendicular": {
+      const offset = c.kind === "perpendicular" ? Math.PI / 2 : 0;
+      const mismatch = (): { dd: number; a: Line; b: Line } | null => {
+        const a = resolveA();
+        const b = resolveB();
+        if (!a || !b || a.kind !== "line" || b.kind !== "line") return null;
+        if (lineLen(a) < 1e-9 || lineLen(b) < 1e-9) return null;
+        return { dd: wrapHalfPi(lineAngle(b) - lineAngle(a) - offset), a, b };
+      };
+      return {
+        id: c.id,
+        kind: "constraint",
+        refA: c.refA,
+        refB: c.refB,
+        error() {
+          const mm = mismatch();
+          return mm ? angularError(mm.dd, Math.max(lineLen(mm.a), lineLen(mm.b))) : null;
+        },
+        correction() {
+          const mm = mismatch();
+          if (!mm) return null;
+          // B turns by -dd onto A's direction; A instead turns by +dd onto B's.
+          return { kind: "rotate", angle: -mm.dd, pivotA: lineMid(mm.a), pivotB: lineMid(mm.b) };
+        },
+      };
+    }
+    case "equal":
+      // Both lengths are locked to their definitions — never satisfiable as a pose.
+      return { id: c.id, kind: "constraint", refA: c.refA, refB: c.refB, error: () => Infinity, correction: () => null };
+  }
+}
+
+/** Every enforceable pose item in the scene: driving pose dims + pose constraints. */
+function poseItems(scene: Scene): PoseItem[] {
+  const out: PoseItem[] = [];
+  for (const m of scene.measurements) {
+    if (m.mode === "draw" && m.driving && m.target !== undefined && isPoseDim(scene, m)) {
+      out.push(dimItem(scene, m, m.target));
+    }
+  }
+  for (const c of scene.sketch) if (isPoseConstraint(scene, c)) out.push(constraintItem(scene, c));
+  return out;
+}
+
+/** Apply a move to one side's whole instance. */
+function applyMove(scene: Scene, inst: ComponentInstance, move: PoseMove, side: "A" | "B"): void {
+  if (move.kind === "translate") {
+    scene.moveInstance(inst.id, side === "B" ? move.delta : scale(move.delta, -1));
+  } else {
+    scene.rotateInstance(
+      inst.id,
+      side === "B" ? move.pivotB : move.pivotA,
+      side === "B" ? move.angle : -move.angle
+    );
+  }
+}
+
 /** Whether any of an instance's bodies is world-grounded (the instance can't move). */
 function instanceGrounded(scene: Scene, inst: ComponentInstance): boolean {
   return inst.bodyMap.some((e) => scene.getBody(e.id)?.grounded);
 }
 
-/** Gauss-Seidel budget for the translation enforcement rounds. */
+/** Gauss-Seidel budget for the rigid enforcement rounds. */
 const POSE_MAX_ROUNDS = 32;
 
 /**
- * Enforce every pose dimension together: each round translates, per out-of-tolerance
- * dimension, the movable side's whole instance by the closed-form correction. A side
- * is movable when its instance isn't grounded and isn't pinned by the active drag
- * (`anchoredInstances` — pass the dragged instances so partners follow the drag, never
- * the other way around). Same-instance dimensions can't be fixed by translation and
- * are only *verified* here (`applyPoseDimension` re-poses them via the sim solver).
- * Returns the dimensions still out of tolerance — those render violated.
+ * Enforce every pose item together: each round moves, per out-of-tolerance item, the
+ * movable side's whole instance by the closed-form correction (a translation or a
+ * rotation). A side is movable when its instance isn't grounded and isn't pinned by
+ * the active drag (`anchoredInstances` — pass the dragged instances so partners follow
+ * the drag, never the other way around). Same-instance items can't be fixed by a rigid
+ * move and are only *verified* here (`applyPoseDimension` / `applyPoseConstraint`
+ * re-pose them via the sim solver). Returns the items still out of tolerance — those
+ * render violated.
  */
-export function enforcePoseDims(
+export function enforcePose(
   scene: Scene,
   anchoredInstances?: ReadonlySet<number>
 ): SketchBreak[] {
-  const dims = scene.measurements.filter(
-    (m) => m.mode === "draw" && m.driving && m.target !== undefined && isPoseDim(scene, m)
-  );
-  if (!dims.length) return [];
+  const items = poseItems(scene);
+  if (!items.length) return [];
   const held = (inst: ComponentInstance): boolean =>
     (anchoredInstances?.has(inst.id) ?? false) || instanceGrounded(scene, inst);
   for (let round = 0; round < POSE_MAX_ROUNDS; round++) {
     let worst = 0;
-    for (const m of dims) {
-      const err = poseDimError(scene, m);
+    for (const it of items) {
+      const err = it.error();
       if (err === null) continue; // unresolvable / angle-mode — reported below
       if (err <= sketchConfig.tol) continue;
       worst = Math.max(worst, err);
-      const instA = scene.instanceOfRef(m.refA);
-      const instB = scene.instanceOfRef(m.refB);
-      if (!instA || !instB || instA.id === instB.id) continue; // internal pose — see above
-      const delta = poseCorrection(scene, m, m.target!);
-      if (!delta) continue;
-      if (!held(instB)) scene.moveInstance(instB.id, delta);
-      else if (!held(instA)) scene.moveInstance(instA.id, scale(delta, -1));
-      // Both sides held: leave the residual — the dimension renders violated.
+      const instA = scene.instanceOfRef(it.refA);
+      const instB = it.refB ? scene.instanceOfRef(it.refB) : undefined;
+      if (!instA) continue;
+      if (instB && instA.id === instB.id) continue; // internal pose — see above
+      const move = it.correction();
+      if (!move) continue;
+      if (instB && !held(instB)) applyMove(scene, instB, move, "B");
+      else if (!held(instA)) applyMove(scene, instA, move, "A");
+      // Every side held: leave the residual — the item renders violated.
     }
     if (worst <= sketchConfig.tol) return [];
   }
   const out: SketchBreak[] = [];
-  for (const m of dims) {
-    const err = poseDimError(scene, m) ?? Infinity;
-    if (err > sketchConfig.tol) out.push({ id: m.id, kind: "dimension", error: err });
+  for (const it of items) {
+    const err = it.error() ?? Infinity;
+    if (err > sketchConfig.tol) out.push({ id: it.id, kind: it.kind, error: err });
   }
   return out;
-}
-
-/**
- * Side-aware residual of a driving pose dimension: the length of the translation that
- * would satisfy it — for a dimension with a held side, a pose at the right absolute
- * distance but on the flipped side reads as (value + target), never as satisfied.
- * Null when the dimension is unresolvable or in angle mode.
- */
-function poseDimError(scene: Scene, m: Measurement): number | null {
-  const info = scene.measureInfo(m);
-  if (!info || info.kind !== "distance") return null;
-  const delta = poseCorrection(scene, m, m.target!);
-  return delta ? len(delta) : Math.abs(info.value - m.target!);
 }
 
 /**
@@ -201,18 +446,64 @@ export function applyPoseDimension(
   };
   // Backstop: two ends rigid to one another (same body / chassis group) can never drive.
   if (!scene.setMeasurementDriving(m.id, target)) return fail(reject);
-  // Same instance: re-pose the internal mechanism first — translation can't change an
+  // Same instance: re-pose the internal mechanism first — a rigid move can't change an
   // internal distance.
-  if (instA.id === instB.id && !poseSolveIntra(scene, m, target)) return fail(reject);
-  // Enforce every pose dimension together (the candidate included): a conflicting edit
-  // fails here with the actual conflicts flagged.
-  const leftover = enforcePoseDims(scene);
-  if (leftover.length) return fail(leftover);
-  // Free geometry follows the moved instances (mixed dimensions, sketch constraints on
-  // material pinned to them). A sketch that can't re-satisfy rejects the whole edit.
+  if (instA.id === instB.id && !poseSolveIntra(scene, dimItem(scene, m, target), "B")) return fail(reject);
+  const leftover = settlePose(scene, instA.id);
+  return leftover.length ? fail(leftover) : [];
+}
+
+/**
+ * Add a pose constraint (every end on instance geometry), moving rigid parts to satisfy
+ * it. Returns the constraint, or null plus the conflicts with the scene left untouched
+ * (reject semantics, like `tryAddConstraint`). Null with no breaks means the reference
+ * combination is invalid or the ends are rigid to one another at a deeper level.
+ * The **second-picked** side moves by preference (`refA` is the first pick — the model
+ * may store a point-on-line pair the other way round); when it can't (grounded), the
+ * first-picked side moves instead.
+ */
+export function applyPoseConstraint(
+  scene: Scene,
+  kind: SketchConstraintKind,
+  refA: MeasureRef,
+  refB?: MeasureRef
+): { constraint: SketchConstraint | null; breaks: SketchBreak[] } {
+  const snap = JSON.stringify(scene.serialize());
+  const c = scene.addSketchConstraint(kind, refA, refB);
+  if (!c) return { constraint: null, breaks: [] };
+  const fail = (breaks: SketchBreak[]): { constraint: null; breaks: SketchBreak[] } => {
+    scene.load(JSON.parse(snap)); // predates the constraint: it's gone with the restore
+    resetPoseBaselines();
+    return { constraint: null, breaks };
+  };
+  const reject = [{ id: c.id, kind: "constraint" as const, error: Infinity }];
+  const item = constraintItem(scene, c);
+  const instA = scene.instanceOfRef(c.refA);
+  const instB = c.refB ? scene.instanceOfRef(c.refB) : undefined;
+  if (!instA || (c.refB && !instB)) return fail(reject);
+  // The side holding the user's first pick stays put by preference.
+  const firstIsA = sameMeasureRef(c.refA, refA);
+  const firstInst = firstIsA ? instA : instB!;
+  if (instB && instA.id === instB.id && !poseSolveIntra(scene, item, firstIsA ? "B" : "A")) {
+    return fail(reject);
+  }
+  const leftover = settlePose(scene, firstInst.id);
+  return leftover.length ? fail(leftover) : { constraint: c, breaks: [] };
+}
+
+/** Shared tail of a pose edit: enforce every pose item together (the candidate
+ *  included — a conflicting edit fails here with the actual conflicts flagged), let
+ *  free geometry follow the moved instances (mixed dims, sketch constraints on material
+ *  pinned to them), then re-capture slider-lock / weld baselines from the new layout.
+ *  `preferHeld` names the instance that should stay put if the rest can satisfy the
+ *  edit (the user's first pick); when it can't, everything movable is fair game.
+ *  Returns the conflicts (empty on success). */
+function settlePose(scene: Scene, preferHeld?: number): SketchBreak[] {
+  let leftover = preferHeld !== undefined ? enforcePose(scene, new Set([preferHeld])) : [];
+  if (leftover.length || preferHeld === undefined) leftover = enforcePose(scene);
+  if (leftover.length) return leftover;
   const sk = solveSketch(scene);
-  if (sk.length) return fail(sk);
-  // The drawn layout changed rigidly: slider-lock / weld baselines re-capture from it.
+  if (sk.length) return sk;
   resetPoseBaselines();
   return [];
 }
@@ -270,9 +561,10 @@ function refUnitMembers(
   }
 }
 
-/** A sim driver grabbing the ref's world point: a joint ref drives the joint, body
- *  refs drive the body at the resolved point, a rail drives its railA joint. */
-function driverForRef(scene: Scene, ref: MeasureRef): Driver | null {
+/** A sim driver grabbing a world point `p` that belongs to the ref's element: a joint
+ *  ref drives the joint, body refs drive the body at `p`, a rail drives one of its
+ *  joints (railB when `p` is its far end, railA otherwise). */
+function driverAt(scene: Scene, ref: MeasureRef, p: Vec2): Driver | null {
   switch (ref.kind) {
     case "joint":
       return scene.getJoint(ref.jointId) ? { jointId: ref.jointId, target: vec(0, 0) } : null;
@@ -280,19 +572,29 @@ function driverForRef(scene: Scene, ref: MeasureRef): Driver | null {
     case "bodyPoint":
     case "edge": {
       const b = scene.getBody(ref.bodyId);
-      const r = scene.resolveMeasureRef(ref);
-      if (!b || !r) return null;
-      const p = r.kind === "point" ? r.p : scale(add(r.a, r.b), 0.5);
+      if (!b) return null;
       return { bodyId: b.id, local: rotate(sub(p, b.pos), -b.angle), target: p };
     }
     case "rail": {
       const c = scene.constraints.find((x) => x.kind === "slider" && x.id === ref.sliderId);
       if (!c || c.kind !== "slider") return null;
-      return scene.getJoint(c.railA) ? { jointId: c.railA, target: vec(0, 0) } : null;
+      const jb = scene.getJoint(c.railB);
+      const far = jb !== undefined && len(sub(scene.jointWorld(jb), p)) < 1e-6;
+      const id = far ? c.railB : c.railA;
+      return scene.getJoint(id) ? { jointId: id, target: vec(0, 0) } : null;
     }
     default:
       return null;
   }
+}
+
+/** The world point a ref's driver should grab: a point ref's point; a line ref's far
+ *  end (`b`) when the correction is a rotation (turning it about `a`), else its midpoint. */
+function grabPoint(scene: Scene, ref: MeasureRef, rotating: boolean): Vec2 | null {
+  const r = scene.resolveMeasureRef(ref);
+  if (!r) return null;
+  if (r.kind === "point") return r.p;
+  return rotating ? r.b : lineMid(r);
 }
 
 /** Current world point a driver grabs. */
@@ -306,23 +608,29 @@ function driverWorld(scene: Scene, drv: Driver): Vec2 | null {
 }
 
 /**
- * Satisfy a same-instance pose dimension by re-posing the instance's internal
- * mechanism: the sim solver drives one end's ref point toward the target distance
- * (recomputed along the current direction each round, so pin-constrained parts pivot
- * into reach) while everything outside the instance, plus the other end's rigid unit,
- * is frozen. Tries driving the refB side first, then the refA side. Returns whether
- * the dimension converged; on failure the scene is restored to entry state.
+ * Satisfy a same-instance pose item by re-posing the instance's internal mechanism:
+ * the sim solver drives one end's grab point toward where the closed-form correction
+ * would put it (recomputed each round, so pin-constrained parts pivot into reach — a
+ * rotation drives the line's far end around its near end) while everything outside
+ * the instance, plus the other end's rigid unit, is frozen. Tries moving the
+ * `moveFirst` side first, then the other one. Returns whether the item converged; on
+ * failure the scene is restored to entry state.
  */
-function poseSolveIntra(scene: Scene, m: Measurement, target: number): boolean {
-  const inst = scene.instanceOfRef(m.refA);
-  if (!inst) return false;
+function poseSolveIntra(scene: Scene, item: PoseItem, moveFirst: "A" | "B"): boolean {
+  const inst = scene.instanceOfRef(item.refA);
+  if (!inst || !item.refB) return false;
+  const refB = item.refB;
   const instBodies = new Set(inst.bodyMap.map((e) => e.id));
   const instJoints = new Set([...inst.jointMap, ...inst.anchorMap].map((e) => e.id));
   const snap = JSON.stringify(scene.serialize());
-  const attempt = (moveRef: MeasureRef, holdRef: MeasureRef): boolean => {
+  const attempt = (moveRef: MeasureRef, holdRef: MeasureRef, side: "A" | "B"): boolean => {
     const heldUnit = refUnitMembers(scene, holdRef);
-    const drv = driverForRef(scene, moveRef);
-    if (!heldUnit || !drv) return false;
+    const first = item.correction();
+    if (!heldUnit || !first) return false;
+    const rotating = first.kind === "rotate";
+    const grab = grabPoint(scene, moveRef, rotating);
+    const drv = grab ? driverAt(scene, moveRef, grab) : null;
+    if (!drv) return false;
     // Frozen: the world outside this instance, plus the held end's rigid unit — the
     // rest of the instance's mechanism re-poses around it, pins intact.
     const freeze: SolveFreeze = {
@@ -337,28 +645,32 @@ function poseSolveIntra(scene: Scene, m: Measurement, target: number): boolean {
           .map((j) => j.id)
       ),
     };
-    const err = (): number | null => {
-      const info = scene.measureInfo(m);
-      if (!info || info.kind !== "distance") return null;
-      const delta = poseCorrection(scene, m, target);
-      return delta ? len(delta) : Math.abs(info.value - target); // side-aware residual
-    };
     for (let r = 0; r < INTRA_ROUNDS; r++) {
-      const e = err();
+      const e = item.error();
       if (e === null) return false;
       if (e <= sketchConfig.tol) return true;
-      const delta = poseCorrection(scene, m, target);
+      const move = item.correction();
       const at = driverWorld(scene, drv);
-      if (!delta || !at) return false;
-      drv.target = add(at, moveRef === m.refB ? delta : scale(delta, -1));
+      if (!move || !at) return false;
+      if (move.kind === "translate") {
+        drv.target = add(at, side === "B" ? move.delta : scale(move.delta, -1));
+      } else {
+        // Turn the grabbed far end about the line's near end by this side's angle.
+        const ln = scene.resolveMeasureRef(moveRef);
+        if (!ln || ln.kind !== "line") return false;
+        const ang = side === "B" ? move.angle : -move.angle;
+        drv.target = add(ln.a, rotate(sub(at, ln.a), ang));
+      }
       solve(scene, drv, INTRA_ITERS, 1, undefined, undefined, freeze);
     }
-    const e = err();
+    const e = item.error();
     return e !== null && e <= sketchConfig.tol;
   };
-  if (attempt(m.refB, m.refA)) return true;
+  const tryB = () => attempt(refB, item.refA, "B");
+  const tryA = () => attempt(item.refA, refB, "A");
+  if (moveFirst === "B" ? tryB() : tryA()) return true;
   scene.load(JSON.parse(snap));
-  if (attempt(m.refA, m.refB)) return true;
+  if (moveFirst === "B" ? tryA() : tryB()) return true;
   scene.load(JSON.parse(snap));
   return false;
 }

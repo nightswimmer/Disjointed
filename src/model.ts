@@ -1348,9 +1348,20 @@ export class Scene {
     }
     if (!this.resolveMeasureRef(refA) || (b && !this.resolveMeasureRef(b))) return null;
     if (b && sameMeasureRef(refA, b)) return null;
-    // Instance geometry is design-locked: its shape belongs to the component definition,
-    // so sketch constraints on it are rejected (edit the definition instead).
-    if (this.refInstanceOwned(refA) || (b && this.refInstanceOwned(b))) return null;
+    // Instance geometry is design-locked: its shape belongs to the component definition.
+    // A constraint with ONE end free is shape material for the free side (instance
+    // variables are immovable in the sketch solver — see varRank in sketch.ts). One
+    // whose every end is instance-owned is a *pose constraint* (pose.ts): it moves
+    // rigid parts, so it's rejected only when no pose can satisfy it — two ends rigid
+    // to one another (same body / chassis group), or "equal" (both lengths locked).
+    if (this.refInstanceOwned(refA) && (!b || this.refInstanceOwned(b))) {
+      if (kind === "equal") return null;
+      if (b) {
+        const ka = this.refRigidUnitKey(refA);
+        const kb = this.refRigidUnitKey(b);
+        if (ka === null || kb === null || ka === kb) return null;
+      }
+    }
     const c: SketchConstraint = {
       kind,
       id: this.id(),
@@ -2389,8 +2400,9 @@ export class Scene {
   }
 
   /** Whether a measurement/sketch reference names instance-owned geometry (whose shape is
-   *  locked — sketch constraints on it are rejected; dimensions may drive its *pose*,
-   *  see pose.ts). */
+   *  locked: the sketch solver never moves it — a constraint or dimension with one free
+   *  end moves the free side; one with every end instance-owned drives *poses*, see
+   *  pose.ts). */
   refInstanceOwned(ref: MeasureRef): boolean {
     return this.instanceOfRef(ref) !== undefined;
   }
@@ -2441,6 +2453,26 @@ export class Scene {
     for (const e of [...inst.jointMap, ...inst.anchorMap]) {
       const j = this.getJoint(e.id);
       if (j && j.bodyId === null) this.moveJoint(j.id, delta);
+    }
+  }
+
+  /**
+   * Rigidly rotate a whole component instance by `delta` radians about a world `pivot`:
+   * every expanded body turns with `rotateBody` (attached joints ride along), every free
+   * joint (mechanism joints and synthesized anchors alike) orbits the pivot — the same
+   * motion the rotate drag makes. Shapes are untouched and the placement derived by
+   * `instancePlacement` stays coherent (chassis poses and free points turn together).
+   */
+  rotateInstance(instanceId: number, pivot: Vec2, delta: number): void {
+    const inst = this.instances.find((i) => i.id === instanceId);
+    if (!inst || delta === 0) return;
+    for (const e of inst.bodyMap) this.rotateBody(e.id, pivot, delta);
+    for (const e of [...inst.jointMap, ...inst.anchorMap]) {
+      const j = this.getJoint(e.id);
+      if (!j || j.bodyId !== null) continue;
+      const w = this.jointWorld(j);
+      const nw = add(pivot, rotate(sub(w, pivot), delta));
+      this.moveJoint(j.id, sub(nw, w));
     }
   }
 

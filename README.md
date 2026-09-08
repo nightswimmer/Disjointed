@@ -190,6 +190,15 @@ works in both modes. Measurements are saved with the mechanism.
   (grounded partner, or a definition edit reset the poses) turns **red** until you re-apply
   it. Every driving dimension also **holds its drawn relative direction** — dragging one
   part fast past the other can never flip the two sides through each other.
+- **Constraints on components work the same way**: a constraint between a component and free
+  geometry moves the free side (component shapes are locked); one between two components
+  moves a component **rigidly** — coincident, point-on-line and H/V point pairs slide the
+  second-picked component into place, line H/V, parallel and perpendicular **rotate** it
+  about the constrained edge (the first pick stays put; a grounded component never moves).
+  Between two mobile parts of one component the internal mechanism re-poses. **Equal**
+  between two component edges, or anything internal to one rigid piece, is refused. A
+  constraint that can't hold (grounded partner, a definition edit, rotating a component
+  against its H) shows its badges in **red** until it's satisfied again.
 - **Sketch-aware dragging**: with constraints or driving dimensions present, dragging a node,
   joint, or body (and rotating) **re-solves the sketch live** — what you drag follows the
   cursor as far as the constraints allow, and everything constrained to it comes along.
@@ -234,9 +243,10 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   placed until it has content.
 - **Instances are atomic**: clicking any part selects the whole instance (dashed outline);
   drag / rotate / copy / delete act on it whole, and pasting a copied instance creates a new
-  instance of the same definition. Shapes are **design-locked** — no corner handles, no sketch
-  constraints on instance geometry (measurements are fine, and **dimensions can drive an
-  instance's pose** — see *Driving dimensions* above). **Shift-drag** a member to pose the
+  instance of the same definition. Shapes are **design-locked** — no corner handles, and
+  constraints / dimensions never reshape an instance: they move the free side, or **drive the
+  instance's pose** (see *Driving dimensions* and *Constraints on components* above).
+  **Shift-drag** a member to pose the
   instance's internal mechanism rigidly, exactly like simulating it.
 - **Grounding in a definition = the chassis**: grounded bodies and grounded free joints become
   one rigid cluster per instance; a joint-ground on a moving part becomes a pivot fixed to that
@@ -364,7 +374,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, hierarchical components, slider orientation locks, welds (rigid joints), pose-level driving dimensions
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, hierarchical components, slider orientation locks, welds (rigid joints), pose-level driving dimensions, sketch constraints on components
 ```
 
 ## How it works
@@ -452,18 +462,20 @@ gives the CAD feel: guide constraints move guides rather than geometry, dragged 
 is never tugged back by its constraints (guides follow it exactly, so groups stay rigid),
 and when a drag would need the constraints to give way, a symmetric re-solve runs the same
 frame so the constraint visibly holds and the drag slides along the directions left free.
-**Pose dimensions** (`pose.ts`) handle dimensions whose both ends live on component
-instances — not shape material at all: between two instances the correction is a
-closed-form **rigid translation** of one of them (Gauss-Seidel over all pose dimensions,
-run live during drags with the dragged instances anchored, so partners follow the drag);
-within one instance the **rigid-drag solver** re-poses the internal mechanism with
-everything else frozen. Rejected edits restore a snapshot, and unsatisfied dimensions
-render red. Every driving dimension carries its captured **side** (the drawn relative
+**Pose dimensions and pose constraints** (`pose.ts`) handle dimensions and sketch
+constraints whose every end lives on component instances — not shape material at all:
+between two instances the correction is a closed-form **rigid move** of one of them — a
+translation for distances, coincident and H/V point pairs, a rotation about the constrained
+edge's midpoint for line H/V, parallel and perpendicular (Gauss-Seidel over all pose items,
+translations and rotations alternating, run live during drags with the dragged instances
+anchored, so partners follow the drag); within one instance the **rigid-drag solver**
+re-poses the internal mechanism with everything else frozen. Rejected edits restore a
+snapshot, and unsatisfied items render red. Every driving dimension carries its captured **side** (the drawn relative
 direction): corrections are signed toward it, so an overshooting drag reads as a large
 error back — the two sides can never flip through each other.
 
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `sketch.ts`,
-`pose.ts` (pose-level driving dimensions), `dxf.ts` (DXF import), `view.ts` (camera),
+`pose.ts` (pose-level dimensions + constraints on components), `dxf.ts` (DXF import), `view.ts` (camera),
 `renderer.ts`, `main.ts`, plus `analyzer.ts` — a standalone topology diagnostic (kinematic
 islands, degrees of freedom, loop / block decomposition) groundwork for future solver
 optimizations. Tests live in [`scripts/`](scripts/).

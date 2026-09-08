@@ -114,6 +114,9 @@ export interface SketchGlyphView {
    * the constraint's referenced elements (or a badge itself) — computed by main.
    */
   faded: boolean;
+  /** A pose constraint (on component instances) that currently fails to hold — drawn
+   *  in the error style until re-applied, like a violated driving dimension. */
+  violated?: boolean;
 }
 
 /** On-screen joint radius in CSS pixels (kept constant regardless of zoom). */
@@ -688,10 +691,10 @@ function drawSketchGlyph(
   flashed: boolean
 ): void {
   const s = view.scale;
-  const color = flashed ? FLASH_COLOR : selected ? theme.ink : SKETCH_COLOR;
-  // Faded unless the cursor is on the constrained element — selection / a reject flash
-  // always shows at full strength.
-  const alpha = g.faded && !selected && !flashed ? 0.2 : 1;
+  const color = flashed || g.violated ? FLASH_COLOR : selected ? theme.ink : SKETCH_COLOR;
+  // Faded unless the cursor is on the constrained element — selection / a reject flash /
+  // a violated pose constraint always shows at full strength.
+  const alpha = g.faded && !selected && !flashed && !g.violated ? 0.2 : 1;
   for (const b of g.badges) {
     const sx = b.x * s + view.tx;
     const sy = b.y * s + view.ty;
@@ -705,7 +708,7 @@ function drawSketchGlyph(
     ctx.fillStyle = theme.surface + "e6";
     ctx.fill();
     ctx.strokeStyle = color;
-    ctx.lineWidth = selected || flashed ? 1.6 : 1;
+    ctx.lineWidth = selected || flashed || g.violated ? 1.6 : 1;
     ctx.stroke();
     ctx.fillStyle = color;
     ctx.textAlign = "center";

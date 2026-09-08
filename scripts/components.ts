@@ -111,11 +111,24 @@ function editDef(scene: Scene, defId: number, mutate: (s: Scene) => void): Set<n
   check("pin expanded into the assembly", scene.constraints.filter((c) => c.kind === "pin").length === 1, "1 pin");
   check("no world grounds in the assembly", scene.constraints.every((c) => c.kind !== "ground"), "0 grounds");
   check("chassis flag marks the base", instance.bodyMap.filter((e) => e.chassis).length === 1, "1 chassis body");
+  // Instance SHAPE stays locked: a constraint that could only be met by reshaping is
+  // rejected — "equal" between two instance edges, or any pair rigid to one another
+  // (two vertices of one instance body). A single-line H on an instance edge is a
+  // pose constraint instead (the instance rotates — pose.ts) and is accepted.
+  const newBase = scene.getBody(instance.bodyMap.find((e) => e.chassis)!.id)!;
   check(
-    "sketch constraint on instance geometry rejected",
-    scene.addSketchConstraint("horizontal", { kind: "edge", bodyId: newArm.id, index: 0 }) === null,
+    "equal between two instance edges rejected",
+    scene.addSketchConstraint("equal", { kind: "edge", bodyId: newArm.id, index: 0 }, { kind: "edge", bodyId: newBase.id, index: 0 }) === null,
     "rejected"
   );
+  check(
+    "constraint within one instance body rejected",
+    scene.addSketchConstraint("coincident", { kind: "vertex", bodyId: newArm.id, index: 0 }, { kind: "vertex", bodyId: newArm.id, index: 1 }) === null,
+    "rejected"
+  );
+  const poseH = scene.addSketchConstraint("horizontal", { kind: "edge", bodyId: newArm.id, index: 0 });
+  check("line H on an instance edge accepted as a pose constraint", poseH !== null, poseH ? `id ${poseH.id}` : "null");
+  if (poseH) scene.removeSketchConstraint(poseH.id);
 }
 
 // --- driving dimensions vs instance geometry ------------------------------------

@@ -19,7 +19,7 @@
  *    by moving the free side.
  */
 import { Scene } from "../src/model";
-import { applyDimensionValue, enforcePoseDims, isPoseDim } from "../src/pose";
+import { applyDimensionValue, enforcePose, isPoseDim } from "../src/pose";
 import { solveSketch, sketchConfig, anchorVarsForJoint } from "../src/sketch";
 import { dist } from "../src/geometry";
 
@@ -110,7 +110,7 @@ const TOL = sketchConfig.tol * 2;
 
   // Live follow: drag instance 1 (anchored) — instance 2 translates to hold the dim.
   scene.moveInstance(inst1.id, { x: 30, y: -10 });
-  const left = enforcePoseDims(scene, new Set([inst1.id]));
+  const left = enforcePose(scene, new Set([inst1.id]));
   const val = scene.measureInfo(mh)!.value;
   check("partner follows a drag", left.length === 0 && Math.abs(val - 120) < TOL, `value ${val.toFixed(4)}`);
   check("dragged instance stays where the user put it", dist(body1.pos, { x: 30, y: -10 }) < 1e-9, `at (${body1.pos.x}, ${body1.pos.y})`);
@@ -213,7 +213,7 @@ const TOL = sketchConfig.tol * 2;
   // sign from the overshot geometry would settle the partner on the flipped side
   // (y = 170); the held side must push it back above the dragged instance instead.
   scene.moveInstance(inst1.id, { x: 0, y: 200 });
-  const left = enforcePoseDims(scene, new Set([inst1.id]));
+  const left = enforcePose(scene, new Set([inst1.id]));
   check("overshoot drag keeps the relative direction", left.length === 0 && Math.abs(body2.pos.y - 230) < TOL, `y ${body2.pos.y.toFixed(3)}`);
 
   // Same protection in the sketch (shape) solver: a driving v dim between two free

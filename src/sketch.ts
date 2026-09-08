@@ -544,6 +544,9 @@ function buildSystem(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<str
   const items: SolveItem[] = [];
   const invalid: SketchBreak[] = [];
   for (const c of scene.sketch) {
+    // Pose constraints (every end on instance geometry) are not shape material: they
+    // move rigid parts and are enforced by pose.ts, never by this solver.
+    if (scene.refInstanceOwned(c.refA) && (!c.refB || scene.refInstanceOwned(c.refB))) continue;
     const item = buildConstraintItem(scene, sys, c);
     if (item === "invalid") invalid.push({ id: c.id, kind: "constraint", error: Infinity });
     else if (item) items.push(item);

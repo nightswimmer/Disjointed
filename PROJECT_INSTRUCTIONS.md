@@ -372,6 +372,40 @@ together through another path is inert (same semantics as inside permanent group
 welds drawn open snap closed instantly at sim entry / rigid-drag start instead of being
 pulled together over frames. `scripts/welds.ts` grew to 26 checks (long chain with
 solver-stats assertions, snap-assembly, impossible weld cycle).
+**Sketch constraints on components — pose constraints (no format change)**: the blanket
+rejection of sketch constraints touching instance geometry is gone; components are now a
+transparent grouping for *constraining* too, with the same rule the dimensions got. A
+constraint with **one free end** (instance ↔ free geometry) is ordinary shape material for
+the free side: the sketch solver already ranked instance variables immovable, so the only
+change was the gate in `addSketchConstraint` — coincident / point-on-line / H/V / parallel /
+perpendicular / equal all move the free side and keep following the instance. One whose
+**every end is instance-owned** (a single-line H/V included) is a **pose constraint**
+(`isPoseConstraint`, pose.ts): it moves rigid parts. pose.ts was generalized around a
+`PoseItem` (driving pose dims and pose constraints alike expose a side-aware `error()`
+and a closed-form `correction()`), where the correction is a **`PoseMove`**: a
+**translation** (distances, coincident point–point, point-on-line, H/V point pairs) or a
+**rotation** about the constrained line's midpoint (line H/V, parallel, perpendicular) —
+new `Scene.rotateInstance(id, pivot, delta)` turns every expanded body and orbits the
+free chassis points, keeping `instancePlacement` coherent. `enforcePoseDims` became
+**`enforcePose`** and settles dims + constraints together (translations and rotations
+alternate in the same Gauss-Seidel rounds; each is exact, so a mixed set converges in a
+couple of rounds). `placeConstraint(scene, kind, refA, refB)` is the router main uses for
+every constraint placement (pose → `applyPoseConstraint`, else `tryAddConstraint`); the
+**second-picked side moves by preference** (the first pick's instance is anchored for a
+first enforcement pass, then everything movable is fair game — needed because the model
+stores point-on-line pairs point-first regardless of pick order), falling back to the
+first pick when the second is grounded. Same-instance constraints re-pose the internal
+mechanism through the generalized `poseSolveIntra` (a rotation drives the line's far end
+around its near end). Rejected: a pair rigid to one another (same body / chassis —
+`refRigidUnitKey`), and `equal` between two instance lines (both lengths locked) — both
+silently at creation like any invalid pick combination. A pose constraint that can't hold
+(grounded partner, def-edit reset, an instance rotated against its H while dragged)
+renders its badges **error-red at full strength** (`SketchGlyphView.violated`, computed
+per frame by `poseConstraintViolated`) until the un-anchored settle on drag end re-asserts
+it. Sketch constraints stay draw-mode only (a coincident between two instance joints holds
+the drawn placement; sim still needs a pin). New test script `scripts/pose-constraints.ts`
+(57 checks); one components.ts check that asserted the old blanket rejection became three
+(equal rejected, same-body pair rejected, line-H accepted).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -522,8 +556,12 @@ solver-stats assertions, snap-assembly, impossible weld cycle).
     instance-level grounded flag is instance state), `removeInstance` / `dissolveInstance`
     (explode to plain elements) / `removeComponent` (refused while instances exist
     anywhere), `instanceOfBody/Joint/Constraint`, `instanceOfRef(ref)` /
-    `refInstanceOwned(ref)` (sketch constraints on instance geometry are rejected — its
-    *shape* belongs to the def — but dimensions may drive its *pose*, see pose.ts),
+    `refInstanceOwned(ref)` (instance *shape* belongs to the def: the sketch solver never
+    moves it — a constraint/dimension with one free end moves the free side, one with every
+    end instance-owned drives *poses*, see pose.ts; `addSketchConstraint` rejects only
+    all-instance pairs rigid to one another and `equal` between two instance lines),
+    `rotateInstance(id, pivot, delta)` (rigid rotation of everything the instance expanded
+    — bodies via `rotateBody`, free joints/anchors orbit the pivot),
     `refRigidUnitKey(ref)` (the rigid unit a ref belongs to — group / lone body / lone
     free joint — two refs with the same key can never be pose-dimensioned apart),
     `moveInstance(id, delta)` (rigid translation of everything the instance expanded),
@@ -791,7 +829,8 @@ solver-stats assertions, snap-assembly, impossible weld cycle).
   (ids of the unsatisfiable items). Public API: `solveSketch(scene)` (re-solve + apply),
   `applyDrivingDimension(scene, id, target)` (validates: draw-mode distance dims only,
   target > 0, rejects a dim with both ends instance-owned — those are *pose* dims,
-  pose.ts territory, and `buildSystem` excludes them from the shape system entirely;
+  pose.ts territory, and `buildSystem` excludes them — and every pose *constraint*
+  (all ends instance-owned) — from the shape system entirely;
   picks **uniform scale** — both refs owned by one body, no other driving dim
   touches it, every sketch constraint touching it is fully internal — else the node
   solve; commits the driving flag only on success), `tryAddConstraint` (add + solve,
@@ -814,28 +853,41 @@ solver-stats assertions, snap-assembly, impossible weld cycle).
   `anchorVarForGuidePoint` / `anchorVarForVertex` helpers; main falls back to a
   symmetric re-solve whenever the anchored solve is infeasible, so live drags can never
   leave a constraint visibly broken.
-- **pose.ts** — **pose-level driving dimensions**: draw-mode dims whose BOTH ends live on
-  component-instance geometry (`isPoseDim`). They drive the *pose* of rigid parts, never
-  shape. `applyDimensionValue(scene, id, target)` is the router main uses for every
-  dimension-value commit (pose dims here, everything else to `applyDrivingDimension`).
-  `applyPoseDimension`: snapshot → `setMeasurementDriving` (its rigid-unit backstop
-  rejects same-body/chassis pairs) → for a same-instance dim `poseSolveIntra` re-poses
-  the internal mechanism with the sim solver (driver on one end's ref point, target
-  recomputed along the current direction each round; a `SolveFreeze` holds everything
-  outside the instance + the other end's rigid unit; tries the refB side, then refA) →
-  `enforcePoseDims` settles every pose dim together → `solveSketch` lets free geometry
-  follow → any failure restores the snapshot and returns the conflicts (reject
-  semantics, red flash). `enforcePoseDims(scene, anchoredInstances?)` is the live
-  enforcement: Gauss-Seidel rounds of **closed-form rigid translations** (`poseCorrection`
-  mirrors `measureInfo`'s value semantics per kind/axis and honours the held `side`;
-  `moveInstance` applies them) — a side is movable unless its instance is grounded or
-  drag-anchored; same-instance dims are only verified here (translation can't fix them);
-  residuals come back as `SketchBreak`s and render violated. `poseDimError` is the
-  side-aware residual (a flipped pose at the right absolute distance reads as
-  value + target, never satisfied). main calls `enforcePoseDims` at the top of
-  `solveSketchLive` (with `draggedInstanceIds()` anchored — dragging a component pulls
-  its dimensioned partners along) and re-asserts pose dims on def-context exit
-  (`exitComponent`), after the cascade snapped instance poses back to the defs.
+- **pose.ts** — **pose-level sketch**: draw-mode driving dimensions (`isPoseDim`, both
+  ends instance-owned) and sketch constraints (`isPoseConstraint`, every end
+  instance-owned — a single-line H/V included) on component-instance geometry. They
+  drive the *pose* of rigid parts, never shape. Everything is a **`PoseItem`** (`id`,
+  `kind`, refs, a side-aware `error()` in world units and a closed-form `correction()`),
+  built by `dimItem` (translation via `poseCorrection`, which mirrors `measureInfo`'s
+  value semantics per kind/axis and honours the held `side`) and `constraintItem`
+  (coincident point–point / point-on-line and H/V point pairs → translation; line H/V,
+  parallel, perpendicular → rotation; `equal` → Infinity, never satisfiable). A
+  correction is a **`PoseMove`** — `translate {delta}` or `rotate {angle, pivotA,
+  pivotB}` (each line's own midpoint) — given for the **refB side**, the refA side taking
+  the inverse; `applyMove` runs `moveInstance` / `rotateInstance`. Routers main uses:
+  `applyDimensionValue(scene, id, target)` (pose dims → `applyPoseDimension`, else
+  `applyDrivingDimension`) and `placeConstraint(scene, kind, refA, refB)` (pose →
+  `applyPoseConstraint`, else `tryAddConstraint`). Both pose appliers: snapshot →
+  create/mark (the model's rigid-unit backstops reject same-body/chassis pairs) → for a
+  same-instance item `poseSolveIntra(item, moveFirst)` re-poses the internal mechanism
+  with the sim solver (driver on one end's grab point — a point ref's point, a line's far
+  end for a rotation, its midpoint otherwise — target recomputed from the correction
+  each round, a rotation turning the far end about the near end; a `SolveFreeze` holds
+  everything outside the instance + the other end's rigid unit; tries `moveFirst`, then
+  the other side) → `settlePose(scene, preferHeld)` runs `enforcePose` with the first
+  pick's instance anchored, then un-anchored if that left residuals (second pick moves by
+  preference, first pick when it must), then `solveSketch` lets free geometry follow,
+  then `resetPoseBaselines` → any failure restores the snapshot and returns the conflicts
+  (reject semantics, red flash). **`enforcePose(scene, anchoredInstances?)`** is the live
+  enforcement: Gauss-Seidel rounds over every item, applying the movable side's
+  correction (movable = not grounded, not drag-anchored) — translations and rotations
+  alternate, each exact, so mixed sets settle in a couple of rounds; same-instance items
+  are only verified here; residuals come back as `SketchBreak`s and render violated.
+  `poseConstraintViolated(scene, c)` (error > `DIM_VIOLATION_TOL`) feeds the renderer's
+  red badges. main calls `enforcePose` at the top of `solveSketchLive` (with
+  `draggedInstanceIds()` anchored — dragging a component pulls its dimensioned /
+  constrained partners along) and re-asserts on def-context exit (`exitComponent`),
+  after the cascade snapped instance poses back to the defs.
   exploration; not yet imported by the app — call `formatReport(analyzeScene(scene), scene)`
   from a console/debug hook). Builds a constraint graph (bodies + free joints as nodes; pins +
   slider-rider couplings as edges), finds kinematic islands (union-find), and per island
@@ -1039,9 +1091,12 @@ solver-stats assertions, snap-assembly, impossible weld cycle).
     joint) and rotate-tool drags re-solve the sketch after every move when any constraint
     or driving dimension exists — constraints hold while the dragged geometry follows,
     CAD-style. A solve that can't converge mid-drag is skipped (the next one re-tightens).
-    `solveSketchLive` first runs `enforcePoseDims(scene, draggedInstanceIds())`, so
-    dragging a component pulls its pose-dimensioned partner components along (the dragged
-    instances anchored); `exitComponent` re-asserts pose dims after a definition cascade.
+    `solveSketchLive` first runs `enforcePose(scene, draggedInstanceIds())`, so
+    dragging a component pulls its pose-dimensioned / pose-constrained partner components
+    along (the dragged instances anchored); `exitComponent` re-asserts them after a
+    definition cascade. `commitConstraint` goes through pose.ts's `placeConstraint`
+    router, and `sketchGlyphsView` stamps `violated` (via `poseConstraintViolated`) so a
+    pose constraint that can't hold draws error-red at full strength.
   - **Auto-constraints while drawing** (freehand body tool): a click that lands on an
     existing joint / body corner places the vertex **exactly there** and records the pick
     (`draftBodySnaps`); `finishBody` turns the picks into **coincident** constraints and
@@ -1278,6 +1333,18 @@ place one element, then it returns to **Select** mode. `Esc` aborts the current 
   two edges/rails (guidelines rejected — no length). The geometry solves to
   satisfy the constraint the moment it's placed; an unsatisfiable one is rejected (conflicting
   items flash red). Badges are click-to-select, Delete to remove.
+  **On component instances** constraints work like the dimensions do — components are a
+  transparent grouping: with **one free end** the free side moves (instance shape is
+  locked); with **every end on components** it's a pose constraint that moves rigid
+  parts — coincident / point-on-line / H-V point pairs **translate** the second-picked
+  component, line H/V / parallel / perpendicular **rotate** it about the constrained
+  edge's midpoint (the first-picked one stays put; a grounded one never moves — the other
+  side does; both grounded rejects with a red flash); between two mobile parts of ONE
+  component the internal mechanism re-poses (pins intact). A constraint internal to one
+  rigid piece, or **equal** between two component edges (both lengths locked), is
+  refused at placement. Dragging a component pulls its constrained partners along; one
+  that can't hold (grounded partner, a definition edit, rotating a component against its
+  H) shows **error-red** badges until released (the settle re-asserts it).
 - **Driving dimensions** (draw mode): double-click a dimension's value → type a number →
   Enter. The first driving dimension on an otherwise-unconstrained body scales it uniformly;
   further ones move only the involved nodes while every constraint and driving dimension
@@ -1678,6 +1745,22 @@ Persistence:
   rejected edit leaves the instance untouched; a mixed instance↔free dim drives by moving
   only the free side, and later sketch solves keep holding it without ever moving the
   instance).
+- **pose-constraints.ts** — sketch constraints on component instances (57 checks):
+  mixed constraints (instance ↔ free) route to the sketch and move only the free side
+  (point-on-line, parallel, equal; the free side keeps following a moved instance);
+  inter-instance translational pose constraints (coincident point–point / point-on-line,
+  H point pair: rigid translation, shapes untouched, excluded from the shape solver, live
+  follow with the dragged instance anchored, conflicting placement rejects untouched,
+  grounded partner never moves, both grounded rejects); **pick order** (the second-picked
+  side moves for both point-on-line orders despite the model's point-first storage);
+  rotational pose constraints (single-line H rotates a tilted instance about the edge
+  midpoint with a coherent placement, a held rotation reads as violated until the
+  un-anchored settle re-asserts it, perpendicular + coincident settle together,
+  parallel turns the ungrounded side, two grounded rejects); `rotateInstance` carries
+  free chassis points and reports the rotation in `instancePlacement`; intra-instance
+  constraints re-pose the mechanism (an H point pair and a perpendicular — pin closed,
+  shape + definition byte-identical); a pair rigid at a deeper level and `equal` between
+  instance edges reject with nothing created.
 - **pose-dims.ts** — pose-level driving dimensions (36 checks): an inter-instance dim
   drives by rigid translation (refB's side by preference, shapes untouched); a grounded
   partner never moves (the other side does), both grounded rejects untouched with the old
@@ -1892,15 +1975,19 @@ Persistence:
   it's inferred only while drawing); constraint badges could use hover feedback.
   (`mirrorBody` now remaps constraint/measurement refs; copy/paste carries the
   fully-internal ones + driving dimensions.)
-- **Pose-dimension follow-ups**: sketch *constraints* (H/V, coincident, parallel…)
-  between instance and free geometry are still blanket-rejected — the same
-  anchor-the-instance treatment the dims got would apply naturally; a **direct**
+- **Pose-dimension / pose-constraint follow-ups**: ~~sketch *constraints* between
+  instance and free geometry are blanket-rejected~~ (done — mixed constraints move the
+  free side, all-instance ones are pose constraints, see pose.ts); a **direct**
   (unaligned) point-point dim has no side, so a one-frame jump straight through the
   partner can still tunnel (a circle constraint — continuous rotation around the partner
-  is legitimate); pose dims between instances aren't carried by copy/paste (refs to
-  re-instantiated material don't remap); h/v pose dims measure **world** axes — rotating
-  a component changes what they hold (the user's accepted caveat, same as H/V constraints
-  referencing component-local axes making no sense after rotation).
+  is legitimate); pose dims / constraints between instances aren't carried by copy/paste
+  (refs to re-instantiated material don't remap); h/v pose dims and constraints measure
+  **world** axes — rotating a component changes what they hold (the user's accepted
+  caveat); a pose constraint refused at placement (rigid at a deeper level, `equal`
+  between instance edges) gives no feedback — silent like every invalid pick
+  combination, there is no item to flash; sketch constraints stay draw-mode only, so a
+  coincident between two instance joints holds the drawn placement but sim still needs a
+  pin (the Connect tool could offer to create the pin alongside).
 - Measurement follow-ups: copy/paste doesn't carry *driven* (reference) measurements
   (consistent with actuators/motors; driving dimensions are carried, as constraints).
 - **Guideline follow-ups**: ~~no point-**on**-line constraint kind yet~~ (done — Coincident
