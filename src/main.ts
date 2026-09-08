@@ -1,4 +1,5 @@
 import "./style.css";
+import { notify } from "./notify";
 import {
   Scene,
   SceneData,
@@ -1259,7 +1260,7 @@ async function loadFromFile(file: File): Promise<void> {
     const data = JSON.parse(await file.text()) as SceneData;
     applyLoadedScene(data);
   } catch (err) {
-    window.alert(`Could not load file: ${(err as Error).message}`);
+    notify(`Could not load file: ${(err as Error).message}`, "error");
   }
 }
 
@@ -1453,11 +1454,11 @@ function makeComponentFromSelection(): void {
     return;
   }
   if (bodies.length === 0) {
-    window.alert("A component needs at least one body — select bodies (and free joints), or select nothing to create an empty component.");
+    notify("A component needs at least one body — select bodies (and free joints), or select nothing to create an empty component.");
     return;
   }
   if (selectionTouchesInstance()) {
-    window.alert("The selection mixes component instances with other material — select exactly one instance to fork it, or plain bodies to build a new component.");
+    notify("The selection mixes component instances with other material — select exactly one instance to fork it, or plain bodies to build a new component.");
     return;
   }
   const name = `Component ${scene.components.length + 1}`;
@@ -1472,7 +1473,7 @@ function makeComponentFromSelection(): void {
 function startInsertInstance(defId: number): void {
   const def = scene.getComponent(defId);
   if (def && def.data.bodies.length === 0 && def.data.joints.length === 0) {
-    window.alert(`“${def.name}” is still empty — edit it and add some content before placing instances.`);
+    notify(`“${def.name}” is still empty — edit it and add some content before placing instances.`);
     return;
   }
   if (mode === "sim") setMode("draw");
@@ -1492,7 +1493,7 @@ function placePendingInsert(p: Vec2): boolean {
   // Cycle guard: a definition can't be instantiated into a context it (transitively) uses.
   const ctxDef = editPath[editPath.length - 1];
   if (ctxDef !== undefined && (defId === ctxDef || scene.componentUses(defId).has(ctxDef))) {
-    window.alert("That would make the component contain itself (circular reference).");
+    notify("That would make the component contain itself (circular reference).");
     return true;
   }
   const at = snap(p);
@@ -1511,12 +1512,12 @@ function placePendingInsert(p: Vec2): boolean {
  *  while the definition itself is open for editing). */
 function deleteComponentUI(defId: number): void {
   if (editPath.includes(defId)) {
-    window.alert("This component is being edited — close its context first.");
+    notify("This component is being edited — close its context first.");
     return;
   }
   const usedInRoot = rootData ? (rootData.instances ?? []).some((i) => i.defId === defId) : false;
   if (usedInRoot || !scene.removeComponent(defId)) {
-    window.alert("This component still has instances — delete (or dissolve) them first.");
+    notify("This component still has instances — delete (or dissolve) them first.");
     return;
   }
   markDirty();
@@ -1540,7 +1541,7 @@ async function importDxfFile(file: File, at: Vec2): Promise<void> {
     if (res.skippedEntities > 0)
       console.info(`DXF import: ${res.skippedEntities} unsupported entit${res.skippedEntities === 1 ? "y" : "ies"} ignored.`);
     if (!res.loops.length) {
-      window.alert(
+      notify(
         "No closed shapes found in the DXF — only closed outlines (polylines, circles, or lines/arcs that chain into a loop) can become bodies."
       );
       return;
@@ -1616,12 +1617,13 @@ async function importDxfFile(file: File, at: Vec2): Promise<void> {
     setMulti(bodyIds, new Set());
     markDirty();
     if (res.skippedPaths > 0)
-      window.alert(
+      notify(
         `Imported ${solids.length} shape${solids.length === 1 ? "" : "s"}; ` +
-          `${res.skippedPaths} open path${res.skippedPaths === 1 ? "" : "s"} couldn't be chained into a closed loop and ${res.skippedPaths === 1 ? "was" : "were"} skipped.`
+          `${res.skippedPaths} open path${res.skippedPaths === 1 ? "" : "s"} couldn't be chained into a closed loop and ${res.skippedPaths === 1 ? "was" : "were"} skipped.`,
+        "info"
       );
   } catch (err) {
-    window.alert(`Could not import ${file.name}: ${(err as Error).message}`);
+    notify(`Could not import ${file.name}: ${(err as Error).message}`, "error");
   }
 }
 
@@ -1638,7 +1640,7 @@ canvas.addEventListener("drop", (e) => {
   const name = file.name.toLowerCase();
   if (name.endsWith(".dxf")) void importDxfFile(file, eventWorld(e));
   else if (name.endsWith(".json")) void loadFromFile(file);
-  else window.alert("Unsupported file type — drop a .dxf (imports as bodies) or a .json (loads a scene).");
+  else notify("Unsupported file type — drop a .dxf (imports as bodies) or a .json (loads a scene).");
 });
 
 // --- drawing-mode click handling ----------------------------------------
@@ -2647,7 +2649,7 @@ function deleteSelection(): void {
     }
   }
   if (selection.kind === "rail" && scene.instanceOfConstraint(selection.id)) {
-    window.alert("This rail belongs to a component instance — edit the definition, or delete the whole instance.");
+    notify("This rail belongs to a component instance — edit the definition, or delete the whole instance.");
     return;
   }
   if (selection.kind === "body") scene.removeBody(selection.id);
@@ -2752,7 +2754,7 @@ function pasteAt(at: Vec2 | null): void {
 function mirrorSelection(axis: "h" | "v"): void {
   if (mode !== "draw") return;
   if (selectionTouchesInstance()) {
-    window.alert("Component instances can't be mirrored yet — mirror inside the definition instead.");
+    notify("Component instances can't be mirrored yet — mirror inside the definition instead.");
     return;
   }
   if (multiSel) {
@@ -2982,7 +2984,7 @@ function handleHoleClick(p: Vec2): void {
     const body = scene.bodyAt(p);
     if (!body) return; // a hole needs a body — keep the tool armed
     if (scene.instanceOfBody(body.id)) {
-      window.alert("This body belongs to a component instance — edit the definition to cut a hole in it.");
+      notify("This body belongs to a component instance — edit the definition to cut a hole in it.");
       disarmTool();
       return;
     }
@@ -3062,7 +3064,7 @@ function handleSplitClick(p: Vec2): void {
       const hit = splitOutlineHit(body, p);
       if (!hit) continue;
       if (scene.instanceOfBody(body.id)) {
-        window.alert("This body belongs to a component instance — edit the definition to split it.");
+        notify("This body belongs to a component instance — edit the definition to split it.");
         disarmTool();
         return;
       }
@@ -3083,7 +3085,7 @@ function handleSplitClick(p: Vec2): void {
       disarmTool();
       selection = { kind: "body", id: result.a.id };
     } else {
-      window.alert(`Can't split here: ${result.reason}`);
+      notify(`Can't split here: ${result.reason}`);
       splitDraft = [];
       splitBodyId = null;
     }
@@ -3105,16 +3107,16 @@ function combineSelection(): void {
   if (mode !== "draw") return;
   const ids = multiSel ? [...multiSel.bodies] : [];
   if (ids.length < 2) {
-    window.alert("Select two or more bodies (Ctrl+click, or drag a box) to combine them.");
+    notify("Select two or more bodies (Ctrl+click, or drag a box) to combine them.");
     return;
   }
   if (selectionTouchesInstance()) {
-    window.alert("Component instances can't be combined — edit the definition, or fork the instance first.");
+    notify("Component instances can't be combined — edit the definition, or fork the instance first.");
     return;
   }
   const result = scene.combineBodies(ids);
   if (!result.ok) {
-    window.alert(`Can't combine: ${result.reason}`);
+    notify(`Can't combine: ${result.reason}`);
     return;
   }
   multiSel = null;

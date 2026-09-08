@@ -68,8 +68,10 @@ you can then drag and watch move.
 ## Usage
 
 There are two modes, switched from the toolbar or by pressing **Tab**. The toolbar uses
-**icon buttons** — hover any of
-them for a tooltip naming the tool and its shortcut. A **theme toggle** (sun / moon) at the right
+compact **icon buttons** — hover any of
+them for a tooltip naming the tool and its shortcut. When something can't be done (an invalid
+selection, a rejected cut, a file that won't load) a **toast notification** slides in under the
+toolbar and fades out on its own; click it or its ✕ to dismiss it sooner. A **theme toggle** (sun / moon) at the right
 switches between **dark and light** themes; your choice is remembered across sessions.
 
 ### Draw
@@ -145,7 +147,7 @@ unit — and in **Simulate mode it moves as a single rigid body**.
   a multi-selection / group reflects about the centre of its combined bounding box. Constraints
   and dimensions follow their corners/edges through the flip. Grouped in the toolbar next to
   **Rotate**.
-- **Combine** (toolbar button next to Mirror, or **N**) — merge the **multi-selected bodies**
+- **Combine** (toolbar button next to **Split**, or **N**) — merge the **multi-selected bodies**
   (Ctrl+click or box-select two or more) into one body: the union of their shapes. They must
   **overlap or share an edge** (bodies that don't touch the rest, or touch only at a corner,
   are refused with a message saying why). The **first-selected** body survives — it keeps its

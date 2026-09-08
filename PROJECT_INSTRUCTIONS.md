@@ -38,8 +38,11 @@ by headless tests; the interactive canvas should be confirmed by eye via `npm ru
 **View navigation**: zoom range 0.05×–200×; a **fit-to-screen** button + `F` shortcut frames the
 whole mechanism (bodies, joints, ground anchors) centered with a margin; **Tab** toggles
 draw ↔ simulate mode.
-**UI polish**: the toolbar is icon buttons with tooltips; a dark/light **theme toggle** (persisted)
-themes both the chrome and the canvas; a **body-colour swatch** sets the new-body default or
+**UI polish**: the toolbar is compact icon buttons (32 px, 22 px glyphs) with tooltips; a
+dark/light **theme toggle** (persisted) themes both the chrome and the canvas; all warnings
+/ errors / notices are **toast notifications** (`src/notify.ts` — `notify(msg, kind)`, the
+project-wide replacement for `window.alert`: non-blocking cards under the toolbar, coloured
+by kind, auto-dismiss, ✕ / click to close); a **body-colour swatch** sets the new-body default or
 recolours the selected body (paste keeps the source colour); an **inline speed/profile panel**
 appears in the toolbar when an actuator's rider or a motor's body / pivot / crank is selected;
 and in draw mode, **dotted connectors** mark constraints whose endpoints don't yet touch
@@ -423,8 +426,8 @@ remap to their new owner and the two cut edges' refs are pruned. **Offset-mode b
 baked first** (sampled outline → radius-0 fillet control polygon) since their rounded shape
 is larger than their control polygon. Rejections (cut along an edge → no area, crossing the
 outline, leaving the body, self-crossing, through a hole, instance body) leave the scene
-untouched and alert the reason; the draft restarts. **Combine (`N` or the toolbar button
-in the edit group)**: the multi-selected bodies (2+) merge into one via a **polygon union**
+untouched and toast the reason; the draft restarts. **Combine (`N` or the toolbar button
+next to Split in the tool group)**: the multi-selected bodies (2+) merge into one via a **polygon union**
 (new `src/boolean.ts`, see architecture) of their editable outlines (offset bodies baked);
 `Scene.combineBodies(ids)` keeps the **first-selected** body's id / colour / z-position.
 Result corners that are unchanged input corners keep that corner's radius (per-corner
@@ -964,6 +967,15 @@ bodyPoint refs re-anchor. Refused with an alert when the bodies **don't all conn
   style into `{ outer, holes }` solids (parent = smallest enclosing loop; an island inside a
   hole is a new solid). `loopSignedArea` exported for winding normalization. Binary DXF and
   non-DXF input throw a friendly error.
+- **notify.ts** — **toast notifications**, the app's replacement for `window.alert` (use it for
+  every future user-facing warning). `notify(message, kind = "warn")` appends a `.toast` card to
+  `#toast-stack` (a fixed, centred column at the top of `#canvas-wrap`, pushed down while the
+  sim-error banner shows): kind `warn` (amber, default — an action couldn't be done), `error`
+  (red — a file failed to load/import) or `info` (accent blue — e.g. the DXF skipped-paths
+  summary). Cards slide in, auto-dismiss (6 s / 9 s / 5 s; the timer pauses on hover), close on
+  click or the ✕, and the stack keeps at most 4 (oldest dropped). Returns a dismiss function.
+  Non-blocking — every former `alert(...)` site was followed by a `return` or nothing, so
+  behaviour is unchanged. Styled in `style.css` (`.toast*`, theme-aware).
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.05..20).
 - **renderer.ts** — **construction guidelines** (draw mode only) draw right after the grid:
