@@ -17,6 +17,7 @@ import {
   len,
   lenSq,
   normalize,
+  perp,
   distToLine,
   distToSegment,
   filletPolygon,
@@ -325,6 +326,15 @@ export interface Measurement {
   driving?: boolean;
   /** The value a driving dimension holds the geometry to (world units). */
   target?: number;
+  /**
+   * The relative direction a driving dimension holds, captured when it starts driving:
+   * for an h/v pair the sign of (B − A) along the axis, for point+line / line+line the
+   * sign of the signed perpendicular distance. Solvers enforce `side * target` instead
+   * of re-deriving the sign from current geometry, so a fast drag can never flip the
+   * two sides through each other. Absent for direct point-point dimensions (a pure
+   * distance is free to rotate — it has no side) and on driven dimensions.
+   */
+  side?: 1 | -1;
 }
 
 // --- sketch constraints -----------------------------------------------------
@@ -372,6 +382,10 @@ export interface MeasureInfo {
   value: number;
   /** True when the source dimension is driving (drawn without the CAD parentheses). */
   driving?: boolean;
+  /** True when a driving dimension's measured value has drifted from its target (e.g.
+   *  a definition edit reset instance poses, or a held partner couldn't follow a drag)
+   *  — rendered in an error style until re-applied. */
+  violated?: boolean;
   labelPos: Vec2;
   /** Arrowed dimension segment (distance only). */
   dim?: { a: Vec2; b: Vec2 };
@@ -522,6 +536,10 @@ const FORMAT_VERSION = 18;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
+
+/** A driving dimension further than this from its target renders as violated (a bit
+ *  above the sketch/pose solve tolerance of 1e-3 so a satisfied dim never flickers). */
+export const DIM_VIOLATION_TOL = 2e-3;
 
 /** Default speeds for newly-created actuators. */
 const DEFAULT_LINEAR_ACTUATOR_SPEED = 0.5; // cycles per second (one back-and-forth every 2s)
@@ -1180,7 +1198,11 @@ export class Scene {
     const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
     m.labelOffset = sub(labelPos, anchor);
     if (a.kind === "point" && b.kind === "point") {
+      const before = m.axis;
       m.axis = measureAxisForPlacement(a.p, b.p, labelPos);
+      // A driving dimension that changed axis measures a different quantity — its held
+      // side re-captures from the current geometry (h/v gain one, direct drops it).
+      if (m.driving && m.axis !== before) this.captureMeasurementSide(m);
     }
   }
 
@@ -1204,7 +1226,18 @@ export class Scene {
       const line = a.kind === "line" ? a : (b as { kind: "line"; a: Vec2; b: Vec2 });
       info = pointLineInfo(m.id, p, line, labelPos);
     }
-    if (info && m.driving) info.driving = true;
+    if (info && m.driving) {
+      info.driving = true;
+      if (m.mode === "draw" && m.target !== undefined && info.kind === "distance") {
+        const off = Math.abs(info.value - m.target) > DIM_VIOLATION_TOL;
+        // A pose at the right absolute distance but on the flipped side of the held
+        // direction is violated too (the geometry crossed through — e.g. a def edit).
+        const cur = m.side !== undefined ? this.measurementSide(m) : null;
+        if (off || (m.side !== undefined && cur !== null && cur !== m.side)) {
+          info.violated = true;
+        }
+      }
+    }
     return info;
   }
 
@@ -1374,13 +1407,68 @@ export class Scene {
    * in sketch.ts, which validates + solves + commits via this). Returns false for a
    * missing / sim-mode measurement or a non-positive target.
    */
+  /**
+   * The relative direction a dimension currently measures (see `Measurement.side`):
+   * the sign of (B − A) along an h/v axis, or of the signed perpendicular distance for
+   * point+line / line+line. Null when the dimension has no side (a direct point-point
+   * distance is free to rotate) or its refs don't resolve. The sign conventions match
+   * the solvers' correction math exactly (sketch.ts `buildDimensionItem`, pose.ts
+   * `poseCorrection`).
+   */
+  measurementSide(m: Measurement): 1 | -1 | null {
+    const a = this.resolveMeasureRef(m.refA);
+    const b = this.resolveMeasureRef(m.refB);
+    if (!a || !b) return null;
+    const sgn = (v: number): 1 | -1 => (v < 0 ? -1 : 1);
+    if (a.kind === "point" && b.kind === "point") {
+      if (m.axis === "h") return sgn(b.p.x - a.p.x);
+      if (m.axis === "v") return sgn(b.p.y - a.p.y);
+      return null; // direct distance: no side
+    }
+    if (a.kind === "line" && b.kind === "line") {
+      const d = sub(a.b, a.a);
+      const l = len(d);
+      if (l < 1e-9) return null;
+      const n = perp(scale(d, 1 / l));
+      const midA = scale(add(a.a, a.b), 0.5);
+      const midB = scale(add(b.a, b.b), 0.5);
+      return sgn(dot(sub(midB, midA), n));
+    }
+    const pt = a.kind === "point" ? a : (b as { kind: "point"; p: Vec2 });
+    const ln = a.kind === "line" ? a : (b as { kind: "line"; a: Vec2; b: Vec2 });
+    const d = sub(ln.b, ln.a);
+    const l = len(d);
+    if (l < 1e-9) return null;
+    const n = perp(scale(d, 1 / l));
+    return sgn(dot(sub(pt.p, ln.a), n));
+  }
+
+  /** Capture (or clear) a driving dimension's held side from the current geometry. */
+  private captureMeasurementSide(m: Measurement): void {
+    const side = this.measurementSide(m);
+    if (side !== null) m.side = side;
+    else delete m.side;
+  }
+
   setMeasurementDriving(id: number, target: number): boolean {
     const m = this.getMeasurement(id);
     if (!m || m.mode !== "draw" || !(target > 0)) return false;
-    // A dimension on instance geometry can't drive — the shape belongs to the definition.
-    if (this.refInstanceOwned(m.refA) || this.refInstanceOwned(m.refB)) return false;
+    // Instance shape belongs to the definition, so a dimension between two ends that
+    // are rigid to one another inside instances (same body / same chassis group) can
+    // never drive. Any other pairing may: with both ends instance-owned the pose
+    // machinery moves rigid parts (pose.ts); with one end free the sketch moves the
+    // free side (instance variables are immovable there — see varRank in sketch.ts).
+    if (this.refInstanceOwned(m.refA) && this.refInstanceOwned(m.refB)) {
+      const ka = this.refRigidUnitKey(m.refA);
+      const kb = this.refRigidUnitKey(m.refB);
+      if (ka === null || kb === null || ka === kb) return false;
+    }
     m.driving = true;
     m.target = target;
+    // The side is (re-)captured from the current geometry: the drawn relative
+    // direction is what the dimension holds from here on (same philosophy as
+    // slider-lock / weld baselines — what you draw is what gets locked).
+    this.captureMeasurementSide(m);
     return true;
   }
 
@@ -1390,6 +1478,7 @@ export class Scene {
     if (!m) return;
     delete m.driving;
     delete m.target;
+    delete m.side;
   }
 
   /**
@@ -2249,6 +2338,9 @@ export class Scene {
         m.target = d.target;
       }
       this.measurements.push(m);
+      // The pasted fragment is a pure translation of the source, so the current
+      // geometry shows the side the dimension was holding — capture it.
+      if (m.driving) this.captureMeasurementSide(m);
     }
     return { bodyIds: [...bodyIdMap.values()], freeJointIds };
   }
@@ -2279,20 +2371,76 @@ export class Scene {
     return this.instances.find((i) => i.constraintMap.some((e) => e.id === constraintId));
   }
 
-  /** Whether a measurement/sketch reference names instance-owned geometry (whose shape is
-   *  locked — sketch constraints and driving dimensions on it are rejected). */
-  refInstanceOwned(ref: MeasureRef): boolean {
+  /** The component instance that owns a reference's element, or undefined for plain /
+   *  guide geometry. */
+  instanceOfRef(ref: MeasureRef): ComponentInstance | undefined {
     switch (ref.kind) {
       case "joint":
-        return this.instanceOfJoint(ref.jointId) !== undefined;
+        return this.instanceOfJoint(ref.jointId);
       case "vertex":
       case "edge":
       case "bodyPoint":
-        return this.instanceOfBody(ref.bodyId) !== undefined;
+        return this.instanceOfBody(ref.bodyId);
       case "rail":
-        return this.instanceOfConstraint(ref.sliderId) !== undefined;
+        return this.instanceOfConstraint(ref.sliderId);
       default:
-        return false;
+        return undefined;
+    }
+  }
+
+  /** Whether a measurement/sketch reference names instance-owned geometry (whose shape is
+   *  locked — sketch constraints on it are rejected; dimensions may drive its *pose*,
+   *  see pose.ts). */
+  refInstanceOwned(ref: MeasureRef): boolean {
+    return this.instanceOfRef(ref) !== undefined;
+  }
+
+  /**
+   * Key of the draw-mode rigid unit a reference's element belongs to: a group (`g:`,
+   * e.g. a component chassis), a lone body (`b:`), or a lone free joint (`j:`). Two
+   * refs with the same key are rigid to one another — a pose dimension between them
+   * can never change, so driving it is rejected.
+   */
+  refRigidUnitKey(ref: MeasureRef): string | null {
+    const bodyKey = (bodyId: number): string | null => {
+      if (!this.getBody(bodyId)) return null;
+      const g = this.groupOf(bodyId);
+      return g ? `g:${g.id}` : `b:${bodyId}`;
+    };
+    switch (ref.kind) {
+      case "vertex":
+      case "edge":
+      case "bodyPoint":
+        return bodyKey(ref.bodyId);
+      case "joint": {
+        const j = this.getJoint(ref.jointId);
+        if (!j) return null;
+        if (j.bodyId !== null) return bodyKey(j.bodyId);
+        const g = this.groupOfJoint(j.id);
+        return g ? `g:${g.id}` : `j:${j.id}`;
+      }
+      case "rail": {
+        const c = this.constraints.find((x) => x.kind === "slider" && x.id === ref.sliderId);
+        if (!c || c.kind !== "slider") return null;
+        return this.refRigidUnitKey({ kind: "joint", jointId: c.railA });
+      }
+      default:
+        return null; // guides aren't rigid material
+    }
+  }
+
+  /**
+   * Translate a whole component instance rigidly: every expanded body and free joint
+   * (mechanism joints and synthesized anchors alike) moves by `delta` — placement
+   * motion, the same thing dragging the instance does. Shapes are untouched.
+   */
+  moveInstance(instanceId: number, delta: Vec2): void {
+    const inst = this.instances.find((i) => i.id === instanceId);
+    if (!inst) return;
+    for (const e of inst.bodyMap) this.moveBody(e.id, delta);
+    for (const e of [...inst.jointMap, ...inst.anchorMap]) {
+      const j = this.getJoint(e.id);
+      if (j && j.bodyId === null) this.moveJoint(j.id, delta);
     }
   }
 
@@ -3131,6 +3279,17 @@ export class Scene {
           .map((g) => ({ id: g.id, a: vec(g.a.x, g.a.y), b: vec(g.b.x, g.b.y) }))
           .filter((g) => dist(g.a, g.b) >= Scene.GUIDE_MIN_SPAN)
       : [];
+    // Driving-dimension sides: sanitize hand-edited values, back-fill files saved
+    // before the side existed (captured from the loaded — satisfied — geometry), and
+    // drop the field from driven dimensions. Runs last so every ref kind resolves.
+    for (const m of this.measurements) {
+      if (m.side !== 1 && m.side !== -1) delete m.side;
+      if (m.driving === true && m.target !== undefined) {
+        if (m.side === undefined) this.captureMeasurementSide(m);
+      } else {
+        delete m.side;
+      }
+    }
     const ids = [
       ...this.bodies.map((b) => b.id),
       ...this.joints.map((j) => j.id),

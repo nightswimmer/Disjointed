@@ -50,7 +50,9 @@ interface System {
   index: Map<string, number>;
   /**
    * Per-variable mobility rank: 0 = construction (guideline defining points),
-   * 1 = geometry (body control vertices, joints), 2 = pinned by the active drag.
+   * 1 = geometry (body control vertices, joints), 2 = pinned by the active drag,
+   * 3 = component-instance geometry (immovable — the shape belongs to the definition,
+   * so it outranks even the drag: dragging against it yields instead).
    * Corrections always flow to the **lowest** rank in a pair — so guide constraints
    * are satisfied by moving free guide points, never by moving joints or body nodes,
    * and a drag is never tugged back by its constraints. Equal ranks split evenly.
@@ -60,7 +62,15 @@ interface System {
 }
 
 /** Mobility rank of a variable (see System.rank). */
-function varRank(key: string, anchored: boolean): number {
+function varRank(scene: Scene, key: string, anchored: boolean): number {
+  if (!key.startsWith("g:")) {
+    // v:bodyId:… or j:jointId — instance-owned geometry never moves in a sketch solve.
+    const id = Number(key.split(":")[1]);
+    const owned = key.startsWith("v:")
+      ? scene.instanceOfBody(id) !== undefined
+      : scene.instanceOfJoint(id) !== undefined;
+    if (owned) return 3;
+  }
   if (anchored) return 2;
   return key.startsWith("g:") ? 0 : 1;
 }
@@ -174,7 +184,7 @@ function acquire(scene: Scene, sys: System, key: string): number | null {
   sys.index.set(key, sys.keys.length);
   sys.keys.push(key);
   sys.pos.push(vec(w.x, w.y));
-  sys.rank.push(varRank(key, sys.anchorSet?.has(key) ?? false));
+  sys.rank.push(varRank(scene, key, sys.anchorSet?.has(key) ?? false));
   return sys.keys.length - 1;
 }
 
@@ -412,16 +422,20 @@ function buildDimensionItem(
     const wi = shareOf(sys.rank[i], sys.rank[j]); // fraction i absorbs
     if (m.axis === "h" || m.axis === "v") {
       const axis: "x" | "y" = m.axis === "h" ? "x" : "y";
+      // The held side (Measurement.side, captured when the dim started driving) makes
+      // the error signed: an overshoot past the partner reads as a large error back
+      // toward the drawn side, so a fast drag can never flip the two sides.
+      const side = m.side ?? null;
       return {
         id: m.id,
         kind: "dimension",
         run(pos, apply) {
           const d = pos[j][axis] - pos[i][axis];
-          const s = d === 0 ? 1 : Math.sign(d);
-          const err = target - Math.abs(d);
+          const s = side ?? (d === 0 ? 1 : Math.sign(d));
+          const err = s * target - d;
           if (apply) {
-            pos[j][axis] += s * err * (1 - wi);
-            pos[i][axis] -= s * err * wi;
+            pos[j][axis] += err * (1 - wi);
+            pos[i][axis] -= err * wi;
           }
           return Math.abs(err);
         },
@@ -457,7 +471,9 @@ function buildDimensionItem(
       Math.min(sys.rank[b0], sys.rank[b1])
     ); // fraction line A absorbs
     // A driving line–line distance implies the pair is parallel (CAD convention):
-    // align the directions, then set the gap along the common normal.
+    // align the directions, then set the gap along the common normal. The held side
+    // (see the h/v case) keeps the pair from flipping through each other.
+    const side = m.side ?? null;
     return {
       id: m.id,
       kind: "dimension",
@@ -470,7 +486,7 @@ function buildDimensionItem(
         const m1 = scale(add(pos[a0], pos[a1]), 0.5);
         const m2 = scale(add(pos[b0], pos[b1]), 0.5);
         const s = dot(sub(m2, m1), n);
-        const sg = s === 0 ? 1 : Math.sign(s);
+        const sg = side ?? (s === 0 ? 1 : Math.sign(s));
         const err = sg * target - s;
         if (apply) {
           const shiftB = scale(n, err * (1 - wA));
@@ -495,6 +511,7 @@ function buildDimensionItem(
   const l1 = acquire(scene, sys, kl[1]);
   if (p === null || l0 === null || l1 === null || p === l0 || p === l1) return "invalid";
   const wp = shareOf(sys.rank[p], Math.min(sys.rank[l0], sys.rank[l1])); // fraction the point absorbs
+  const side = m.side ?? null; // held side — the point can't flip across the line
   return {
     id: m.id,
     kind: "dimension",
@@ -504,7 +521,7 @@ function buildDimensionItem(
       if (l < EPS) return target; // degenerate line: can't measure, full residual
       const n = perp(scale(d, 1 / l));
       const s = dot(sub(pos[p], pos[l0]), n);
-      const sg = s === 0 ? 1 : Math.sign(s);
+      const sg = side ?? (s === 0 ? 1 : Math.sign(s));
       const err = sg * target - s;
       if (apply) {
         pos[p] = add(pos[p], scale(n, err * wp));
@@ -533,6 +550,9 @@ function buildSystem(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<str
   }
   const dims: DimSpec[] = scene.measurements
     .filter((m) => m.mode === "draw" && m.driving && m.target !== undefined)
+    // Pose dimensions (both ends on instance geometry) are not shape material: they
+    // move rigid parts and are enforced by pose.ts, never by this solver.
+    .filter((m) => !(scene.refInstanceOwned(m.refA) && scene.refInstanceOwned(m.refB)))
     .filter((m) => !override || m.id !== override.m.id)
     .map((m) => ({ m, target: m.target! }));
   if (override) dims.push(override);
@@ -751,6 +771,13 @@ export function autoConstrainBody(
  * - Otherwise the sketch solver moves only the involved nodes, holding every other
  *   constraint and driving dimension satisfied.
  *
+ * Component-instance geometry is design-locked (its shape belongs to the definition):
+ * a dimension with a single instance-owned end drives by moving only the free side
+ * (instance variables are rank-immovable in the solve). One with **both** ends on
+ * instance geometry is a *pose* dimension — not shape material at all — and belongs
+ * to `applyPoseDimension` (pose.ts); reaching this function with one is rejected
+ * (callers route through `applyDimensionValue`).
+ *
  * On success the dimension is marked driving at `target` and [] is returned. On an
  * unsatisfiable edit the scene **and** the dimension are left untouched and the
  * conflicting items are returned (reject semantics).
@@ -763,6 +790,7 @@ export function applyDrivingDimension(
   const m = scene.getMeasurement(measurementId);
   const reject = [{ id: measurementId, kind: "dimension" as const, error: Infinity }];
   if (!m || m.mode !== "draw" || !(target > 0)) return reject;
+  if (scene.refInstanceOwned(m.refA) && scene.refInstanceOwned(m.refB)) return reject;
   const info = scene.measureInfo(m);
   if (!info || info.kind !== "distance") return reject; // angle dimensions can't drive (v1)
   const body = scaleEligibleBody(scene, m);

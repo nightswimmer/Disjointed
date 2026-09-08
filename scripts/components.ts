@@ -29,6 +29,7 @@ import {
   reexpandData,
 } from "../src/model";
 import { solve, Driver } from "../src/solver";
+import { applyDrivingDimension, solveSketch } from "../src/sketch";
 import { Vec2, dist, sub, rotate } from "../src/geometry";
 
 let failures = 0;
@@ -115,6 +116,59 @@ function editDef(scene: Scene, defId: number, mutate: (s: Scene) => void): Set<n
     scene.addSketchConstraint("horizontal", { kind: "edge", bodyId: newArm.id, index: 0 }) === null,
     "rejected"
   );
+}
+
+// --- driving dimensions vs instance geometry ------------------------------------
+{
+  const scene = new Scene();
+  const base = square(scene, 0, 0);
+  scene.toggleBodyGround(base.id);
+  const res = scene.createComponentFromSelection("Block", [base.id])!;
+  const inst = res.instance;
+  const instBody = scene.getBody(inst.bodyMap[0].id)!;
+
+  // A dimension fully internal to the instance: driving it must be rejected — the
+  // shape belongs to the definition — and must not reshape the instance (this used to
+  // scale the body while the label stayed "driven").
+  const before = scene.bodyControlWorld(instBody).map((p) => ({ ...p }));
+  const mIn = scene.addMeasurement(
+    "draw",
+    { kind: "vertex", bodyId: instBody.id, index: 0 },
+    { kind: "vertex", bodyId: instBody.id, index: 1 },
+    { x: 0, y: -60 }
+  )!;
+  const rej = applyDrivingDimension(scene, mIn.id, 80);
+  const after = scene.bodyControlWorld(scene.getBody(instBody.id)!);
+  const drift = Math.max(...before.map((p, i) => dist(p, after[i])));
+  check("dim internal to an instance can't drive", rej.length > 0, `${rej.length} breaks`);
+  check("rejected edit leaves the instance shape untouched", drift < 1e-9, `drift ${drift.toExponential(2)}`);
+  check("rejected dim stays driven", !scene.getMeasurement(mIn.id)!.driving, "no driving flag");
+
+  // A dimension between the instance and free geometry CAN drive — by moving only the
+  // free side (instance variables are rank-immovable in the sketch solve).
+  const fj = scene.addFreeJoint({ x: 100, y: 0 });
+  const mMix = scene.addMeasurement(
+    "draw",
+    { kind: "vertex", bodyId: instBody.id, index: 1 },
+    { kind: "joint", jointId: fj.id },
+    { x: 60, y: -60 }
+  )!;
+  const ok = applyDrivingDimension(scene, mMix.id, 150);
+  const after2 = scene.bodyControlWorld(scene.getBody(instBody.id)!);
+  const drift2 = Math.max(...before.map((p, i) => dist(p, after2[i])));
+  const val = scene.measureInfo(scene.getMeasurement(mMix.id)!)!.value;
+  check("mixed instance↔free dim drives", ok.length === 0 && scene.getMeasurement(mMix.id)!.driving === true, `${ok.length} breaks`);
+  check("mixed dim hits its target", Math.abs(val - 150) < 1e-2, `value ${val.toFixed(3)}`);
+  check("mixed dim moved only the free side", drift2 < 1e-9, `instance drift ${drift2.toExponential(2)}`);
+
+  // Later sketch solves keep the instance immovable: move the instance, re-solve — the
+  // free joint follows to hold the dimension, the instance stays where it was put.
+  moveInstance(scene, inst.id, { x: 0, y: 30 });
+  const posMoved = { ...scene.getBody(instBody.id)!.pos };
+  const solved = solveSketch(scene);
+  const val2 = scene.measureInfo(scene.getMeasurement(mMix.id)!)!.value;
+  check("re-solve holds the dim by moving the free side", solved.length === 0 && Math.abs(val2 - 150) < 1e-2, `value ${val2.toFixed(3)}`);
+  check("re-solve never moves the instance", dist(scene.getBody(instBody.id)!.pos, posMoved) < 1e-9, "held");
 }
 
 // --- joint-ground conversion: revolute to the component frame ------------------

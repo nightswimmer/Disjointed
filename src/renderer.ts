@@ -776,7 +776,10 @@ function drawMeasurement(
 ): void {
   const s = view.scale;
   const px = (n: number) => n / s;
-  const color = flashed ? FLASH_COLOR : selected ? theme.ink : MEASURE_COLOR;
+  // A violated driving dimension (its measured value drifted from the target — e.g. a
+  // definition edit reset instance poses, or a grounded partner couldn't follow a drag)
+  // stays in the error red until re-applied.
+  const color = flashed || info.violated ? FLASH_COLOR : selected ? theme.ink : MEASURE_COLOR;
   ctx.strokeStyle = color;
 
   // Extension / leader lines: thin and dashed.

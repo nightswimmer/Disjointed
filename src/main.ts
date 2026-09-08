@@ -23,9 +23,10 @@ import {
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
 import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig, resetPoseBaselines } from "./solver";
 import {
-  solveSketch, applyDrivingDimension, tryAddConstraint, autoConstrainBody, SketchBreak,
+  solveSketch, tryAddConstraint, autoConstrainBody, SketchBreak,
   anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
 } from "./sketch";
+import { applyDimensionValue, enforcePoseDims } from "./pose";
 import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from "./view";
@@ -1324,6 +1325,11 @@ function exitComponent(levels = 1): void {
       view.ty = v.ty;
     }
   }
+  // The cascade snapped instance poses back to their definitions — re-assert the pose
+  // dimensions in the context we landed in (one that can't hold renders violated),
+  // then let free geometry follow the moved instances.
+  enforcePoseDims(scene);
+  solveSketch(scene);
   resetTransient();
   updateCrumbBar();
   updateCompPanel();
@@ -2117,12 +2123,52 @@ function sketchActive(): boolean {
  */
 function solveSketchLive(): void {
   if (mode !== "draw" || !sketchActive()) return;
+  // Pose dimensions first: partner instances translate so the dims keep holding while
+  // the user drags (the dragged instances are anchored — partners follow, never the
+  // other way). A dim that can't hold (grounded partner) just renders violated. The
+  // sketch solve below then adapts free geometry to the moved instances.
+  enforcePoseDims(scene, draggedInstanceIds());
   const anchors = dragAnchorVars();
   if (!anchors) {
     solveSketch(scene);
     return;
   }
   if (solveSketch(scene, anchors).length > 0) solveSketch(scene);
+}
+
+/** Instances pinned by the active drag / rotate: they never move to satisfy a pose
+ *  dimension mid-drag — their dimension partners follow instead (undefined when idle). */
+function draggedInstanceIds(): Set<number> | undefined {
+  const out = new Set<number>();
+  const addBody = (id: number): void => {
+    const inst = scene.instanceOfBody(id);
+    if (inst) out.add(inst.id);
+  };
+  const addJoint = (id: number): void => {
+    const inst = scene.instanceOfJoint(id);
+    if (inst) out.add(inst.id);
+  };
+  if (rotateDrag) {
+    rotateDrag.bodyIds.forEach(addBody);
+    rotateDrag.jointIds.forEach(addJoint);
+  } else if (leftDrag) {
+    switch (leftDrag.kind) {
+      case "body":
+        addBody(leftDrag.id);
+        break;
+      case "joint":
+        addJoint(leftDrag.id);
+        break;
+      case "vertex":
+        addBody(leftDrag.bodyId);
+        break;
+      case "multi":
+        leftDrag.bodies.forEach(addBody);
+        leftDrag.joints.forEach(addJoint);
+        break;
+    }
+  }
+  return out.size ? out : undefined;
 }
 
 /** The sketch variables pinned by the active drag / rotate (undefined when idle). */
@@ -2203,7 +2249,7 @@ function commitDimEditor(): void {
     flashSketchItems([{ id, kind: "dimension", error: Infinity }]);
     return;
   }
-  const breaks = applyDrivingDimension(scene, id, target);
+  const breaks = applyDimensionValue(scene, id, target);
   if (breaks.length) flashSketchItems(breaks);
   else markDirty();
 }

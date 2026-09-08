@@ -323,6 +323,30 @@ hunt also made **slider locks flip-proof**: the lock error is now the **wrapped 
 angle** (unique zero — the old phantom-on-line `sin` error was also satisfied by a 180°
 flip) enforced by the same angular projection (rider unit vs rail unit about the rider
 point). New test script `scripts/welds.ts` (17 checks).
+**Dimensions on components — pose-level driving dimensions (no format change)**:
+components are now a *transparent grouping* for dimensioning — you can dimension and
+drive anything to anything, as long as it doesn't fight what's already fixed at a deeper
+level. Instance **shape** stays design-locked (the sketch solver gives instance-owned
+variables a top mobility rank — immovable — and a dimension fully internal to one rigid
+piece rejects), but a driving dimension can now move instance **poses**: with one end on
+free geometry the sketch moves the free side; with **both ends on instance geometry**
+it's a **pose dimension** (new `src/pose.ts`) — between two different instances one of
+them **translates rigidly** to the target (a grounded instance never moves; conflicting
+pose dims reject with the red flash), and between two mobile parts of ONE instance the
+rigid-drag sim solver **re-poses the internal mechanism** (everything outside the
+instance plus the other end's rigid unit frozen, pins intact; two ends actually rigid to
+each other — same body / chassis / welded — can't reach the target and reject). Pose
+dims are **enforced live during drags** (dragging a component pulls its dimensioned
+partners along, the dragged instances anchored) and **re-asserted after definition-edit
+cascades** (on def-context exit); one that can't hold (grounded partner, def edit)
+renders **violated in error red** until re-applied (`MeasureInfo.violated`,
+`DIM_VIOLATION_TOL`). And every driving dimension now holds its **drawn relative
+direction**: an optional `Measurement.side` (1 | −1, captured when the dim starts
+driving — same "as drawn" philosophy as weld/lock baselines) makes the h/v, point+line
+and line+line corrections **signed** in both solvers, so a fast one-frame drag past the
+partner can never flip the two sides through each other (direct point-point distances
+have no side by nature — a pure distance is free to rotate). New test script
+`scripts/pose-dims.ts` (36 checks).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -472,9 +496,13 @@ point). New test script `scripts/welds.ts` (17 checks).
     pose vs its cached def pose — the definition is the pose reference; only the
     instance-level grounded flag is instance state), `removeInstance` / `dissolveInstance`
     (explode to plain elements) / `removeComponent` (refused while instances exist
-    anywhere), `instanceOfBody/Joint/Constraint`, `refInstanceOwned(ref)` (used to reject
-    sketch constraints + driving dimensions on instance geometry — its shape belongs to
-    the def), `instancePlacement(id)`, `componentUses(defId)` (transitive, for cycle
+    anywhere), `instanceOfBody/Joint/Constraint`, `instanceOfRef(ref)` /
+    `refInstanceOwned(ref)` (sketch constraints on instance geometry are rejected — its
+    *shape* belongs to the def — but dimensions may drive its *pose*, see pose.ts),
+    `refRigidUnitKey(ref)` (the rigid unit a ref belongs to — group / lone body / lone
+    free joint — two refs with the same key can never be pose-dimensioned apart),
+    `moveInstance(id, delta)` (rigid translation of everything the instance expanded),
+    `instancePlacement(id)`, `componentUses(defId)` (transitive, for cycle
     guards), `componentCenter(defId)`. **Ground conversion** in `expandInstance`: def
     grounded bodies → chassis members (flag stripped; the *instance's* grounded flag is
     user state and survives re-expansion); def grounded free joints → group-locked chassis
@@ -572,9 +600,16 @@ point). New test script `scripts/welds.ts` (17 checks).
     `removeSketchConstraint` / `getSketchConstraint`; `pruneSketch` runs alongside
     `pruneMeasurements` (element deletion cascades) and `shiftMeasureIndices` also remaps
     sketch vertex/edge refs. `sameMeasureRef` (exported) compares refs by element.
-    **Driving dimensions**: draw-mode `Measurement`s gain optional `driving` + `target`;
-    `setMeasurementDriving` / `clearMeasurementDriving`; `measureInfo` passes `driving`
-    through to `MeasureInfo` for display. **`scaleBody(id, factor)`** scales a body
+    **Driving dimensions**: draw-mode `Measurement`s gain optional `driving` + `target` +
+    **`side`** (1 | −1 — the held relative direction, captured from the drawn geometry by
+    `setMeasurementDriving` via `measurementSide(m)`; re-captured when a label drag
+    changes the axis; cleared with the driving flag; sanitized + back-filled on load; no
+    side for direct point-point dims). `setMeasurementDriving` rejects only a pair of
+    instance-owned refs **rigid to one another** (`refRigidUnitKey` equal) — any other
+    pairing may drive (pose or sketch). `measureInfo` passes `driving` through to
+    `MeasureInfo` and sets **`violated`** when a driving dim's value is off its target by
+    more than `DIM_VIOLATION_TOL` (2e-3) or sits on the flipped side of its held
+    direction — the renderer paints those error-red. **`scaleBody(id, factor)`** scales a body
     uniformly about its centroid — control polygon, corner radius, attached joints, their
     ground anchors, and `bodyPoint` measurement refs all together.
   - **Working unit** (`unit: Unit` on the scene, v12): `Unit = "mm"|"cm"|"m"|"in"` with
@@ -594,7 +629,10 @@ point). New test script `scripts/welds.ts` (17 checks).
     pre-v17 sliders have no `locked` riders (a hand-edited lock on a non-rider is dropped:
     locked ⊆ riders is a load invariant), and pre-v18 pins have no `rigid` flag (loaded
     revolute; a non-boolean hand-edited value is sanitized away) —
-    all load fine as-is; loaded groups/instances are pruned against the loaded elements).
+    all load fine as-is; loaded groups/instances are pruned against the loaded elements.
+    `Measurement.side` is likewise an optional field (no format bump): load sanitizes
+    non-±1 values, drops it from driven dims, and **back-fills** it on driving dims from
+    the loaded — satisfied — geometry, so pre-side files gain flip protection on load).
     The `SelectionClip` (copy/paste) carries each body's `grounded` flag alongside its
     colour, per-corner `radii`, and **hole shapes** (`bodies[].holes`: world control +
     radius/radii/round each), pins/grounds/sliders internal to the selection (pins with
@@ -713,14 +751,22 @@ point). New test script `scripts/welds.ts` (17 checks).
   throughout**: an unconverged solve never touches the scene and returns `SketchBreak[]`
   (ids of the unsatisfiable items). Public API: `solveSketch(scene)` (re-solve + apply),
   `applyDrivingDimension(scene, id, target)` (validates: draw-mode distance dims only,
-  target > 0; picks **uniform scale** — both refs owned by one body, no other driving dim
+  target > 0, rejects a dim with both ends instance-owned — those are *pose* dims,
+  pose.ts territory, and `buildSystem` excludes them from the shape system entirely;
+  picks **uniform scale** — both refs owned by one body, no other driving dim
   touches it, every sketch constraint touching it is fully internal — else the node
   solve; commits the driving flag only on success), `tryAddConstraint` (add + solve,
   remove again on conflict), `autoConstrainBody` (H/V inference within `AUTO_HV_TOL` =
-  5°, each constraint solved in as it's added).
+  5°, each constraint solved in as it's added). The h/v, point+line and line+line
+  dimension items honour the dim's held **`side`** (the error is signed toward the drawn
+  relative direction, so an overshooting drag reads as a large error back — the pair can
+  never flip through each other; absent side falls back to the current sign, the old
+  behaviour).
   The variables also include **guideline defining points** (`g:id:a` / `g:id:b`, applied
   back via `moveGuidePoint`), and every variable carries a **mobility rank** — 0
-  construction (guide points), 1 geometry (vertices, joints), 2 drag-anchored — with each
+  construction (guide points), 1 geometry (vertices, joints), 2 drag-anchored,
+  3 **component-instance geometry** (immovable: its shape belongs to the definition, so
+  it outranks even the drag — dragging against it yields) — with each
   pairwise projection weighted so corrections flow entirely to the **lowest** rank (equal
   ranks split evenly, the old symmetric behaviour): guide constraints move only free guide
   points, never geometry, and a drag is never tugged back by its constraints.
@@ -729,7 +775,28 @@ point). New test script `scripts/welds.ts` (17 checks).
   `anchorVarForGuidePoint` / `anchorVarForVertex` helpers; main falls back to a
   symmetric re-solve whenever the anchored solve is infeasible, so live drags can never
   leave a constraint visibly broken.
-- **analyzer.ts** — read-only **topology diagnostic** (Stage 1 of the propagation-solver
+- **pose.ts** — **pose-level driving dimensions**: draw-mode dims whose BOTH ends live on
+  component-instance geometry (`isPoseDim`). They drive the *pose* of rigid parts, never
+  shape. `applyDimensionValue(scene, id, target)` is the router main uses for every
+  dimension-value commit (pose dims here, everything else to `applyDrivingDimension`).
+  `applyPoseDimension`: snapshot → `setMeasurementDriving` (its rigid-unit backstop
+  rejects same-body/chassis pairs) → for a same-instance dim `poseSolveIntra` re-poses
+  the internal mechanism with the sim solver (driver on one end's ref point, target
+  recomputed along the current direction each round; a `SolveFreeze` holds everything
+  outside the instance + the other end's rigid unit; tries the refB side, then refA) →
+  `enforcePoseDims` settles every pose dim together → `solveSketch` lets free geometry
+  follow → any failure restores the snapshot and returns the conflicts (reject
+  semantics, red flash). `enforcePoseDims(scene, anchoredInstances?)` is the live
+  enforcement: Gauss-Seidel rounds of **closed-form rigid translations** (`poseCorrection`
+  mirrors `measureInfo`'s value semantics per kind/axis and honours the held `side`;
+  `moveInstance` applies them) — a side is movable unless its instance is grounded or
+  drag-anchored; same-instance dims are only verified here (translation can't fix them);
+  residuals come back as `SketchBreak`s and render violated. `poseDimError` is the
+  side-aware residual (a flipped pose at the right absolute distance reads as
+  value + target, never satisfied). main calls `enforcePoseDims` at the top of
+  `solveSketchLive` (with `draggedInstanceIds()` anchored — dragging a component pulls
+  its dimensioned partners along) and re-asserts pose dims on def-context exit
+  (`exitComponent`), after the cascade snapped instance poses back to the defs.
   exploration; not yet imported by the app — call `formatReport(analyzeScene(scene), scene)`
   from a console/debug hook). Builds a constraint graph (bodies + free joints as nodes; pins +
   slider-rider couplings as edges), finds kinematic islands (union-find), and per island
@@ -813,9 +880,11 @@ point). New test script `scripts/welds.ts` (17 checks).
   `sketchDraft` highlights constraint-tool picks in violet (reusing
   `drawMeasureRefHighlight`, which took a colour param). In draw mode a **driven**
   dimension's value renders **in parentheses** and a **driving** one plain with a bolder
-  pill border (`measureText(info, paren)`); `flash: Set<number>` paints the constraints /
-  dimensions a rejected sketch edit named in the error red for a moment. Selection kind
-  `"sketch"` highlights a badge in ink.
+  pill border (`measureText(info, paren)`); a **violated** driving dimension
+  (`MeasureInfo.violated` — off its target, or on the flipped side of its held direction)
+  renders in the error red persistently until re-applied; `flash: Set<number>` paints the
+  constraints / dimensions a rejected sketch edit named in the error red for a moment.
+  Selection kind `"sketch"` highlights a badge in ink.
   **Multi-selection & groups**: `multiSelected: { bodies, joints } | null` highlights every
   member like a normal selection (bodies get the ink outline, free joints the selected
   ring); `marquee: { a, b } | null` draws the in-progress box selection (dashed rect +
@@ -920,8 +989,10 @@ point). New test script `scripts/welds.ts` (17 checks).
     that names an item in a hidden layer **auto-reveals** that layer.
   - **Inline dimension editing**: double-click a draw-mode dimension label →
     `openDimEditor` positions the floating `#dim-edit` input over it (screen-space, inside
-    `#canvas-wrap`). Enter (or blur) commits: a number → `applyDrivingDimension` (rejected
-    edits flash red, nothing moves); an **empty value** → back to a driven reference
+    `#canvas-wrap`). Enter (or blur) commits: a number → `applyDimensionValue` (the
+    pose.ts router: pose dims re-pose rigid parts, everything else goes to the sketch's
+    `applyDrivingDimension`; rejected edits flash red, nothing moves); an **empty
+    value** → back to a driven reference
     (`clearMeasurementDriving`). Esc cancels. A global keydown guard ignores canvas
     shortcuts while any input/select has focus (so Delete/tool letters don't fire while
     typing — this also fixed a latent bug with the actuator speed fields).
@@ -929,6 +1000,9 @@ point). New test script `scripts/welds.ts` (17 checks).
     joint) and rotate-tool drags re-solve the sketch after every move when any constraint
     or driving dimension exists — constraints hold while the dragged geometry follows,
     CAD-style. A solve that can't converge mid-drag is skipped (the next one re-tightens).
+    `solveSketchLive` first runs `enforcePoseDims(scene, draggedInstanceIds())`, so
+    dragging a component pulls its pose-dimensioned partner components along (the dragged
+    instances anchored); `exitComponent` re-asserts pose dims after a definition cascade.
   - **Auto-constraints while drawing** (freehand body tool): a click that lands on an
     existing joint / body corner places the vertex **exactly there** and records the pick
     (`draftBodySnaps`); `finishBody` turns the picks into **coincident** constraints and
@@ -1170,6 +1244,16 @@ place one element, then it returns to **Select** mode. `Esc` aborts the current 
   further ones move only the involved nodes while every constraint and driving dimension
   holds. Driven values show in parentheses; clear the field to make a driving dimension a
   reference again. Unsatisfiable targets are rejected (revert + red flash).
+  **On component instances** dimensions drive *poses*, never shape: between two different
+  components one translates rigidly to the value (a grounded one never moves); between two
+  mobile parts of one component the internal mechanism re-poses (pins intact); a dimension
+  internal to one rigid piece (same body / chassis / welded — "already dimensioned at a
+  deeper level") rejects. Dragging a component pulls its dimensioned partners along
+  live; a dimension that can't hold (grounded partner, or a definition edit reset the
+  poses) turns **error-red** until re-applied (double-click, Enter). Every driving
+  dimension holds its **drawn relative direction** — a fast drag can never flip the two
+  sides through each other; to re-side one, clear its value, move the part, re-enter it
+  (direct unaligned distances have no side and rotate freely).
 
 Select mode (default, no tool armed):
 - **Sketch-aware dragging**: with any sketch constraints / driving dimensions present, every
@@ -1521,7 +1605,7 @@ Persistence:
   locked joints is a group-riding track (addSlider doesn't auto-ground them; riders slide
   and follow the towed group); serialize/load round-trip + legacy files; copy/paste carries
   group joints.
-- **components.ts** — hierarchical components end-to-end (81 checks): creation from a
+- **components.ts** — hierarchical components end-to-end (89 checks): creation from a
   selection (def carries sketch/measurements/grounded flags; assembly carries neither;
   instance replaces the originals exactly in place; sketch constraints on instance geometry
   rejected); joint-ground conversion (synthesized chassis anchor + pin; grounding the
@@ -1543,7 +1627,23 @@ Persistence:
   (`makeInstanceUnique`: new def, re-pointed instance, sibling untouched, drift-0 no-op
   reconcile, two-way edit independence after the fork, name dedup, nested defs stay shared
   in the DAG); serialize/load v14 round-trip, idempotent re-expansion after load,
-  `reexpandData` on stored snapshots, and pre-v14 files loading with no components.
+  `reexpandData` on stored snapshots, and pre-v14 files loading with no components;
+  **dimensions vs instance shape** (a dim internal to an instance can't drive and a
+  rejected edit leaves the instance untouched; a mixed instance↔free dim drives by moving
+  only the free side, and later sketch solves keep holding it without ever moving the
+  instance).
+- **pose-dims.ts** — pose-level driving dimensions (36 checks): an inter-instance dim
+  drives by rigid translation (refB's side by preference, shapes untouched); a grounded
+  partner never moves (the other side does), both grounded rejects untouched with the old
+  target kept; h-axis dims translate along their axis only; live follow (`enforcePoseDims`
+  with the dragged instance anchored — the partner follows, the drag stays where the user
+  put it); conflicting pose dims reject; pose dims are excluded from the sketch (a plain
+  `solveSketch` is a byte-identical no-op); an intra-instance dim re-poses the internal
+  mechanism (target hit, held side fixed, arm pivoted, pin gap ~1e-9, shape + definition
+  byte-identical) while a dim rigid at a deeper level (same instance body) rejects;
+  **held-side flip protection** (a violent one-frame overshoot drag keeps the drawn
+  relative direction — pose path and sketch path both; the side is captured on drive and
+  dropped on clear); mixed dims still route to the sketch.
 - **grounded-bodies.ts** — grounded bodies/groups (20 checks): `toggleBodyGround` toggle
   semantics (lone body on/off, whole-group grounding/ungrounding through any member); a
   grounded body immovable under drag; a body pinned to one pivots about the pin while the
@@ -1705,6 +1805,23 @@ Persistence:
   alongside the weld: the lock now measures the **wrapped** relative angle (unique zero)
   and enforces it with the same direct angular projection, so a flip reads as a large
   error and is pulled back.
+- **A "driven" dimension on a component instance still reshaped it.** `applyDrivingDimension`
+  moved geometry (scale or node solve) *before* the instance-ownership guard could run —
+  the guard lived only inside `setMeasurementDriving`, whose `false` return was silently
+  ignored. The instance body scaled while the label kept its driven parentheses, and the
+  change silently diverged from the definition (the next cascade would discard it). Fixed
+  by making instance geometry **rank-immovable** in the sketch solver and checking
+  ownership up front — which then grew into the full pose-dimension feature (dims with
+  both ends on instances rejected at first, later made to drive *poses* instead).
+- **Fast drags could flip a driving dimension's direction.** Every dimension correction
+  re-derived its sign from the *current* geometry (`sign(B − A)`), so a one-frame drag
+  overshooting past the partner flipped the sign and the solver satisfied the constraint
+  on the wrong side — two rectangles held apart by a short v distance could pass through
+  each other. Fixed with the held **`Measurement.side`** (captured from the drawn
+  geometry when the dim starts driving): corrections are now signed toward the drawn
+  side in both solvers, side-aware residuals treat a flipped-but-equal-distance pose as
+  unsatisfied, and the violated render flags it. Regression-tested with one-frame
+  overshoot drags in `scripts/pose-dims.ts`.
 
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);
@@ -1712,6 +1829,15 @@ Persistence:
   it's inferred only while drawing); constraint badges could use hover feedback.
   (`mirrorBody` now remaps constraint/measurement refs; copy/paste carries the
   fully-internal ones + driving dimensions.)
+- **Pose-dimension follow-ups**: sketch *constraints* (H/V, coincident, parallel…)
+  between instance and free geometry are still blanket-rejected — the same
+  anchor-the-instance treatment the dims got would apply naturally; a **direct**
+  (unaligned) point-point dim has no side, so a one-frame jump straight through the
+  partner can still tunnel (a circle constraint — continuous rotation around the partner
+  is legitimate); pose dims between instances aren't carried by copy/paste (refs to
+  re-instantiated material don't remap); h/v pose dims measure **world** axes — rotating
+  a component changes what they hold (the user's accepted caveat, same as H/V constraints
+  referencing component-local axes making no sense after rotation).
 - Measurement follow-ups: copy/paste doesn't carry *driven* (reference) measurements
   (consistent with actuators/motors; driving dimensions are carried, as constraints).
 - **Guideline follow-ups**: ~~no point-**on**-line constraint kind yet~~ (done — Coincident
