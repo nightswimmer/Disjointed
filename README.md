@@ -80,6 +80,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | --- | --- | --- |
 | **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
 | **Hole** | `U` | Cut a hole in a body. The **first click picks the body** (topmost under the cursor) and starts the cut-out polygon; further clicks add vertices — each kept **inside** that body (a grid snap that would land outside falls back to the exact click point). Close it by clicking the **first vertex**, **double-clicking**, or pressing **Enter** — the loop becomes an editable hole (sharp corners; round them with its radius handles afterwards), and the body is selected so the hole's handles show right away. Esc aborts. |
+| **Split** | `X` | Cut a body in two. Click a point on a body's **outline** (a corner, or anywhere on an edge) to start the cut, click inside the body to route it (as many vertices as you like — each kept inside), then click the outline again to finish: the body splits along that path into two bodies (same colour, grounded flag and group; the new one sits right above the original in the stacking order). Existing corners keep their rounding, the cut corners start sharp. Holes stay whole on their side (a cut through a hole is refused); joints stay where they are and belong to the side they're on; a rail or motor whose two joints end up on different sides is dropped. Bodies built from joints are converted to an editable sharp outline first. Esc aborts. |
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **rail (or rail node)** and it's automatically attached to that rail as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
 | **Weld** | `W` | Click where **bodies overlap** to weld them rigidly together at that point — a joint in each, sharing the position **and** locked at the drawn relative angle (no relative rotation; the angle re-captures from the drawn pose on every sim entry, like a slider's lock). Click an **existing pinned joint** to toggle its pin(s) **weld ↔ revolute**. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **rail** to attach the joint to it as a rider. |
@@ -144,6 +145,16 @@ unit — and in **Simulate mode it moves as a single rigid body**.
   a multi-selection / group reflects about the centre of its combined bounding box. Constraints
   and dimensions follow their corners/edges through the flip. Grouped in the toolbar next to
   **Rotate**.
+- **Combine** (toolbar button next to Mirror, or **N**) — merge the **multi-selected bodies**
+  (Ctrl+click or box-select two or more) into one body: the union of their shapes. They must
+  **overlap or share an edge** (bodies that don't touch the rest, or touch only at a corner,
+  are refused with a message saying why). The **first-selected** body survives — it keeps its
+  colour and stacking position — and the others' joints move onto it; pins / welds *between*
+  the combined bodies disappear (they'd be inside one body now), motors and rails carry over,
+  groups merge. Corners that survive unchanged keep their rounding, new corners are sharp;
+  holes not covered by the other bodies stay (a circular hole stays a true disk), and a region
+  the union closes off becomes a new hole. Bodies built from joints are converted to an
+  editable sharp outline first.
 - **Send to back / Bring to front** (toolbar buttons next to Mirror, or **PageDown / PageUp**) —
   move the selection to the bottom / top of the stacking order. Clicks always pick the topmost
   body, so this also decides what a click lands on: send a big imported reference body to the

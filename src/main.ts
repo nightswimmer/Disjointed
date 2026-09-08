@@ -33,7 +33,7 @@ import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from
 
 type Mode = "draw" | "sim";
 type Tool =
-  | "body" | "hole" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate" | "guide"
+  | "body" | "hole" | "split" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate" | "guide"
   | "linearActuator" | "motor" | "measure"
   | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
 /** An existing element picked in normal/select mode. */
@@ -183,6 +183,9 @@ let draftBodySnaps: (MeasureRef | null)[] = [];
 /** Hole tool: freehand cut-out vertices, and the body being cut (set by the first click). */
 let holeDraft: Vec2[] = [];
 let holeDraftBodyId: number | null = null;
+/** Split tool: the cut path so far (first point on the body's outline) and the body being cut. */
+let splitDraft: Vec2[] = [];
+let splitBodyId: number | null = null;
 let jointDraftIds: number[] = []; // joints picked to build a body (body tool, joint start)
 let jointDraftCreated: number[] = []; // joints made on rails during that draft (removed if aborted)
 let jointDraftExpanding = false; // body-from-joints: sizing the outward margin
@@ -845,9 +848,10 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · Delete to remove.",
+  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   hole: "Click inside a body to start a cut-out, then click more vertices (all inside that body). Click the first vertex (or press Enter) to close the hole.",
+  split: "Click a point on a body's outline (edge or corner) to start the cut, click inside to route it, then click the outline again to split the body in two along the path.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   weld: "Click where bodies overlap to weld them rigidly together at that point (no relative rotation) — or click an existing pinned joint to toggle it weld ↔ pin.",
   connect: "Click a joint, then another joint to pin them — or a rail to attach the joint to it as a rider.",
@@ -915,6 +919,7 @@ document.getElementById("load-btn")!.addEventListener("click", () => fileInput.c
 // Copy/paste are keyboard-only (Ctrl/Cmd+C / V); no toolbar buttons.
 document.getElementById("mirror-h-btn")!.addEventListener("click", () => mirrorSelection("h"));
 document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorSelection("v"));
+document.getElementById("combine-btn")!.addEventListener("click", combineSelection);
 document.getElementById("send-back-btn")!.addEventListener("click", () => reorderSelection("back"));
 document.getElementById("bring-front-btn")!.addEventListener("click", () => reorderSelection("front"));
 
@@ -1089,6 +1094,8 @@ function resetTransient(): void {
   draftBodySnaps = [];
   holeDraft = [];
   holeDraftBodyId = null;
+  splitDraft = [];
+  splitBodyId = null;
   constraintPicks = [];
   // Discard any slider-rail joints made for an unfinished body-from-joints draft (a finished
   // build clears this list first, so its absorbed joints survive).
@@ -1646,6 +1653,10 @@ function handleDrawClick(p: Vec2): void {
     case "hole":
       // Spans many clicks like the body tool; disarms itself in finishHole().
       handleHoleClick(p);
+      break;
+    case "split":
+      // Spans many clicks too; disarms itself when the cut lands back on the outline.
+      handleSplitClick(p);
       break;
     case "joint": {
       // Inside bodies: a joint in each overlapping body, pinned together (a shared
@@ -3007,6 +3018,110 @@ function finishHole(): void {
   holeDraftBodyId = null;
 }
 
+/**
+ * The outline the Split tool cuts: the editable control polygon of a fillet-mode body,
+ * or the sampled shape of an offset-mode one (its control polygon is smaller than the
+ * drawn shape — the model bakes such bodies before splitting).
+ */
+function splitOutlineOf(body: Body): Vec2[] {
+  return body.round === "offset" ? scene.bodyWorldVerts(body) : scene.bodyControlWorld(body);
+}
+
+/** Nearest corner (preferred) or edge point of `body`'s split outline within the pick radius. */
+function splitOutlineHit(body: Body, p: Vec2): Vec2 | null {
+  const verts = splitOutlineOf(body);
+  const r = pickRadius();
+  let best: Vec2 | null = null;
+  let bestD = r;
+  for (const v of verts) {
+    const d = dist(p, v);
+    if (d < bestD) { bestD = d; best = v; }
+  }
+  if (best) return best;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i], b = verts[(i + 1) % verts.length];
+    const ab = sub(b, a);
+    const t = Math.max(0, Math.min(1, dot(sub(p, a), ab) / Math.max(lenSq(ab), 1e-9)));
+    const q = add(a, scale(ab, t));
+    const d = dist(p, q);
+    if (d < bestD) { bestD = d; best = q; }
+  }
+  return best;
+}
+
+/**
+ * Split tool: the first click lands on a body's outline (topmost body whose corner or
+ * edge is under the cursor) and starts the cut there; later clicks inside the body add
+ * path vertices (grid-snapped, kept inside); a click back on the outline ends the cut
+ * and splits the body. Rejected cuts explain why and restart the draft.
+ */
+function handleSplitClick(p: Vec2): void {
+  if (splitBodyId === null) {
+    for (let i = scene.bodies.length - 1; i >= 0; i--) {
+      const body = scene.bodies[i];
+      const hit = splitOutlineHit(body, p);
+      if (!hit) continue;
+      if (scene.instanceOfBody(body.id)) {
+        window.alert("This body belongs to a component instance — edit the definition to split it.");
+        disarmTool();
+        return;
+      }
+      splitBodyId = body.id;
+      splitDraft = [hit];
+      return;
+    }
+    return; // no outline under the cursor — keep the tool armed
+  }
+  const body = scene.getBody(splitBodyId);
+  if (!body) { disarmTool(); return; }
+  const last = splitDraft[splitDraft.length - 1];
+  const onOutline = splitOutlineHit(body, p);
+  if (onOutline && dist(onOutline, last) > 4 / view.scale) {
+    const result = scene.splitBody(body.id, [...splitDraft, onOutline]);
+    if (result.ok) {
+      markDirty();
+      disarmTool();
+      selection = { kind: "body", id: result.a.id };
+    } else {
+      window.alert(`Can't split here: ${result.reason}`);
+      splitDraft = [];
+      splitBodyId = null;
+    }
+    return;
+  }
+  // Interior vertex: grid-snap unless that would leave the body; ignore clicks outside.
+  let at = snap(p);
+  if (!scene.pointInBody(body, at)) at = p;
+  if (!scene.pointInBody(body, at)) return;
+  if (dist(at, last) < 4 / view.scale) return;
+  splitDraft.push(at);
+}
+
+/**
+ * Combine the multi-selected bodies into one (polygon union — see
+ * `Scene.combineBodies`). The first-selected body survives. Explains a refusal.
+ */
+function combineSelection(): void {
+  if (mode !== "draw") return;
+  const ids = multiSel ? [...multiSel.bodies] : [];
+  if (ids.length < 2) {
+    window.alert("Select two or more bodies (Ctrl+click, or drag a box) to combine them.");
+    return;
+  }
+  if (selectionTouchesInstance()) {
+    window.alert("Component instances can't be combined — edit the definition, or fork the instance first.");
+    return;
+  }
+  const result = scene.combineBodies(ids);
+  if (!result.ok) {
+    window.alert(`Can't combine: ${result.reason}`);
+    return;
+  }
+  multiSel = null;
+  selection = { kind: "body", id: result.body.id };
+  markDirty();
+}
+
 // --- pointer events ------------------------------------------------------
 canvas.addEventListener("mousedown", (e) => {
   const world = eventWorld(e);
@@ -3413,6 +3528,7 @@ canvas.addEventListener("dblclick", (e) => {
 const TOOL_KEYS: Record<string, Tool> = {
   b: "body",
   u: "hole", // cUt-out (H is the horizontal constraint)
+  x: "split", // cut a body in two along a drawn path
   j: "joint",
   w: "weld",
   c: "connect",
@@ -3543,6 +3659,12 @@ window.addEventListener("keydown", (e) => {
       scene.setBodyRadius(body.id, body.radius + (e.key === "]" ? RADIUS_STEP : -RADIUS_STEP));
       markDirty();
     }
+    e.preventDefault();
+    return;
+  }
+  // N combines the multi-selected bodies into one (an action on the selection, like mirror).
+  if (e.key.toLowerCase() === "n" && mode === "draw" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    combineSelection();
     e.preventDefault();
     return;
   }
@@ -4043,6 +4165,7 @@ function frame(now?: number): void {
       mode !== "draw" ? null
       : tool === "body" ? draftBody
       : tool === "hole" ? holeDraft
+      : tool === "split" ? splitDraft
       : null,
     cursor,
     hoverJoint,

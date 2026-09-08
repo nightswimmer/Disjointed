@@ -406,6 +406,41 @@ it. Sketch constraints stay draw-mode only (a coincident between two instance jo
 the drawn placement; sim still needs a pin). New test script `scripts/pose-constraints.ts`
 (57 checks); one components.ts check that asserted the old blanket rejection became three
 (equal rejected, same-body pair rejected, line-H accepted).
+**Split & Combine bodies (no format change)**: two shape-editing operations on the
+editable outline. **Split tool (`X`)**: click a point on a body's outline (a control corner,
+or a projection onto a control edge — topmost body wins), click inside to route the cut
+(grid-snapped, containment fallback like the Hole tool), then click the outline again;
+`Scene.splitBody(id, cut)` cuts the control polygon at both ends and the two sides become
+bodies — the original keeps its id (side A), the other is a new body inserted **right after
+it in the z-order** with the same colour / grounded flag / group membership. Existing corners
+keep their per-corner radii, the two cut points and the path vertices start **sharp**
+(overrides of 0 when the body default is rounded). Holes go whole to the side containing
+them (a cut crossing / touching a hole is rejected with a message; a hole carries its own
+editable spec, so a disk hole stays a disk), joints go to the side containing them (a joint
+exactly on the cut line stays with A), a **rail or motor whose two joints land on different
+sides is dropped**, vertex/edge/hole/bodyPoint refs (measurements + sketch constraints)
+remap to their new owner and the two cut edges' refs are pruned. **Offset-mode bodies are
+baked first** (sampled outline → radius-0 fillet control polygon) since their rounded shape
+is larger than their control polygon. Rejections (cut along an edge → no area, crossing the
+outline, leaving the body, self-crossing, through a hole, instance body) leave the scene
+untouched and alert the reason; the draft restarts. **Combine (`N` or the toolbar button
+in the edit group)**: the multi-selected bodies (2+) merge into one via a **polygon union**
+(new `src/boolean.ts`, see architecture) of their editable outlines (offset bodies baked);
+`Scene.combineBodies(ids)` keeps the **first-selected** body's id / colour / z-position.
+Result corners that are unchanged input corners keep that corner's radius (per-corner
+overrides relative to the survivor's default), new intersection corners are sharp;
+collinear vertices (a shared edge's far endpoints, T-junctions) are removed. Holes: not
+covered by other material → kept; partially covered → shrunk; a region the union encloses
+(two C shapes) → a new hole; an **untouched hole keeps its exact editable spec** (disk stays
+a disk, refs on it keep their index). Joints of absorbed bodies re-attach to the survivor
+(world positions kept); **pins / welds between the combined bodies are removed** (they'd be
+intra-body); motors move over; rails stay; touched groups merge around the survivor
+(dissolving if nothing else is left); grounded if any input was; vertex/edge refs remap by
+matching world positions (an edge survives only whole — a shortened edge's ref is pruned),
+bodyPoint refs re-anchor. Refused with an alert when the bodies **don't all connect**
+(overlap or share an edge — "N bodies don't touch the rest"), **touch only at a point**
+(the union would pinch), or include component instances. New test script
+`scripts/split-combine.ts` (69 checks). Not yet confirmed by eye in the browser.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -898,6 +933,20 @@ the drawn placement; sim still needs a pin). New test script `scripts/pose-const
   Tarjan **bridge / biconnected-component decomposition** classifying bodies into loop cores
   (must be solved together) vs propagatable tree branches, with articulation bodies joining
   blocks. Labels are `#id`-based (bodies have no user-facing name).
+- **boolean.ts** — **polygon union** for the Combine tool (plus `segmentsCross` /
+  `pointOnSegment` used by Split's validation). `unionRegions(regions)` takes filled regions
+  (outer loop + holes, any orientation) and builds a planar straight-line graph: every edge is
+  split where it crosses / touches / collinearly overlaps another (O(n²) pairwise, fine for
+  control polygons), vertices closer than a scale-relative eps are merged (hash grid), and
+  each edge is **classified by sampling** a point just left and just right of its midpoint
+  against the inputs — material on exactly one side makes it a boundary edge, directed
+  material-left; a shared edge (material both sides) simply drops out, which is what keeps the
+  degenerate cases (bodies sharing an edge, a corner on another body's edge) on the general
+  path. Boundary edges chain into loops (at a vertex with several outgoing edges the next is
+  the first met turning clockwise from the reversed incoming direction — and the result is
+  flagged `pinched`); CCW loops are outers, CW ones holes nested by containment; collinear
+  vertices are simplified away. Returns the connected pieces, so the caller can tell
+  "doesn't connect" (2+ regions) from "pinch" (touching at a point).
 - **dxf.ts** — minimal **ASCII DXF reader** for the drag-and-drop import (no dependencies).
   `parseDxf(text)` reads `$INSUNITS` from the HEADER (reported as mm-per-drawing-unit, null
   when absent/unitless/unknown) and the ENTITIES section: LWPOLYLINE / POLYLINE+VERTEX
@@ -1800,6 +1849,25 @@ Persistence:
   solved by the free point); and the **drag fallback** (an infeasible anchored drag step
   followed by the symmetric solve restores V, keeps the drag's feasible component, joint
   untouched).
+- **split-combine.ts** — Split + Combine (69 checks). Union primitive: overlapping squares
+  → one 8-gon of the right area, shared edge → 4-vertex rectangle, corner touch → pinched,
+  disjoint → two regions, two C shapes → a new hole, partially covered hole shrinks, input
+  orientation irrelevant. Split: straight / diagonal (corner-to-corner) / polyline cuts,
+  equal areas, A keeps its id and B sits right after it, colour / grounded / group inherited,
+  joints sorted by side at their world positions (on the cut line → A), pins to other bodies
+  survive, corner + edge + hole + bodyPoint refs remap (the cut edge's ref pruned), rail /
+  motor across the cut dropped while same-side ones survive, cut corners get 0 overrides
+  while others keep the default, holes go to their sides (a disk stays an offset disk), a
+  cut through a hole is rejected and leaves the scene untouched, along-edge / outside /
+  same-point / interior-start / self-crossing cuts rejected, an offset bar bakes and splits
+  keeping its end joints. Combine: survivor id / colour / area, absorbed body gone, joints
+  re-attach in place, internal pin removed and external pin kept, motor follows, surviving
+  corner + whole edge + bodyPoint refs remap while swallowed corner / shortened edge refs
+  prune, disjoint and corner-touching refused (scene untouched), single body refused, shared
+  edge → 4 corners with radii mapped (default kept, sharp corners 0), untouched disk hole
+  keeps its spec (and its ref), covered hole swallowed, groups merge around the survivor,
+  grounded propagates, three chained bodies merge, one stray body reported, offset bar +
+  plate merge, and split → combine round-trips the shape (area, 4 corners, hole kept).
 - **dxf.ts (scripts)** — the DXF importer + units + holes end-to-end: closed
   LWPOLYLINE / old-style POLYLINE+VERTEX loops; bulge sampling exactly on the arc's circle
   (positive bulge CCW); **fillet reconstruction** (a rounded rectangle reconstructs to its 4

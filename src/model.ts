@@ -28,6 +28,7 @@ import {
   pointInPolygon,
   closestPointOnPolygon,
 } from "./geometry";
+import { unionRegions, segmentsCross, pointOnSegment, PolyRegion } from "./boolean";
 
 /**
  * A joint exactly coincident with a body control vertex is "stuck" to it — they move
@@ -71,6 +72,12 @@ export interface BodyHole {
 export type HoleSpec =
   | Vec2[]
   | { control: Vec2[]; radius?: number; radii?: (number | null)[]; round?: RoundMode };
+
+/** Outcome of `Scene.splitBody`: the two sides (A keeps the original id), or why it was refused. */
+export type SplitResult = { ok: true; a: Body; b: Body } | { ok: false; reason: string };
+
+/** Outcome of `Scene.combineBodies`: the surviving (first) body, or why it was refused. */
+export type CombineResult = { ok: true; body: Body } | { ok: false; reason: string };
 
 /** Effective per-corner radii of a hole (overrides over its default), or the default. */
 function holeRadii(h: BodyHole): number | number[] {
@@ -808,6 +815,575 @@ export class Scene {
     for (const m of this.measurements) { shift(m.refA); shift(m.refB); }
     for (const c of this.sketch) { shift(c.refA); shift(c.refB); }
     this.rebuildBody(body);
+  }
+
+
+  // --- split / combine ------------------------------------------------------
+
+  /**
+   * Scale-relative tolerance for split / combine geometry (locating cut points on the
+   * outline, matching corners across a union), derived from the shapes involved.
+   */
+  private static shapeTol(loops: Vec2[][]): number {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const l of loops) for (const p of l) {
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    }
+    const diag = Number.isFinite(minX) ? Math.hypot(maxX - minX, maxY - minY) : 0;
+    return Math.max(VERTEX_LINK_EPS, diag * 1e-7);
+  }
+
+  /**
+   * The editable outline the split / combine tools operate on: the control polygon of a
+   * fillet-mode body with its effective per-corner radii — or, for an offset-mode body
+   * (whose rounded shape is *larger* than its control polygon), the sampled outline
+   * **baked** as sharp corners (radius 0 everywhere). Holes likewise (an offset hole —
+   * a disk — bakes to its sampled loop). World coordinates.
+   */
+  private editableOutline(body: Body): {
+    outer: { p: Vec2; rad: number }[];
+    radius: number;
+    holes: { control: { p: Vec2; rad: number }[]; radius: number; baked: boolean }[];
+  } {
+    const baked = body.round === "offset";
+    const outerRadii = this.bodyCornerRadii(body);
+    const outer = baked
+      ? this.bodyWorldVerts(body).map((p) => ({ p, rad: 0 }))
+      : this.bodyControlWorld(body).map((p, i) => ({ p, rad: outerRadii[i] }));
+    const sampledHoles = this.bodyHolesWorld(body);
+    const holes = (body.holes ?? []).map((h, hi) => {
+      if (h.round === "offset") {
+        return { control: sampledHoles[hi].map((p) => ({ p, rad: 0 })), radius: 0, baked: true };
+      }
+      const radii = this.bodyCornerRadii(body, hi);
+      return {
+        control: this.bodyHoleControlWorld(body, hi).map((p, i) => ({ p, rad: radii[i] })),
+        radius: h.radius,
+        baked: false,
+      };
+    });
+    return { outer, radius: baked ? 0 : body.radius, holes };
+  }
+
+  /** Per-corner override list for `addBody` / `Body.radii`: null where the corner uses the default. */
+  private static overrides(rads: number[], def: number): (number | null)[] {
+    return rads.map((r) => (Math.abs(r - def) < 1e-12 ? null : r));
+  }
+
+  /**
+   * Split a body in two along `cut` — a world-space polyline whose first and last points
+   * lie on the body's outer outline (on an edge, or exactly on a corner; the caller
+   * projects the clicks there) and whose interior points lie inside the body. The
+   * outline is cut at both ends and each side becomes a body: the original keeps its
+   * id (side A), a new body takes the other side (side B — inserted right after A in the
+   * z-order, same colour / grounded flag / group). Corners keep their radii; the two cut
+   * points and the path vertices start sharp. An offset-mode body is baked first (see
+   * `editableOutline`). Holes go to the side containing them (a cut through a hole is
+   * rejected); joints go to the side containing them (a joint on the cut line stays with
+   * A); a rail or motor whose two joints end up on different sides is dropped;
+   * measurement / sketch refs to surviving corners and holes remap, refs on the two cut
+   * edges are pruned. Component-instance bodies are refused.
+   */
+  splitBody(bodyId: number, cut: Vec2[]): SplitResult {
+    const body = this.getBody(bodyId);
+    if (!body) return { ok: false, reason: "The body no longer exists." };
+    if (this.instanceOfBody(bodyId)) {
+      return { ok: false, reason: "This body belongs to a component instance — edit the definition to split it." };
+    }
+    if (cut.length < 2) return { ok: false, reason: "A cut needs a start and an end on the outline." };
+    const shape = this.editableOutline(body);
+    const ctrl = shape.outer;
+    const n = ctrl.length;
+    const poly = ctrl.map((c) => c.p);
+    const tol = Math.max(Scene.shapeTol([poly]) * 100, VERTEX_LINK_EPS);
+
+    // Locate an end point on the outline: a corner when within tolerance, else its
+    // projection onto the nearest edge (must be within tolerance of the outline).
+    type Hit = { vertex: number } | { edge: number; t: number; p: Vec2 };
+    const locate = (q: Vec2): Hit | null => {
+      let bestV = -1, bestVD = tol;
+      for (let i = 0; i < n; i++) {
+        const d = dist(q, poly[i]);
+        if (d < bestVD) { bestVD = d; bestV = i; }
+      }
+      if (bestV >= 0) return { vertex: bestV };
+      let best: Hit | null = null, bestD = tol;
+      for (let i = 0; i < n; i++) {
+        const a = poly[i], b = poly[(i + 1) % n];
+        const ab = sub(b, a);
+        const l2 = lenSq(ab);
+        if (l2 < 1e-18) continue;
+        const t = Math.max(0, Math.min(1, dot(sub(q, a), ab) / l2));
+        const p = add(a, scale(ab, t));
+        const d = dist(q, p);
+        if (d < bestD) { bestD = d; best = { edge: i, t, p }; }
+      }
+      return best;
+    };
+    const hS = locate(cut[0]);
+    const hE = locate(cut[cut.length - 1]);
+    if (!hS || !hE) return { ok: false, reason: "The cut must start and end on the body's outline." };
+    const pS = "vertex" in hS ? poly[hS.vertex] : hS.p;
+    const pE = "vertex" in hE ? poly[hE.vertex] : hE.p;
+    if (dist(pS, pE) <= tol) return { ok: false, reason: "The cut starts and ends at the same point." };
+    const interior = cut.slice(1, -1);
+
+    // --- validate the cut path against the outline and the holes ---
+    const path = [pS, ...interior, pE];
+    for (const q of interior) {
+      if (!pointInPolygon(q, poly)) return { ok: false, reason: "The cut leaves the body." };
+    }
+    for (let k = 0; k + 1 < path.length; k++) {
+      const a = path[k], b = path[k + 1];
+      if (dist(a, b) <= tol) return { ok: false, reason: "The cut has a zero-length segment." };
+      for (let i = 0; i < n; i++) {
+        if (segmentsCross(a, b, poly[i], poly[(i + 1) % n])) {
+          return { ok: false, reason: "The cut crosses the body's outline." };
+        }
+      }
+      // A segment lying along the outline (or outside a concave part) has its midpoint
+      // outside/on the boundary; the end segments touch the outline at one point only.
+      const mid = scale(add(a, b), 0.5);
+      if (!pointInPolygon(mid, poly)) return { ok: false, reason: "The cut runs outside the body." };
+      for (let m = k + 2; m + 1 < path.length; m++) {
+        if (segmentsCross(a, b, path[m], path[m + 1])) return { ok: false, reason: "The cut crosses itself." };
+      }
+    }
+    const holeLoops = this.bodyHolesWorld(body);
+    for (const loop of holeLoops) {
+      for (let k = 0; k + 1 < path.length; k++) {
+        const a = path[k], b = path[k + 1];
+        for (let i = 0; i < loop.length; i++) {
+          const ha = loop[i], hb = loop[(i + 1) % loop.length];
+          if (segmentsCross(a, b, ha, hb) || pointOnSegment(a, ha, hb, tol) || pointOnSegment(b, ha, hb, tol)) {
+            return { ok: false, reason: "The cut runs through a hole — route it around (a cut must start and end on the outer outline)." };
+          }
+        }
+      }
+      for (const q of path) {
+        if (pointInPolygon(q, loop)) return { ok: false, reason: "The cut runs through a hole." };
+      }
+    }
+
+    // --- build the two loops (entries remember their original corner for ref remapping) ---
+    type Entry = { p: Vec2; orig: number | null; rad: number };
+    const P: Entry[] = [];
+    let iS = -1, iE = -1;
+    for (let i = 0; i < n; i++) {
+      if ("vertex" in hS && hS.vertex === i) iS = P.length;
+      if ("vertex" in hE && hE.vertex === i) iE = P.length;
+      P.push({ p: poly[i], orig: i, rad: ctrl[i].rad });
+      const inserts: { t: number; which: "S" | "E"; p: Vec2 }[] = [];
+      if ("edge" in hS && hS.edge === i) inserts.push({ t: hS.t, which: "S", p: hS.p });
+      if ("edge" in hE && hE.edge === i) inserts.push({ t: hE.t, which: "E", p: hE.p });
+      inserts.sort((x, y) => x.t - y.t);
+      for (const ins of inserts) {
+        if (ins.which === "S") iS = P.length; else iE = P.length;
+        P.push({ p: ins.p, orig: null, rad: 0 });
+      }
+    }
+    const m = P.length;
+    // The cut points are sharp on both sides (a corner cut in two keeps no fillet).
+    const cutEntry = (e: Entry): Entry => ({ p: e.p, orig: e.orig, rad: 0 });
+    const walk = (from: number, to: number): Entry[] => {
+      const out: Entry[] = [];
+      let i = from;
+      for (let guard = 0; guard <= m; guard++) {
+        out.push(i === from || i === to ? cutEntry(P[i]) : P[i]);
+        if (i === to) break;
+        i = (i + 1) % m;
+      }
+      return out;
+    };
+    const inner = interior.map((p): Entry => ({ p, orig: null, rad: 0 }));
+    const loopA: Entry[] = [...walk(iS, iE), ...inner.slice().reverse()];
+    const loopB: Entry[] = [...walk(iE, iS), ...inner];
+    const areaTotal = Math.abs(polygonArea(poly));
+    for (const l of [loopA, loopB]) {
+      if (l.length < 3 || Math.abs(polygonArea(l.map((e) => e.p))) < 1e-6 * areaTotal) {
+        return { ok: false, reason: "One side of the cut has no area — the cut runs along the outline." };
+      }
+    }
+    const ptsA = loopA.map((e) => e.p);
+    const ptsB = loopB.map((e) => e.p);
+
+    // --- holes: each to the side that contains it ---
+    const holesA: number[] = [], holesB: number[] = [];
+    holeLoops.forEach((loop, hi) => (pointInPolygon(loop[0], ptsA) ? holesA : holesB).push(hi));
+    // Holes carry over unchanged — their own editable spec (a disk stays a 1-point disk).
+    const holeSpec = (hi: number): Exclude<HoleSpec, Vec2[]> => {
+      const h = body.holes![hi];
+      return {
+        control: this.bodyHoleControlWorld(body, hi),
+        radius: h.radius,
+        radii: h.radii ? [...h.radii] : undefined,
+        round: h.round,
+      };
+    };
+
+    // bodyPoint refs on this body: remember world positions to re-anchor after the reshape.
+    const bodyPointWorlds: { ref: { bodyId: number; local: Vec2 }; world: Vec2 }[] = [];
+    for (const mm of this.measurements) {
+      for (const ref of [mm.refA, mm.refB]) {
+        if (ref.kind === "bodyPoint" && ref.bodyId === bodyId) {
+          bodyPointWorlds.push({ ref, world: add(body.pos, rotate(ref.local, body.angle)) });
+        }
+      }
+    }
+
+    // --- side B: a new body right after A in the z-order ---
+    const def = shape.radius;
+    const bBody = this.addBody(
+      ptsB, def, "fillet", holesB.map(holeSpec), Scene.overrides(loopB.map((e) => e.rad), def)
+    );
+    bBody.color = body.color;
+    bBody.grounded = body.grounded;
+    this.bodies = this.bodies.filter((b) => b !== bBody);
+    this.bodies.splice(this.bodies.indexOf(body) + 1, 0, bBody);
+
+    // --- joints: by containment (on the cut line → A) ---
+    const attached = this.joints.filter((j) => j.bodyId === bodyId);
+    const ownJoints = new Set(attached.map((j) => j.id));
+    for (const j of attached) {
+      const w = this.jointWorld(j);
+      const onCut = path.some((_, k) => k + 1 < path.length && pointOnSegment(w, path[k], path[k + 1], tol));
+      if (onCut || pointInPolygon(w, ptsA)) continue;
+      j.bodyId = bBody.id;
+      j.local = rotate(sub(w, bBody.pos), -bBody.angle);
+    }
+
+    // --- side A: reshape the original in place (joints already sorted out) ---
+    const toLocal = (p: Vec2): Vec2 => rotate(sub(p, body.pos), -body.angle);
+    body.round = "fillet";
+    body.radius = def;
+    body.controlLocal = ptsA.map(toLocal);
+    const ovA = Scene.overrides(loopA.map((e) => e.rad), def);
+    if (ovA.some((r) => r !== null)) body.radii = ovA; else delete body.radii;
+    const newHolesA: BodyHole[] = holesA.map((hi) => {
+      const spec = holeSpec(hi);
+      const hole: BodyHole = { controlLocal: spec.control.map(toLocal), radius: spec.radius ?? 0 };
+      if (spec.round) hole.round = spec.round;
+      if (spec.radii && spec.radii.some((r) => r !== null)) hole.radii = spec.radii;
+      return hole;
+    });
+    if (newHolesA.length) body.holes = newHolesA; else { delete body.holes; delete body.holesLocal; }
+    this.rebuildBody(body);
+
+    // --- constraints that needed both joints on one body ---
+    for (const c of [...this.constraints]) {
+      if (c.kind === "slider" && ownJoints.has(c.railA) && ownJoints.has(c.railB)) {
+        if (this.getJoint(c.railA)!.bodyId !== this.getJoint(c.railB)!.bodyId) this.removeConstraint(c.id);
+      } else if (c.kind === "motor" && c.bodyId === bodyId) {
+        const pb = this.getJoint(c.pivotJointId)?.bodyId;
+        const cb = this.getJoint(c.crankJointId)?.bodyId;
+        if (pb === undefined || pb === null || pb !== cb) this.removeConstraint(c.id);
+        else c.bodyId = pb;
+      }
+    }
+
+    // --- measurement / sketch refs ---
+    const vertexMap = new Map<number, { bodyId: number; index: number }>();
+    const edgeMap = new Map<number, { bodyId: number; index: number }>();
+    for (const [loop, owner] of [[loopA, body], [loopB, bBody]] as [Entry[], Body][]) {
+      loop.forEach((e, i) => {
+        if (e.orig !== null && !vertexMap.has(e.orig)) vertexMap.set(e.orig, { bodyId: owner.id, index: i });
+        const nx = loop[(i + 1) % loop.length];
+        if (e.orig !== null && nx.orig === (e.orig + 1) % n && !edgeMap.has(e.orig)) {
+          edgeMap.set(e.orig, { bodyId: owner.id, index: i });
+        }
+      });
+    }
+    const holeMap = new Map<number, { bodyId: number; hole: number }>();
+    holesA.forEach((hi, k) => holeMap.set(hi, { bodyId: body.id, hole: k }));
+    holesB.forEach((hi, k) => holeMap.set(hi, { bodyId: bBody.id, hole: k }));
+    const remap = (ref: MeasureRef | null): boolean => {
+      if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) return true;
+      if (ref.hole !== undefined) {
+        const h = holeMap.get(ref.hole);
+        if (!h) return false;
+        ref.bodyId = h.bodyId;
+        ref.hole = h.hole;
+        return true;
+      }
+      const hit = (ref.kind === "vertex" ? vertexMap : edgeMap).get(ref.index);
+      if (!hit) return false;
+      ref.bodyId = hit.bodyId;
+      ref.index = hit.index;
+      return true;
+    };
+    this.measurements = this.measurements.filter((mm) => remap(mm.refA) && remap(mm.refB));
+    this.sketch = this.sketch.filter((c) => remap(c.refA) && remap(c.refB));
+    for (const { ref, world } of bodyPointWorlds) {
+      const owner = pointInPolygon(world, ptsA) ? body : bBody;
+      ref.bodyId = owner.id;
+      ref.local = rotate(sub(world, owner.pos), -owner.angle);
+    }
+    this.pruneMeasurements();
+    this.pruneSketch();
+
+    const g = this.groupOf(bodyId);
+    if (g) g.bodyIds.push(bBody.id);
+    return { ok: true, a: body, b: bBody };
+  }
+
+  /**
+   * Combine two or more bodies into one: the first id survives (keeps its id, colour and
+   * z-position) and takes the polygon **union** of every body's editable outline (see
+   * `editableOutline`; offset-mode bodies are baked). Corners that survive unchanged keep
+   * their radii, new intersection corners are sharp; holes not covered by other material
+   * stay (partially covered ones shrink; a region the union encloses becomes a new
+   * hole), and an untouched hole keeps its exact editable shape (a disk stays a disk).
+   * Joints of the absorbed bodies re-attach to the survivor; pins / welds *between* the
+   * combined bodies are removed (they'd be intra-body); motors move over; rails stay.
+   * Groups touched are merged (the result grounded if any input was). Refs to surviving
+   * corners remap, others are pruned.
+   * Rejected when the bodies don't all connect (overlap or share an edge), touch only at
+   * a point, or include component-instance material.
+   */
+  combineBodies(ids: number[]): CombineResult {
+    const bodies: Body[] = [];
+    for (const id of ids) {
+      const b = this.getBody(id);
+      if (b && !bodies.includes(b)) bodies.push(b);
+    }
+    if (bodies.length < 2) return { ok: false, reason: "Select at least two bodies to combine." };
+    if (bodies.some((b) => this.instanceOfBody(b.id))) {
+      return { ok: false, reason: "Component instances can't be combined — edit the definition, or fork the instance first." };
+    }
+    const shapes = bodies.map((b) => this.editableOutline(b));
+    const regions: PolyRegion[] = shapes.map((s) => ({
+      outer: s.outer.map((c) => c.p),
+      holes: s.holes.map((h) => h.control.map((c) => c.p)),
+    }));
+    const tol = Scene.shapeTol(regions.flatMap((r) => [r.outer, ...r.holes])) * 10;
+    const union = unionRegions(regions);
+    if (!union) return { ok: false, reason: "The bodies have no area to combine." };
+    if (union.pinched) {
+      return { ok: false, reason: "The bodies touch only at a point — the combined outline would pinch there. Overlap them, or share an edge." };
+    }
+    if (union.regions.length > 1) {
+      // Which bodies sit apart from the main piece? Each body is located by a point
+      // just inside its first edge (its own vertices lie on the union boundary).
+      const pieceOf = (r: PolyRegion): number => {
+        const a = r.outer[0], b = r.outer[1];
+        const d = normalize(sub(b, a));
+        const mid = scale(add(a, b), 0.5);
+        const off = Math.max(tol, dist(a, b) * 1e-4);
+        const probe = [add(mid, scale(perp(d), off)), sub(mid, scale(perp(d), off))]
+          .find((q) => pointInPolygon(q, r.outer)) ?? mid;
+        return union.regions.findIndex((u) => pointInPolygon(probe, u.outer));
+      };
+      const counts = new Map<number, number>();
+      const pieces = regions.map(pieceOf);
+      for (const p of pieces) counts.set(p, (counts.get(p) ?? 0) + 1);
+      const main = [...counts.entries()].sort((x, y) => y[1] - x[1])[0][0];
+      const apart = pieces.filter((p) => p !== main).length;
+      return {
+        ok: false,
+        reason: `${apart === 1 ? "One body doesn't" : `${apart} bodies don't`} touch the rest — bodies must overlap or share an edge to combine (${union.regions.length} separate pieces).`,
+      };
+    }
+    const result = union.regions[0];
+    const survivor = bodies[0];
+    const absorbed = bodies.slice(1);
+
+    // --- radii: a result corner that is an unchanged input corner keeps that radius ---
+    const corners: { p: Vec2; prev: Vec2; next: Vec2; rad: number }[] = [];
+    for (const s of shapes) {
+      for (const loop of [s.outer, ...s.holes.map((h) => h.control)]) {
+        const k = loop.length;
+        if (k < 3) continue;
+        loop.forEach((c, i) => corners.push({
+          p: c.p, prev: loop[(i + k - 1) % k].p, next: loop[(i + 1) % k].p, rad: c.rad,
+        }));
+      }
+    }
+    const sameDir = (a: Vec2, b: Vec2): boolean => {
+      const u = normalize(a), v = normalize(b);
+      return dot(u, v) > 0 && Math.abs(cross(u, v)) < 1e-6;
+    };
+    const radiiOf = (loop: Vec2[]): number[] =>
+      loop.map((p, i) => {
+        const prev = loop[(i + loop.length - 1) % loop.length];
+        const next = loop[(i + 1) % loop.length];
+        for (const c of corners) {
+          if (dist(c.p, p) > tol) continue;
+          const fwd = sameDir(sub(next, p), sub(c.next, c.p)) && sameDir(sub(prev, p), sub(c.prev, c.p));
+          const rev = sameDir(sub(next, p), sub(c.prev, c.p)) && sameDir(sub(prev, p), sub(c.next, c.p));
+          if (fwd || rev) return c.rad;
+        }
+        return 0;
+      });
+
+    // --- holes: an untouched input hole keeps its exact editable spec ---
+    const sameLoop = (a: Vec2[], b: Vec2[]): boolean =>
+      a.length === b.length && a.every((p) => b.some((q) => dist(p, q) <= tol));
+    type HoleOrigin = { bodyId: number; hole: number };
+    type Spec = Exclude<HoleSpec, Vec2[]>;
+    const holeSpecs: { spec: Spec; origin: HoleOrigin | null }[] = result.holes.map((loop) => {
+      for (let bi = 0; bi < bodies.length; bi++) {
+        const b = bodies[bi];
+        for (let hi = 0; hi < shapes[bi].holes.length; hi++) {
+          const h = shapes[bi].holes[hi];
+          if (!sameLoop(loop, h.control.map((c) => c.p))) continue;
+          const src = b.holes![hi];
+          const control = h.baked ? this.bodyHoleControlWorld(b, hi) : h.control.map((c) => c.p);
+          return {
+            spec: { control, radius: src.radius, radii: src.radii ? [...src.radii] : undefined, round: src.round },
+            origin: { bodyId: b.id, hole: hi },
+          };
+        }
+      }
+      return { spec: { control: loop, radius: 0, radii: Scene.overrides(radiiOf(loop), 0) }, origin: null };
+    });
+
+    // --- joints of the absorbed bodies move to the survivor (world positions kept) ---
+    const moved = new Set<number>();
+    for (const b of absorbed) {
+      for (const j of this.joints) {
+        if (j.bodyId !== b.id) continue;
+        const w = this.jointWorld(j);
+        j.bodyId = survivor.id;
+        j.local = rotate(sub(w, survivor.pos), -survivor.angle);
+        moved.add(j.id);
+      }
+    }
+    // bodyPoint refs on any input: remember their world positions to re-anchor after.
+    const bodyPoints: { ref: { bodyId: number; local: Vec2 }; world: Vec2 }[] = [];
+    const inputIds = new Set(bodies.map((b) => b.id));
+    for (const mm of this.measurements) {
+      for (const ref of [mm.refA, mm.refB]) {
+        if (ref.kind === "bodyPoint" && inputIds.has(ref.bodyId)) {
+          const b = this.getBody(ref.bodyId)!;
+          bodyPoints.push({ ref, world: add(b.pos, rotate(ref.local, b.angle)) });
+        }
+      }
+    }
+    // Vertex/edge refs: remember world geometry of the referenced corners to match after.
+    type RefRec = { ref: MeasureRef & { kind: "vertex" | "edge" }; a: Vec2; b: Vec2 | null; origin: HoleOrigin | null };
+    const refRecs: RefRec[] = [];
+    const record = (ref: MeasureRef | null): void => {
+      if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || !inputIds.has(ref.bodyId)) return;
+      const b = this.getBody(ref.bodyId)!;
+      const ctrl = this.controlListOf(b, ref.hole ?? null);
+      if (!ctrl || ref.index >= ctrl.length) return;
+      const w = (i: number) => add(b.pos, rotate(ctrl[i % ctrl.length], b.angle));
+      refRecs.push({
+        ref,
+        a: w(ref.index),
+        b: ref.kind === "edge" ? w(ref.index + 1) : null,
+        origin: ref.hole !== undefined ? { bodyId: ref.bodyId, hole: ref.hole } : null,
+      });
+    };
+    for (const mm of this.measurements) { record(mm.refA); record(mm.refB); }
+    for (const c of this.sketch) { record(c.refA); record(c.refB); }
+
+    // --- survivor takes the union ---
+    const def = shapes[0].radius;
+    const toLocal = (p: Vec2): Vec2 => rotate(sub(p, survivor.pos), -survivor.angle);
+    survivor.round = "fillet";
+    survivor.radius = def;
+    survivor.controlLocal = result.outer.map(toLocal);
+    const ov = Scene.overrides(radiiOf(result.outer), def);
+    if (ov.some((r) => r !== null)) survivor.radii = ov; else delete survivor.radii;
+    const holes: BodyHole[] = holeSpecs.map(({ spec }) => {
+      const hole: BodyHole = { controlLocal: spec.control.map(toLocal), radius: Math.max(0, spec.radius ?? 0) };
+      if (spec.round) hole.round = spec.round;
+      if (spec.radii && spec.radii.length === spec.control.length && spec.radii.some((r) => r !== null)) {
+        hole.radii = [...spec.radii];
+      }
+      return hole;
+    });
+    if (holes.length) survivor.holes = holes; else { delete survivor.holes; delete survivor.holesLocal; }
+    survivor.grounded = bodies.some((b) => b.grounded);
+    this.rebuildBody(survivor);
+
+    // --- constraints: motors follow their body; pins now internal to the survivor go ---
+    for (const c of [...this.constraints]) {
+      if (c.kind === "motor" && absorbed.some((b) => b.id === c.bodyId)) c.bodyId = survivor.id;
+      if (c.kind === "pin") {
+        const a = this.getJoint(c.jointA), b = this.getJoint(c.jointB);
+        if (a && b && a.bodyId === survivor.id && b.bodyId === survivor.id && (moved.has(a.id) || moved.has(b.id))) {
+          this.removeConstraint(c.id);
+        }
+      }
+    }
+
+    // --- groups: merge everything touched around the survivor ---
+    const absorbedIds = new Set(absorbed.map((b) => b.id));
+    const touched = bodies.map((b) => this.groupOf(b.id)).filter((g): g is BodyGroup => !!g);
+    if (touched.length) {
+      const gb = new Set<number>([survivor.id]);
+      const gj = new Set<number>();
+      for (const g of touched) {
+        g.bodyIds.forEach((id) => { if (!absorbedIds.has(id)) gb.add(id); });
+        g.jointIds.forEach((id) => gj.add(id));
+      }
+      this.groups = this.groups.filter((g) => !touched.includes(g));
+      if (gb.size + gj.size >= 2) this.addGroup([...gb], [...gj]);
+    }
+
+    // --- drop the absorbed bodies (their joints already moved) ---
+    this.bodies = this.bodies.filter((b) => !absorbedIds.has(b.id));
+
+    // --- refs: match recorded world geometry against the new outline ---
+    const outerW = this.bodyControlWorld(survivor);
+    const holeW = (survivor.holes ?? []).map((_, hi) => this.bodyHoleControlWorld(survivor, hi));
+    const findVertex = (p: Vec2): { hole: number | null; index: number } | null => {
+      const i0 = outerW.findIndex((q) => dist(p, q) <= tol);
+      if (i0 >= 0) return { hole: null, index: i0 };
+      for (let hi = 0; hi < holeW.length; hi++) {
+        const i = holeW[hi].findIndex((q) => dist(p, q) <= tol);
+        if (i >= 0) return { hole: hi, index: i };
+      }
+      return null;
+    };
+    const ok = new Set<MeasureRef>();
+    for (const rec of refRecs) {
+      const { ref } = rec;
+      // A ref on a hole carried over unchanged keeps its index (a disk's centre isn't on the loop).
+      const kept = rec.origin
+        ? holeSpecs.findIndex((h) => h.origin && h.origin.bodyId === rec.origin!.bodyId && h.origin.hole === rec.origin!.hole)
+        : -1;
+      if (kept >= 0) {
+        ref.bodyId = survivor.id;
+        ref.hole = kept;
+        ok.add(ref);
+        continue;
+      }
+      const va = findVertex(rec.a);
+      if (!va) continue;
+      if (ref.kind === "edge") {
+        const loop = va.hole === null ? outerW : holeW[va.hole];
+        const vb = rec.b ? findVertex(rec.b) : null;
+        if (!vb || vb.hole !== va.hole) continue;
+        const L = loop.length;
+        let index: number;
+        if ((va.index + 1) % L === vb.index) index = va.index;
+        else if ((vb.index + 1) % L === va.index) index = vb.index;
+        else continue;
+        ref.bodyId = survivor.id;
+        ref.index = index;
+      } else {
+        ref.bodyId = survivor.id;
+        ref.index = va.index;
+      }
+      if (va.hole === null) delete ref.hole; else ref.hole = va.hole;
+      ok.add(ref);
+    }
+    const stale = new Set<MeasureRef>(refRecs.map((r) => r.ref).filter((r) => !ok.has(r)));
+    this.measurements = this.measurements.filter((mm) => !stale.has(mm.refA) && !stale.has(mm.refB));
+    this.sketch = this.sketch.filter((c) => !stale.has(c.refA) && !(c.refB && stale.has(c.refB)));
+    for (const { ref, world } of bodyPoints) {
+      ref.bodyId = survivor.id;
+      ref.local = rotate(sub(world, survivor.pos), -survivor.angle);
+    }
+    this.pruneMeasurements();
+    this.pruneSketch();
+    this.pruneGroups();
+    this.pruneInstances();
+    return { ok: true, body: survivor };
   }
 
   /**
