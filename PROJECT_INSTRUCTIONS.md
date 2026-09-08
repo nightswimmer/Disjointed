@@ -318,7 +318,9 @@ its own Phase-B unit keyed by the **negated pin id** (like slider locks use nega
 ids), solved by a **direct angular projection** — the two bodies (or groups) rotate about
 the weld point, split by inverse inertia about it (a fixed side is one-sided) — after the
 first phantom-pair implementation converged pathologically slowly (see the bug list: drags
-could exhaust the cleanup budget and falsely break the assembly). The same drag-yield bug
+could exhaust the cleanup budget and falsely break the assembly). (That projection was in
+turn replaced by the **weld-composite solver** — welds no longer iterate at all; see its
+paragraph below.) The same drag-yield bug
 hunt also made **slider locks flip-proof**: the lock error is now the **wrapped relative
 angle** (unique zero — the old phantom-on-line `sin` error was also satisfied by a 180°
 flip) enforced by the same angular projection (rider unit vs rail unit about the rider
@@ -347,6 +349,29 @@ and line+line corrections **signed** in both solvers, so a fast one-frame drag p
 partner can never flip the two sides through each other (direct point-point distances
 have no side by nature — a pure distance is free to rotate). New test script
 `scripts/pose-dims.ts` (36 checks).
+**Weld-composite solver (no format change)**: welds are no longer solved iteratively —
+`mergeWeldComposites` (solver.ts) runs at the top of every solve and **merges each weld's
+two sides into one rigid composite** via union-find over rigid units (lone bodies and/or
+permanent groups), published into the same per-solve `groupCtx` the groups use — so a
+welded chain *is* a group as far as every solver mechanism is concerned (combined
+mass/inertia, whole-unit impulses, intra-unit pins inert, rails carried across welded
+bodies, fixed when any member is grounded/frozen). Assembly is an **exact snap**, not
+convergence: each weld edge rotates the less-anchored side about its weld joint to the
+baseline angle and translates the pin closed (deterministic; a numerical no-op on
+already-assembled frames, which keeps welds exact forever). `solveWeld` and the
+per-sweep / Phase-B weld units are gone; a weld that genuinely can't hold — between two
+independently fixed units, or a redundant cycle-closing weld the tree assembly can't
+satisfy — is caught by `weldConflictBreaks` (pin gap + angular error via the kept
+`weldPhantoms` metric) and returned as a deterministic red-line break without burning
+solver budget. This fixed the welded-chain meltdown: a grounded-base + revolute + N-bar
+welded chain used to exhaust the 1000-sweep cleanup cap every frame (100% CPU) and
+flicker through Phase-B false breaks on every mouse move; it now converges in ~2 cleanup
+sweeps with zero relative drift. Side effects: a rail whose two joints sit on different
+welded bodies is now a valid moving rail; a plain revolute pin between two bodies welded
+together through another path is inert (same semantics as inside permanent groups); and
+welds drawn open snap closed instantly at sim entry / rigid-drag start instead of being
+pulled together over frames. `scripts/welds.ts` grew to 26 checks (long chain with
+solver-stats assertions, snap-assembly, impossible weld cycle).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -698,24 +723,38 @@ have no side by nature — a pure distance is free to rotate). New test script
   by the **negated rider id**, so Phase B can disable / Phase C can close a lock
   independently of its rider; a lock on a free rider, a degenerate rail, or a rider rigid
   to the rail unit is inert.
-  **Welds (v18, `PinConstraint.rigid`)**: `weldBaselines` (pin id → the two bodies' angle
-  offsets + a phantom arm length = mean characteristic body radius √(area/π)) is captured
-  lazily by `captureWeldBaselines` next to the lock capture and cleared by the same
-  `resetPoseBaselines()` — a weld locks the relative angle **as drawn**, and one with a
-  free joint on either side has no baseline (plain pin until the joint gains a body).
-  `solveWeld` is the same direct angular projection: both sides' units rotate about the
-  weld point (midpoint of the two joints), split by inverse inertia about it, a fixed side
-  one-sided, both fixed → left for break reporting. `weldPhantoms` is the error metric (two
-  points rigid in the bodies, offset `arm` along the captured shared direction — coincident
-  exactly at the welded angle, so the unit error ≈ `arm·Δangle`). Each weld's orientation
-  is its own `StructuralUnit` keyed by the **negated pin id** (unique — scene ids are
-  positive), disabled/closed independently of the pin itself; a weld inside one rigid unit
-  is inert (`sameRigid`). The first implementation enforced the weld as a phantom **second
-  pin** near the real one — two nearby point-coincidences between the same two bodies
-  condition the rotation so badly that Gauss-Seidel needed hundreds of sweeps in benign
-  poses, and an unreachable drag exhausted `maxCleanupSweeps`, letting Phase B misreport
-  reachable riders/locks as breaks (the "drag pulls the rod off its rail" bug); the
-  angular projection killed both.
+  **Welds (v18, `PinConstraint.rigid`; solver reworked to composites)**: `weldBaselines`
+  (pin id → the two bodies' angle offsets + a phantom arm length = mean characteristic
+  body radius √(area/π)) is captured lazily by `captureWeldBaselines` next to the lock
+  capture and cleared by the same `resetPoseBaselines()` — a weld locks the relative
+  angle **as drawn**, and one with a free joint on either side has no baseline (plain pin
+  until the joint gains a body). Welds are **not solved iteratively**: after baseline
+  capture, `mergeWeldComposites` union-finds the weld graph's rigid units (`WeldUnit`:
+  lone bodies / permanent groups; `findUnit` / `unionUnits`) and **merges each weld's two
+  sides into one composite `RigidGroup`** (synthetic negative id — scene group ids are
+  positive), replacing its members' entries in `groupCtx` — from there the whole solver
+  treats a welded chain exactly like a permanent group (hosts, impulses, `sameRigid`
+  inertness, rails via `railInfo`, ground pooling, `buildFixed` expansion: a ground on
+  one welded body fixes the chain). Each tree edge is **snap-assembled exactly** as it
+  merges: the less-anchored side (fewer grounded/anchored joints, so a revolute-anchored
+  body isn't yanked off its pivot; a fixed side never moves) rotates about its weld joint
+  by the wrapped baseline error and translates the pin closed — deterministic, zero
+  sweeps, and a numerical no-op on later frames (which keeps welds exact forever).
+  Conflict candidates — a weld between two independently **fixed** units, or a redundant
+  **cycle-closing** weld — are merged but not snapped, then verified by
+  `weldConflictBreaks`: pin gap and angular error (via `weldPhantoms`, kept purely as the
+  break *metric*: two points offset `arm` along the captured shared direction, coincident
+  exactly at the welded angle, so the error ≈ `arm·Δangle`) each reported as a red-line
+  break above `breakTol` — deterministic every frame, out of scope under a `SolveFreeze`
+  when both sides are immovable, and never part of residuals / Phase B (the error is
+  constant inside a rigid unit; counting it would burn the cleanup budget on an
+  unfixable gap). A weld inside one pre-existing rigid unit (same body / same permanent
+  group) stays fully inert, exactly like a plain pin there. History: v1 enforced the
+  angle as a phantom **second pin** near the real one (two nearby point-coincidences
+  condition the rotation so badly that benign poses took hundreds of sweeps and drags
+  false-broke — the "rod pops off its rail" bug); v2 replaced it with a direct angular
+  projection per sweep (`solveWeld`), fine for one weld but still one-link-per-sweep on
+  chains — the welded-chain flicker / 100%-CPU bug; both are gone.
   **Grounded bodies** (`fixedBodies` + `fixedGroups`, rebuilt per solve by `buildFixed`):
   every `grounded` body — expanded to whole groups, with the group's locked free joints
   becoming immovable too — is an **immovable fixed host** in `bodyHostAt` / `railInfo` and
@@ -1440,11 +1479,13 @@ Persistence:
   since v18 a **direct angular one**: the rider's rigid unit rotates against the rail's unit
   about the rider point until the *wrapped* relative angle matches the value captured from
   the drawn pose (baselines live in the solver module and are reset by main whenever the
-  drawn layout changes). **Welds** (`rigid` pins, v18) use the same angular projection about
-  the weld point, locking two bodies' relative angle at the drawn value on top of the pin's
-  coincidence. Angular errors are wrapped to [-π, π] with a unique zero, so neither a lock
-  nor a weld can settle into a flipped pose; each is its own break-reportable unit (negated
-  rider id / negated pin id).
+  drawn layout changes). The wrapped error has a unique zero, so a hard drag can't settle a
+  carriage 180° flipped; the lock is its own break-reportable unit (negated rider id).
+  **Welds** (`rigid` pins, v18) don't iterate at all: `mergeWeldComposites` merges the two
+  welded sides into one rigid composite in `groupCtx` (union-find + exact snap-assembly at
+  the drawn relative angle), so a welded chain solves as one body — see the weld section
+  in the solver.ts notes above; an impossible weld surfaces through `weldConflictBreaks`,
+  never through Phase B.
 - **Host abstraction** (`hostFor`): every constraint participant is reduced to a `{ point, pos,
   invMass, invInertia, apply }` host — a body (translate + rotate), a free joint (translate
   only, zero inertia), or a fixed world point (immovable). This unifies pin/ground/slider/driver
@@ -1483,17 +1524,22 @@ Persistence:
   *relative to* a moving (pivoting) rail; save/load keeps `locked` and legacy sliders load
   with none; deleting the rider sheds rider + lock; copy/paste recreates the lock on the
   pasted rider; an impossible lock+ground reports a break with the ground unmoved.
-- **welds.ts** — rigid pins / welds (v18, 17 checks): a welded pair keeps its drawn relative
+- **welds.ts** — rigid pins / welds (v18, 26 checks): a welded pair keeps its drawn relative
   angle under dragging while still moving as one (and the same pin toggled back to revolute
   folds); the baseline re-captures a newly drawn relative angle; a weld to a free joint acts
   as a plain pin; persistence (rigid survives save/load, non-boolean values sanitized away);
   copy/paste carries the flag; an unreachable weld between two fixed bodies reports a break
   naming both joints with neither body moved; component expansion carries the flag and
   un-welding the definition cascades to the instance; the analyzer counts a weld as 3 DOF
-  removed vs a pin's 2; and the **drag-yield regression** — unreachable drags (far
+  removed vs a pin's 2; the **drag-yield regression** — unreachable drags (far
   perpendicular, past the end-stop, both) on a rod locked to a fixed track and welded to a
   second body never report breaks, never pull the rod off the rail line, and never rotate
-  it off its lock (the flip check).
+  it off its lock (the flip check); and the **weld-composite checks** — an 8-bar welded
+  chain hanging off one revolute swings freely with zero breaks, zero relative drift, and
+  a stats-asserted handful of cleanup sweeps (the flicker / 100%-CPU regression), an open
+  weld pin snap-assembles exactly on the first solve while preserving the drawn relative
+  angle, and an unclosable weld cycle reports exactly the cycle weld as a break while the
+  tree welds stay closed and nothing flies.
 - **ground-drag.ts** — drags a joint on a grounded body to far/off-axis/unreachable targets;
   asserts the ground never moves and the joint snaps to the nearest reachable angle.
 - **persistence.ts** — round-trips a scene through `serialize → JSON → load`; asserts counts,
@@ -1798,6 +1844,7 @@ Persistence:
   units about the weld point by the wrapped angular error split by inverse inertia
   (`solveWeld` + `unitAngHost`); worst case dropped from 1000+ sweeps (failed) to ~270
   (converged), benign case 435 → 27. Regression-tested in `scripts/welds.ts`.
+  (Superseded again by the weld-composite solver — see the welded-chain entry below.)
 - **A violently dragged slider carriage could settle 180° flipped.** Pre-existing v17 flaw
   surfaced by the weld work: the lock's phantom-on-the-infinite-rail-line error is
   `(dl/2)·sin(Δ)` — zero at Δ = π too, so a wild drag could tunnel the locked body through
@@ -1822,6 +1869,22 @@ Persistence:
   side in both solvers, side-aware residuals treat a flipped-but-equal-distance pose as
   unsatisfied, and the violated render flags it. Regression-tested with one-frame
   overshoot drags in `scripts/pose-dims.ts`.
+- **A welded chain flickered, jumped and pinned the CPU at 100%.** Body A grounded, a
+  revolute to B, then B–C–D–… all welded: each weld was its own per-sweep unit (pin +
+  angular projection), and Gauss-Seidel propagates a correction only one link per sweep —
+  convergence stalled, every frame exhausted the 1000-sweep cleanup budget (100% CPU),
+  and the leftover residual sent Phase B disabling a *different* "worst" unit each mouse
+  move: flicker, bodies jumping across the screen, impossible-assembly errors on a
+  perfectly solvable scene. The same bodies in a permanent *group* were rock solid —
+  because a group is one rigid composite, not an iteration. Fixed by making welds *be*
+  groups: `mergeWeldComposites` union-finds weld-connected rigid units into per-solve
+  composites with exact snap-assembly at the drawn relative angle (see the
+  weld-composite paragraph in Current status); the old per-sweep weld path (`solveWeld`,
+  negated-pin-id units) is deleted, and impossible welds report through
+  `weldConflictBreaks` instead of Phase B. The 8-bar chain went from a failed 1000-sweep
+  cap every frame to ~2 cleanup sweeps with zero relative drift; the pre-existing
+  drag-yield test tightened for free (max rail offset now exactly 0). Regression-tested
+  in `scripts/welds.ts` (stats-asserted chain, snap-assembly, impossible cycle).
 
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);

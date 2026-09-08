@@ -383,12 +383,16 @@ solved, the solver disables only the genuinely unreachable pins/sliders (never a
 re-solves the rest, then pulls the disabled ones as close as the freedom allows and reports them
 as breaks — so a connected impossible piece doesn't corrupt the parts that can be solved. Rails
 are point-on-line constraints with end-stops; the rail is either a body (which moves) or a
-world-fixed line built from two grounded free joints. An **orientation-locked rider (slider)**
-and a **weld (rigid pin)** each add a direct **angular projection**: the two rigid units rotate
-about the joint until their wrapped relative angle matches the value captured from the drawn
-pose (re-captured whenever the drawn layout changes) — the wrapped error has a unique zero, so
-a hard drag can neither flip a slider carriage 180° nor pull a welded assembly off its
-constraints. Body outlines are
+world-fixed line built from two grounded free joints. An **orientation-locked rider (slider)** adds a
+direct **angular projection**: the rider's rigid unit rotates against the rail's until their
+wrapped relative angle matches the value captured from the drawn pose (re-captured whenever the
+drawn layout changes) — the wrapped error has a unique zero, so a hard drag can't flip a carriage
+180°. **Welds (rigid pins)** don't iterate at all: at the top of every solve, weld-connected
+bodies (and groups) are merged into one **rigid composite**, snap-assembled exactly at the drawn
+relative angle — so a welded chain moves as a single body and converges as fast as a group does,
+no matter how long the chain; only a weld that genuinely can't hold (between two fixed bodies, or
+an unclosable weld loop) is reported as a break. Permanent **groups** use the same mechanism,
+which is why welding and grouping behave identically in simulation. Body outlines are
 generated from a control polygon + corner radius (rounded corners via fillet or outward offset),
 with optional **per-corner radii** overriding the body default; arcs sample at 7.5° per segment.
 The fillet rounds convex and concave (reflex) corners correctly, and splits each edge between its

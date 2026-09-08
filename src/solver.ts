@@ -576,12 +576,15 @@ function captureWeldBaselines(scene: Scene): void {
 }
 
 /**
- * The phantom point pair that enforces one weld: a point rigid in each body, offset `arm`
- * from that body's own weld joint along the direction the shared reference had in the
- * body's frame at capture. The two phantoms coincide exactly when the bodies sit at the
- * welded-in relative angle (and the pin is closed), so driving them coincident locks the
- * relative rotation — the two-pin trick with the second pin synthesized, like slider
- * locks. Returns null when the weld is inert (free joint, missing body, no baseline).
+ * The phantom point pair that *measures* one weld's angular error: a point rigid in each
+ * body, offset `arm` from that body's own weld joint along the direction the shared
+ * reference had in the body's frame at capture. The two phantoms coincide exactly when
+ * the bodies sit at the welded-in relative angle (and the pin is closed). Welds are no
+ * longer solved iteratively (they merge their two sides into one rigid composite — see
+ * `mergeWeldComposites`), so this is only used to report a genuinely impossible weld —
+ * one between two independently fixed units — as a red-line break with sensible
+ * positional endpoints. Returns null when the weld is inert (free joint, missing body,
+ * no baseline).
  */
 function weldPhantoms(
   scene: Scene,
@@ -614,10 +617,16 @@ function rotateBodyAbout(body: Body, p: Vec2, dt: number): void {
   body.angle += dt;
 }
 
-/** Rotate a whole group rigidly about a fixed world point (locked free joints included). */
-function rotateGroupAbout(g: RigidGroup, p: Vec2, dt: number): void {
+/** Rotate a whole rigid unit (bodies + locked free joints) about a fixed world point. */
+function rotateGroupAbout(g: { bodies: Body[]; joints: Joint[] }, p: Vec2, dt: number): void {
   for (const body of g.bodies) rotateBodyAbout(body, p, dt);
   for (const j of g.joints) j.local = add(p, rotate(sub(j.local, p), dt));
+}
+
+/** Translate a whole rigid unit (bodies + locked free joints) by `delta`. */
+function translateUnit(u: { bodies: Body[]; joints: Joint[] }, delta: Vec2): void {
+  for (const body of u.bodies) body.pos = add(body.pos, delta);
+  for (const j of u.joints) j.local = add(j.local, delta);
 }
 
 /** An angular host whose unit is immovable this solve (fixed body/group, world track). */
@@ -657,34 +666,243 @@ function unitAngHost(
 }
 
 /**
- * Project one weld's orientation: rotate the two bodies (or their whole groups) about the
- * weld point until the relative angle matches the captured baseline, the correction split
- * by inverse inertia about that point (a fixed side makes it one-sided). Rotating each
- * side about the shared joint leaves the pin's coincidence untouched, so the angular
- * error dies in one projection instead of leaking through a pair of nearby point
- * constraints — the phantom-pair formulation (see `weldPhantoms`, kept as the error
- * *metric*) converges far too slowly for that: two coincident-ish pins between the same
- * two bodies condition the rotation badly, and a long drag could exhaust the cleanup
- * budget and misreport reachable constraints as breaks.
+ * One side of the weld union-find: a rigid unit (a lone body, or a permanent group's
+ * members) that welds merge into ever-larger composites. `parent` links form the
+ * union-find forest (the root holds the merged member lists); `fixed` marks a unit
+ * containing grounded/frozen material (it can never be snap-moved); `groundCount`
+ * counts grounded/anchored joints on the members — the snap-direction heuristic
+ * prefers moving the less-anchored side so revolute anchors aren't yanked off and
+ * re-converged. `groupId` remembers the permanent group a unit came from, so the
+ * merged composite can replace it in `groupCtx`.
  */
-function solveWeld(scene: Scene, con: PinConstraint, ja: Joint, jb: Joint, relax: number): void {
-  const wb = weldBaselines.get(con.id);
-  if (!wb || ja.bodyId === null || jb.bodyId === null) return;
-  const ba = scene.getBody(ja.bodyId);
-  const bb = scene.getBody(jb.bodyId);
-  if (!ba || !bb) return;
-  const err = wrapAngle(bb.angle + wb.db - (ba.angle + wb.da));
-  if (err === 0) return;
-  // Pivot at the midpoint of the two weld joints (they coincide once the pin is closed).
-  const p = scale(add(scene.jointWorld(ja), scene.jointWorld(jb)), 0.5);
-  const ha = unitAngHost(scene, ja, p);
-  const hb = unitAngHost(scene, jb, p);
-  if (!ha || !hb) return;
-  const w = ha.invI + hb.invI;
-  if (w < 1e-12) return; // both sides immovable — leave the error for break reporting
-  const lambda = (err / w) * relax;
-  ha.rotate(lambda * ha.invI);
-  hb.rotate(-lambda * hb.invI);
+interface WeldUnit {
+  bodies: Body[];
+  joints: Joint[]; // free joints locked to an absorbed permanent group
+  fixed: boolean;
+  groundCount: number;
+  parent: WeldUnit | null;
+  groupId: number | null;
+  merged: boolean; // true on a root once at least one weld merged into it
+}
+
+function findUnit(u: WeldUnit): WeldUnit {
+  let r = u;
+  while (r.parent) r = r.parent;
+  // Path compression: point the chain straight at the root for the next lookup.
+  let c = u;
+  while (c.parent && c.parent !== r) {
+    const next = c.parent;
+    c.parent = r;
+    c = next;
+  }
+  return r;
+}
+
+/** Merge two weld-unit roots; the larger absorbs the smaller's members. */
+function unionUnits(a: WeldUnit, b: WeldUnit): WeldUnit {
+  let big = a;
+  let small = b;
+  if (big.bodies.length + big.joints.length < small.bodies.length + small.joints.length) {
+    big = b;
+    small = a;
+  }
+  small.parent = big;
+  big.bodies.push(...small.bodies);
+  big.joints.push(...small.joints);
+  big.fixed = big.fixed || small.fixed;
+  big.groundCount += small.groundCount;
+  big.merged = true;
+  return big;
+}
+
+/** Counter for synthetic composite ids (negative — scene group ids are positive; reset per solve). */
+let nextCompositeId = -1;
+
+/**
+ * Merge every weld's two sides into one rigid composite — the group mechanism, not
+ * iteration. Runs once at the top of each solve, after baseline capture and before
+ * `buildFixed`:
+ *
+ * 1. Union-find over rigid units (lone bodies / permanent groups) connected by welds
+ *    (rigid pins with a captured baseline — i.e. a body on both ends).
+ * 2. Each tree edge is **snap-assembled** exactly: the less-anchored side rotates about
+ *    its weld joint to the baseline relative angle and translates so the pin closes —
+ *    deterministic, zero sweeps. On later frames the composite is already assembled and
+ *    the snap is a numerical no-op that keeps the weld exact.
+ * 3. The merged composites replace their members' entries in `groupCtx`, so every
+ *    downstream mechanism (hosts, impulses, rails, ground pooling, sameRigid inertness)
+ *    treats a welded chain exactly like a permanent group: one rigid body, no
+ *    per-sweep weld work at all. This is what makes long welded chains converge like
+ *    grouped ones instead of crawling one link per Gauss-Seidel sweep.
+ *
+ * Welds that cannot be assembled are returned as conflict candidates for break
+ * reporting (see `weldConflictBreaks`): an edge between two independently *fixed* units
+ * (still merged — both sides are immovable anyway — but unverifiable by snapping), and
+ * a redundant cycle-closing edge (its pin either already agrees with the tree, or the
+ * drawing is genuinely impossible). A weld inside one pre-existing rigid unit (same
+ * body / same permanent group) stays fully inert, exactly like a plain pin there.
+ */
+function mergeWeldComposites(
+  scene: Scene,
+  freeze: SolveFreeze | undefined,
+  grounded: Set<number>
+): PinConstraint[] {
+  nextCompositeId = -1;
+  const conflicts: PinConstraint[] = [];
+  // Grounded/anchored joints per body (the snap-direction heuristic's inputs).
+  const groundsOnBody = new Map<number, number>();
+  for (const id of grounded) {
+    const j = scene.getJoint(id);
+    if (j && j.bodyId !== null) groundsOnBody.set(j.bodyId, (groundsOnBody.get(j.bodyId) ?? 0) + 1);
+  }
+  const bodyFixed = (b: Body): boolean => b.grounded || freeze?.bodies?.has(b.id) === true;
+  const jointFrozen = (j: Joint): boolean => freeze?.joints?.has(j.id) === true;
+
+  const units = new Map<string, WeldUnit>();
+  const unitOf = (bodyId: number): WeldUnit | null => {
+    const key = rigidKeyOfBody(bodyId);
+    const existing = units.get(key);
+    if (existing) return findUnit(existing);
+    const g = groupCtx.byBody.get(bodyId);
+    let u: WeldUnit;
+    if (g) {
+      u = {
+        bodies: [...g.bodies],
+        joints: [...g.joints],
+        fixed: g.bodies.some(bodyFixed) || g.joints.some(jointFrozen),
+        groundCount:
+          g.bodies.reduce((n, b) => n + (groundsOnBody.get(b.id) ?? 0), 0) +
+          g.joints.reduce((n, j) => n + (grounded.has(j.id) ? 1 : 0), 0),
+        parent: null,
+        groupId: g.id,
+        merged: false,
+      };
+    } else {
+      const body = scene.getBody(bodyId);
+      if (!body) return null;
+      u = {
+        bodies: [body],
+        joints: [],
+        fixed: bodyFixed(body),
+        groundCount: groundsOnBody.get(body.id) ?? 0,
+        parent: null,
+        groupId: null,
+        merged: false,
+      };
+    }
+    units.set(key, u);
+    return u;
+  };
+
+  for (const con of scene.constraints) {
+    if (con.kind !== "pin" || con.rigid !== true) continue;
+    const wb = weldBaselines.get(con.id);
+    if (!wb) continue; // no baseline: a free-joint weld acts as a plain pin
+    const ja = scene.getJoint(con.jointA);
+    const jb = scene.getJoint(con.jointB);
+    if (!ja || !jb || ja.bodyId === null || jb.bodyId === null) continue;
+    // Inside one pre-existing rigid unit (same body / same permanent group) the weld is
+    // inert — the unit is rigid, exactly like a plain pin there.
+    if (rigidKeyOfBody(ja.bodyId) === rigidKeyOfBody(jb.bodyId)) continue;
+    const ua = unitOf(ja.bodyId);
+    const ub = unitOf(jb.bodyId);
+    if (!ua || !ub) continue;
+    const ra = findUnit(ua);
+    const rb = findUnit(ub);
+    if (ra === rb) {
+      // Cycle-closing weld: the tree already rigidified both sides. Verified afterwards.
+      conflicts.push(con);
+      continue;
+    }
+    if (ra.fixed && rb.fixed) {
+      // Two independently fixed sides: nothing may be snapped. Merge (all of it is
+      // immovable anyway) and verify the weld afterwards.
+      unionUnits(ra, rb);
+      conflicts.push(con);
+      continue;
+    }
+    // Snap-assemble: move the less-anchored side so the pin closes at the baseline angle.
+    const moveA = ra.fixed
+      ? false
+      : rb.fixed
+        ? true
+        : ra.groundCount !== rb.groundCount
+          ? ra.groundCount < rb.groundCount
+          : ra.bodies.length + ra.joints.length <= rb.bodies.length + rb.joints.length;
+    const mover = moveA ? ra : rb;
+    const jm = moveA ? ja : jb; // the weld joint riding the moving side
+    const jt = moveA ? jb : ja; // its target twin on the anchored side
+    const bm = scene.getBody(jm.bodyId!)!;
+    const bt = scene.getBody(jt.bodyId!)!;
+    const dm = moveA ? wb.da : wb.db;
+    const dt = moveA ? wb.db : wb.da;
+    const dAng = wrapAngle(bt.angle + dt - (bm.angle + dm));
+    if (dAng !== 0) rotateGroupAbout(mover, scene.jointWorld(jm), dAng);
+    const delta = sub(scene.jointWorld(jt), scene.jointWorld(jm));
+    if (delta.x !== 0 || delta.y !== 0) translateUnit(mover, delta);
+    unionUnits(ra, rb);
+  }
+
+  // Publish the merged composites into groupCtx: absorbed permanent groups drop out,
+  // every member re-indexes to its composite — from here on the solver can't tell a
+  // welded chain from a permanent group.
+  const absorbedGroups = new Set<number>();
+  const roots = new Set<WeldUnit>();
+  for (const u of units.values()) {
+    const r = findUnit(u);
+    if (!r.merged) continue;
+    roots.add(r);
+    if (u.groupId !== null) absorbedGroups.add(u.groupId);
+  }
+  if (roots.size > 0) {
+    if (absorbedGroups.size > 0) {
+      groupCtx.list = groupCtx.list.filter((g) => !absorbedGroups.has(g.id));
+    }
+    for (const root of roots) {
+      const composite: RigidGroup = { id: nextCompositeId--, bodies: root.bodies, joints: root.joints };
+      groupCtx.list.push(composite);
+      for (const b of composite.bodies) groupCtx.byBody.set(b.id, composite);
+      for (const j of composite.joints) groupCtx.byJoint.set(j.id, composite);
+    }
+  }
+  return conflicts;
+}
+
+/**
+ * Turn the conflict-candidate welds that genuinely can't hold into red-line breaks: a
+ * cycle weld whose pin the tree assembly left open, or a weld between two independently
+ * fixed units drawn at the wrong offset/angle. Both sides live in one rigid (or fixed)
+ * unit, so the error is constant — reported directly instead of burning solver sweeps.
+ * A candidate under a scoped solve whose two sides are both immovable is out of scope
+ * (see `SolveFreeze`), matching every other constraint kind.
+ */
+function weldConflictBreaks(
+  scene: Scene,
+  grounded: Set<number>,
+  candidates: PinConstraint[]
+): ConstraintBreak[] {
+  const breaks: ConstraintBreak[] = [];
+  for (const con of candidates) {
+    const ja = scene.getJoint(con.jointA);
+    const jb = scene.getJoint(con.jointB);
+    if (!ja || !jb) continue;
+    if (freezeActive && jointImmovable(ja, grounded) && jointImmovable(jb, grounded)) continue;
+    const a = scene.jointWorld(ja);
+    const b = scene.jointWorld(jb);
+    const gap = len(sub(a, b));
+    if (gap > solverConfig.breakTol) {
+      breaks.push({ a, b, error: gap, joints: [con.jointA, con.jointB] });
+      continue;
+    }
+    const wp = weldPhantoms(scene, con, ja, jb);
+    if (wp) {
+      const err = len(sub(wp.pa, wp.pb));
+      if (err > solverConfig.breakTol) {
+        breaks.push({ a: wp.pa, b: wp.pb, error: err, joints: [con.jointA, con.jointB] });
+      }
+    }
+  }
+  return breaks;
 }
 
 /**
@@ -763,16 +981,13 @@ function sweepStructural(
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
-      // A pin inside one rigid unit (a body, or a group — locked free joints included) is
-      // inert: the unit is rigid, so the pin can't change the members' relative pose.
+      // A pin inside one rigid unit (a body, a group, or a weld composite — locked free
+      // joints included) is inert: the unit is rigid, so the pin can't change the
+      // members' relative pose. Welds always land here: `mergeWeldComposites` joined
+      // their two sides into one composite, so no per-sweep weld work exists at all.
       if (sameRigid(ja, jb)) continue;
       if (!skip.has(con.id)) {
         solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
-      }
-      // A weld's orientation is its own unit keyed by the NEGATED pin id (unique — scene
-      // ids are positive), so Phase B can disable it independently of the pin itself.
-      if (con.rigid === true && !skip.has(-con.id)) {
-        solveWeld(scene, con, ja, jb, relax);
       }
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
@@ -950,27 +1165,15 @@ function eachUnit(
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
-      if (sameRigid(ja, jb)) continue; // intra-unit pin: inert, never an error
+      // Intra-unit pin: inert, never an error. Welds are always intra-unit here (their
+      // sides merged into one composite); an impossible weld is reported separately by
+      // `weldConflictBreaks`, not through the structural units.
+      if (sameRigid(ja, jb)) continue;
       // Scoped solve: a pin neither side of which can move is out of scope (see SolveFreeze).
       if (freezeActive && jointImmovable(ja, grounded) && jointImmovable(jb, grounded)) continue;
       const a = scene.jointWorld(ja);
       const b = scene.jointWorld(jb);
       visit({ id: con.id, a, b, error: len(sub(a, b)), ground: false, joints: [con.jointA, con.jointB] });
-      // A weld's orientation is its own unit under the negated pin id: the two phantom
-      // points that coincide exactly at the welded-in relative angle (see weldPhantoms).
-      if (con.rigid === true) {
-        const wp = weldPhantoms(scene, con, ja, jb);
-        if (wp) {
-          visit({
-            id: -con.id,
-            a: wp.pa,
-            b: wp.pb,
-            error: len(sub(wp.pa, wp.pb)),
-            ground: false,
-            joints: [con.jointA, con.jointB],
-          });
-        }
-      }
     } else if (con.kind === "ground") {
       const j = scene.getJoint(con.joint);
       if (!j) continue;
@@ -1081,16 +1284,11 @@ function settle(
 function applyBroken(scene: Scene, grounded: Set<number>, broken: ReadonlySet<number>, relax: number): void {
   for (const con of scene.constraints) {
     if (con.kind === "pin") {
-      const isBrokenPin = broken.has(con.id);
-      const isBrokenWeld = con.rigid === true && broken.has(-con.id);
-      if (!isBrokenPin && !isBrokenWeld) continue;
+      if (!broken.has(con.id)) continue;
       const ja = scene.getJoint(con.jointA);
       const jb = scene.getJoint(con.jointB);
       if (!ja || !jb) continue;
-      if (isBrokenPin) {
-        solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
-      }
-      if (isBrokenWeld) solveWeld(scene, con, ja, jb, relax);
+      solveCoincident(pinHostFor(scene, ja, grounded), pinHostFor(scene, jb, grounded), relax);
     } else if (con.kind === "slider") {
       const ja = scene.getJoint(con.railA);
       const jb = scene.getJoint(con.railB);
@@ -1202,8 +1400,6 @@ export function solve(
   freeze?: SolveFreeze
 ): ConstraintBreak[] {
   groupCtx = buildGroupCtx(scene); // permanent groups act as rigid composites this solve
-  // Grounded bodies/groups — plus anything a scoped solve freezes — are immovable this solve.
-  buildFixed(scene, freeze);
   freezeActive = freeze !== undefined;
   // Orientation-locked riders and welds without a baseline lock in their current relative
   // angle (main resets the baselines whenever the drawn layout changes, so a new sim
@@ -1213,6 +1409,14 @@ export function solve(
   const grounded = groundedJoints(scene, anchors);
   // Frozen free joints are held exactly where they are: fixed hosts, like grounded ones.
   if (freeze?.joints) for (const id of freeze.joints) grounded.add(id);
+  // Welds merge their two sides into rigid composites (snap-assembled exactly, no
+  // iteration) — a welded chain then solves like a permanent group. Welds that can't
+  // hold (a fixed-to-fixed conflict, an unclosable cycle) come back as candidates.
+  const weldCandidates = mergeWeldComposites(scene, freeze, grounded);
+  // Grounded bodies/groups — plus anything a scoped solve freezes — are immovable this
+  // solve; through the merged composites, a ground on one welded body fixes the chain.
+  buildFixed(scene, freeze);
+  const weldBreaks = weldConflictBreaks(scene, grounded, weldCandidates);
   // Initialise stats: callers that pass `stats` see these zeroed even on early return.
   if (stats) {
     stats.phaseASweeps = 0;
@@ -1249,7 +1453,7 @@ export function solve(
     stats.cleanupSweeps = cleanupSweepsDone;
     stats.finalResidual = postCleanupResidual;
   }
-  if (postCleanupResidual < solverConfig.structuralTol) return []; // everything resolved
+  if (postCleanupResidual < solverConfig.structuralTol) return weldBreaks; // everything else resolved
 
   // Phase B — over-constrained. Greedily disable the worst-violated non-ground unit and
   // re-settle, until the remaining (active) constraints can all be satisfied. Grounds and
@@ -1267,5 +1471,5 @@ export function solve(
   // whatever gap remains as a red-line break.
   closeBroken(scene, grounded, broken, anchors);
   if (stats) stats.finalResidual = structuralResidual(scene, grounded, NONE, anchors);
-  return breaksForBroken(scene, grounded, broken, anchors);
+  return [...weldBreaks, ...breaksForBroken(scene, grounded, broken, anchors)];
 }
