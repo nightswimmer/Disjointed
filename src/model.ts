@@ -35,6 +35,13 @@ import {
  */
 export const VERTEX_LINK_EPS = 1e-6;
 
+/**
+ * Slack for the joint-containment warning (`jointsOutsideBody`): a drag clamps a joint
+ * exactly onto the outline, so boundary points must never count as "outside" — only
+ * float error from the local↔world round-trips needs absorbing.
+ */
+export const CONTAINMENT_WARN_EPS = 1e-6;
+
 /** How a body's `radius` shapes it: round the corners in place, or offset the hull outward. */
 export type RoundMode = "fillet" | "offset";
 
@@ -1433,6 +1440,30 @@ export class Scene {
   /** `p` if it lies inside the body; otherwise the nearest point on the body's outline. */
   clampIntoBody(body: Body, p: Vec2): Vec2 {
     return this.pointInBody(body, p) ? p : closestPointOnPolygon(p, this.bodyWorldVerts(body));
+  }
+
+  /**
+   * Attached joints stranded outside their body's rounded outline (beyond
+   * `CONTAINMENT_WARN_EPS` — a joint clamped exactly onto the edge is fine).
+   * Direct edits can't violate containment (placement and drags clamp), but shape
+   * changes keep joints at their world positions — a component-definition edit
+   * cascading into instances, or a removed control vertex, can leave a joint outside
+   * the new outline. Nothing is moved: the UI flags these for the user to resolve.
+   */
+  jointsOutsideBody(): number[] {
+    const out: number[] = [];
+    const verts = new Map<number, Vec2[]>(); // body id → outline, derived once per body
+    for (const j of this.joints) {
+      if (j.bodyId === null) continue;
+      const body = this.getBody(j.bodyId);
+      if (!body) continue;
+      let poly = verts.get(body.id);
+      if (!poly) verts.set(body.id, (poly = this.bodyWorldVerts(body)));
+      const w = this.jointWorld(j);
+      if (pointInPolygon(w, poly)) continue;
+      if (dist(w, closestPointOnPolygon(w, poly)) > CONTAINMENT_WARN_EPS) out.push(j.id);
+    }
+    return out;
   }
 
   /** Topmost body whose polygon contains the point, or undefined. */

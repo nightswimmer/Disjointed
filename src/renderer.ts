@@ -64,6 +64,12 @@ export interface RenderInput {
   gridVisible: boolean;
   /** Unsatisfiable constraints (impossible assembly): red dotted lines between points that can't meet. */
   breaks: ConstraintBreak[];
+  /**
+   * Draw mode: attached joints stranded outside their body's outline (a component edit
+   * or vertex removal reshaped the body under them) — red fill + dashed red ring, vs
+   * the solid red ring of a sim break.
+   */
+  containmentErrors: Set<number>;
   /** Structural colour palette (light/dark). */
   theme: Theme;
 }
@@ -456,6 +462,9 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       input.activeJoints.includes(j.id) || j.id === selectedJointId || multiJoints.has(j.id);
     const isDriver = input.driverJoint === j.id;
     const isBroken = brokenJoints.has(j.id);
+    // Stranded outside its body's outline (draw mode) — same error red as a break,
+    // but with a dashed ring so the two states read differently.
+    const isOutside = !isBroken && input.containmentErrors.has(j.id);
     // A body-less joint reads as "loose" (muted dashed ring) only while unconstrained;
     // once it rides a slider, defines a (grounded) rail, or is locked to a group (a
     // component chassis point) it's anchored, so it renders like any constrained joint.
@@ -469,13 +478,13 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     if (roles.pinned.has(j.id)) fill = "#4f9dff";
     if (roles.slider.has(j.id)) fill = "#5bd6a6";
     if (roles.grounded.has(j.id)) fill = "#ffd166";
-    if (isBroken) fill = "#ff4d4d"; // unsatisfiable constraint endpoint — overrides role colour
+    if (isBroken || isOutside) fill = "#ff4d4d"; // error red — overrides role colour
 
-    const r = px(isHover || isSelected || isDriver || isBroken ? JOINT_R + 2 : JOINT_R);
+    const r = px(isHover || isSelected || isDriver || isBroken || isOutside ? JOINT_R + 2 : JOINT_R);
     dot(ctx, p, r, fill);
-    ctx.lineWidth = px(isBroken ? 2.5 : 2);
-    ctx.strokeStyle = isBroken
-      ? "#ff4d4d" // unsatisfiable constraint endpoint — red ring matches the break line
+    ctx.lineWidth = px(isBroken || isOutside ? 2.5 : 2);
+    ctx.strokeStyle = isBroken || isOutside
+      ? "#ff4d4d" // error red — a break's ring is solid, a containment error's dashed
       : isDriver
       ? "#ff4d4d"
       : isSelected
@@ -485,8 +494,10 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       : isFree
       ? "#9aa0ac" // free joints get a muted dashed ring
       : theme.surface;
-    // A dashed outline marks a free (body-less) joint — but a broken joint uses a solid red ring.
-    if (isFree && !isSelected && !isDriver && !isBroken) ctx.setLineDash([px(3), px(3)]);
+    // A dashed outline marks a free (body-less) joint — a broken joint uses a solid red
+    // ring, and a containment error a dashed red one.
+    if ((isFree && !isSelected && !isDriver && !isBroken) || isOutside)
+      ctx.setLineDash([px(3), px(3)]);
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.stroke();

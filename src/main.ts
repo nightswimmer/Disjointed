@@ -865,10 +865,30 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   equal: "Click two lines (body edges or rails) to make their lengths equal.",
 };
 
+/**
+ * Attached joints stranded outside their body's outline (a component edit cascading
+ * into instances, or a removed vertex, reshaped the body under them). Recomputed every
+ * frame in draw mode; the renderer paints them red and the hint line warns while any
+ * exist. Nothing is auto-moved — the user drags the joint back in (drags clamp to the
+ * outline) or fixes the shape / definition.
+ */
+let containmentErrors: Set<number> = new Set();
+
+function containmentWarning(): string {
+  const n = containmentErrors.size;
+  if (n === 0 || mode !== "draw") return "";
+  const what = n === 1 ? "1 joint lies outside its body" : `${n} joints lie outside their bodies`;
+  const fix = n === 1 ? "drag it back inside" : "drag them back inside";
+  return `⚠ ${what} (red) — ${fix}, or fix the body / component shape. · `;
+}
+
 function updateHint(): void {
-  if (tool === "measure") hintEl.textContent = HINTS.measure;
-  else if (mode === "sim") hintEl.textContent = HINTS.sim;
-  else hintEl.textContent = tool === null ? HINTS.select : HINTS[tool];
+  const base =
+    tool === "measure" ? HINTS.measure
+    : mode === "sim" ? HINTS.sim
+    : tool === null ? HINTS.select
+    : HINTS[tool];
+  hintEl.textContent = containmentWarning() + base;
 }
 
 // --- toolbar wiring ------------------------------------------------------
@@ -3317,8 +3337,8 @@ const TOOL_KEYS: Record<string, Tool> = {
   j: "joint",
   c: "connect",
   g: "ground",
-  s: "rail", // the rail was called "slider" before v17 — S keeps its muscle memory
-  k: "slider", // the prismatic carriage that rides a rail (S was taken by the rail)
+  s: "slider", // S is the slider itself (the prismatic carriage that rides a rail)
+  k: "rail", // the tracK the sliders ride along (S belongs to the slider)
   r: "rotate",
   l: "guide",
   a: "linearActuator",
@@ -3926,6 +3946,11 @@ function frame(now?: number): void {
   syncPropsPanel();
   syncUnitSelect();
   if (sketchFlash && performance.now() >= sketchFlash.until) sketchFlash = null;
+  // Containment check (draw mode): flag joints a shape change stranded outside their
+  // body. Refresh the hint when the count changes so the warning appears/clears itself.
+  const prevOutside = containmentErrors.size;
+  containmentErrors = mode === "draw" ? new Set(scene.jointsOutsideBody()) : new Set();
+  if (containmentErrors.size !== prevOutside) updateHint();
   render(ctx, {
     scene,
     view,
@@ -3957,6 +3982,7 @@ function frame(now?: number): void {
     gridStep,
     gridVisible,
     breaks: mode === "sim" ? solveBreaks : [],
+    containmentErrors,
     measurements: measurementsView(),
     measureDraft: measureDraftView(),
     sketchGlyphs: sketchGlyphsView(),

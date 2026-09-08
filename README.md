@@ -34,7 +34,7 @@ then drag and watch move.
     is a **pin-in-slot**: it slides along the rail *and* rotates freely.
   - **Slider** — a rider whose rotation is **locked**: it travels along the rail while its body
     keeps its drawn angle relative to the rail (a prismatic joint, in CAD terms) — the way two
-    parts move relative to each other along exactly one axis. Placed with the Slider tool (`K`)
+    parts move relative to each other along exactly one axis. Placed with the Slider tool (`S`)
     on any rail; the locked-in angle is whatever you drew, re-captured every time simulation
     starts. Drawn as a small rail-aligned **carriage rectangle** on the rider.
   - **Linear actuator** — a special rider on a rail that travels back and forth along the rail
@@ -78,8 +78,8 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **rail (or rail node)** and it's automatically attached to that rail as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed rail keeps its ground — the track must stay anchored). |
-| **Rail** | `S` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a rail. Attach riders with Connect / the Joint tool, or sliders with the Slider tool. |
-| **Slider** | `K` | Click a **rail** to add a slider — a rider that travels along the rail **without rotating** (its body keeps the drawn angle relative to the rail). It attaches to the body under the cursor (or stays free until one absorbs it). Click an **existing rider** to toggle its rotation lock on/off. |
+| **Rail** | `K` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a rail. Attach riders with Connect / the Joint tool, or sliders with the Slider tool. |
+| **Slider** | `S` | Click a **rail** to add a slider — a rider that travels along the rail **without rotating** (its body keeps the drawn angle relative to the rail). It attaches to the body under the cursor (or stays free until one absorbs it). Click an **existing rider** to toggle its rotation lock on/off. |
 | **Guideline** | `L` | Click **two points** to place an **infinite construction line**. Each click lands exactly on a joint / body corner / another guide's point (with an automatic **coincident** constraint), projects onto a rail or body edge, or snaps to the grid. See *Construction guidelines* below. |
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `A` | Click a **rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
@@ -233,6 +233,9 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   placement while its parts snap to the definition's layout (**the definition is the pose
   reference**: what you draw inside it is exactly what every instance shows, nested components
   included). Click a breadcrumb (or press **Esc** with nothing selected) to go back out.
+  If a definition edit reshapes a body from under a joint you added **at the assembly level**
+  (the new outline no longer covers it), the joint is flagged **red with a dashed ring** rather
+  than moved — drag it back inside or adjust the definition.
 - The **component browser** lists definitions: rename inline, **＋** inserts an instance (click
   the canvas to place it), **✎** edits, **×** deletes (refused while instances exist).
   Circular references are rejected.
@@ -257,6 +260,10 @@ rectangle**. Once a free joint is attached to a rail it's no longer loose, so it
 dashed ring and shows as a normal (green) rider. While drawing, a constraint whose endpoints
 don't yet touch is drawn as a **dotted connector** so the link still reads as connected:
 **blue** between two pinned joints, and **green** from a rider to the **middle of its rail**.
+A joint stranded **outside its body** — a shape change happened under it, typically a component
+edit cascading into an instance carrying an assembly-level joint — turns **red with a dashed
+ring** and the hint bar warns until it's resolved. Nothing is moved automatically: drag the
+joint back (drags clamp to the outline) or fix the shape / component definition.
 
 **Undo / redo:** `Ctrl/Cmd+Z` undoes, `Ctrl/Cmd+Shift+Z` (or `Ctrl/Cmd+Y`) redoes — covering edits to the drawn layout.
 

@@ -244,6 +244,45 @@ function editDef(scene: Scene, defId: number, mutate: (s: Scene) => void): Set<n
   check("its pin cascaded away too", scene.constraints.filter((c) => c.kind === "pin").length === 0, "0 pins");
 }
 
+// --- containment warning: a def edit stranding an assembly joint is flagged, not moved ----
+{
+  const scene = new Scene();
+  const base = square(scene, 0, 0);
+  scene.toggleBodyGround(base.id);
+  const arm = square(scene, 100, 0);
+  const res = scene.createComponentFromSelection("Widget", [base.id, arm.id])!;
+  const defId = res.def.id;
+  const instArmId = res.instance.bodyMap.find((e) => !e.chassis)!.id;
+
+  // An assembly-level joint on the instance's arm, well inside the ±20 outline.
+  const aj = scene.addJoint(instArmId, { x: 115, y: 0 });
+  check("containment: clean scene reports none", scene.jointsOutsideBody().length === 0, "0 outside");
+
+  // A joint clamped exactly onto the outline (the drag behaviour) must not false-positive.
+  const edge = scene.addJoint(instArmId, { x: 110, y: 0 });
+  scene.moveJoint(edge.id, { x: 500, y: 0 }); // clamps to the outline at x = 120
+  check(
+    "containment: edge-clamped joint is not flagged",
+    scene.jointsOutsideBody().length === 0,
+    `joint at x = ${scene.jointWorld(scene.getJoint(edge.id)!).x}`
+  );
+  scene.removeJoint(edge.id);
+
+  // Shrink the arm in the def: the instance body reshapes under the assembly joint.
+  editDef(scene, defId, (s) => {
+    const armDef = s.bodies.find((b) => !b.grounded)!;
+    s.scaleBody(armDef.id, 0.5); // arm now spans ±10 — world (115, 0) is outside
+  });
+  const outside = scene.jointsOutsideBody();
+  check("containment: stranded joint flagged after cascade", outside.length === 1 && outside[0] === aj.id, `[${outside}]`);
+  const w = scene.jointWorld(scene.getJoint(aj.id)!);
+  check("containment: the joint was NOT auto-moved", dist(w, { x: 115, y: 0 }) < 1e-9, `at (${w.x}, ${w.y})`);
+
+  // Dragging the joint clamps it back onto the body — the flag clears itself.
+  scene.moveJoint(aj.id, { x: -1, y: 0 });
+  check("containment: dragging back inside clears the flag", scene.jointsOutsideBody().length === 0, "0 outside");
+}
+
 // --- re-expansion snaps poses back to the definition layout ------------------------
 {
   const scene = new Scene();

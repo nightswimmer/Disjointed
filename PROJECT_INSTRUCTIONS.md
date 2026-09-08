@@ -245,10 +245,11 @@ the signed perpendicular distance, split by the usual mobility ranks (a joint co
 onto a guideline moves the guide, not the joint; a drag stays pinned). A point that *is* a
 defining point of the line (an edge's end vertex, a rail's own joint, a guide's own point)
 is rejected as a permanent no-op.
-**Rails & sliders (v17)**: the S tool is now called **Rail** (the line joints ride along —
-"track"/"rail" in CAD terms; the constraint keeps `kind: "slider"` internally for format
-compatibility, but the tool id, selection kind `"rail"`, and all user-facing text say rail).
-New **Slider tool (`K`)**: click a rail to add a **slider** — an **orientation-locked
+**Rails & sliders (v17)**: the old slider-line tool is now called **Rail** (`K`; the line
+joints ride along — "track"/"rail" in CAD terms; the constraint keeps `kind: "slider"`
+internally for format compatibility, but the tool id, selection kind `"rail"`, and all
+user-facing text say rail).
+New **Slider tool (`S`)**: click a rail to add a **slider** — an **orientation-locked
 rider** (a prismatic joint, matching Fusion 360 / Onshape naming): it travels along the
 rail but its body keeps its angle **relative to the rail** (a plain rider remains a
 pin-in-slot: slides AND rotates). The click point projects onto the rail; the new joint
@@ -285,6 +286,20 @@ joints, not just chassis material — snaps to `T·defPose` (`T` = the instance 
 which is preserved), cascading through nested defs; a mechanism posed at the assembly
 level resets whenever its definition is next touched (what's drawn in the def is what
 instances show).
+**Hotkey swap + joint-containment warning** (no format change): the Slider tool now owns
+**`S`** and the Rail tool moved to **`K`** (S had kept the pre-v17 muscle memory; the
+slider is the more-placed element, so it gets the natural letter). And the containment
+invariant is now **watched, not just enforced at edit time**: direct edits can't put an
+attached joint outside its body (placement + drags clamp), but a **shape change under the
+joint can** — the canonical case is an assembly-level joint on a component instance whose
+definition is then reshaped so the new outline no longer covers it (a removed control
+vertex can do it too). `Scene.jointsOutsideBody()` reports such joints (outside the
+rounded outline by more than `CONTAINMENT_WARN_EPS = 1e-6`, so a joint clamped exactly
+onto the edge never counts); main re-checks every frame in draw mode, the renderer paints
+the stranded joints **error-red with a dashed ring** (vs the solid red ring of a sim
+break), and the hint line prepends a warning ("⚠ N joints lie outside their bodies…")
+while any exist. Deliberately **nothing is auto-moved** — the user drags the joint back
+(drags clamp to the outline) or fixes the shape / definition, and the flag clears itself.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -383,6 +398,10 @@ instances show).
     `pointInBody` / `clampIntoBody` test/clamp a world point against a body's rounded outline;
     `moveJoint` (via the private `shiftJoint`) clamps an attached joint's target inside its
     body, so a drag can't take it outside (free joints are unclamped; ground anchors follow).
+    `jointsOutsideBody()` reports attached joints a *shape change* stranded outside their
+    body (beyond `CONTAINMENT_WARN_EPS = 1e-6`, so edge-clamped joints never count) — e.g.
+    a component-definition edit cascading into instances, or a removed control vertex; the
+    UI flags them (red dashed ring + hint warning) and never moves them.
     **Node ↔ joint link** (`VERTEX_LINK_EPS = 1e-6`): `moveBodyVertex` carries any joint of
     that body exactly coincident with the moved control vertex (moved *after* the rebuild, so
     every other joint stays anchored); `moveJoint` on a joint coincident with a control vertex
@@ -695,7 +714,9 @@ instances show).
   defining points; the selected guide uses theme ink; `guideDraft` previews the infinite
   line from the first placed point to the (element-snapped) cursor. Also: joints involved in any `ConstraintBreak.joints` are painted red (fill +
   stroke + slight size bump) so the stuck points stand out alongside the existing red dotted
-  break lines. Draws under the camera transform in world space: world-locked grid
+  break lines; and joints in `containmentErrors: Set<number>` (draw mode — attached joints
+  stranded outside their body's outline) are painted the same error red but with a
+  **dashed** ring, so the two red states read differently. Draws under the camera transform in world space: world-locked grid
   (spacing = `gridStep`, drawn only when `gridVisible`),
   bodies (selected/hovered highlighted; a body's **hole loops** are added as subpaths and
   filled with the **even-odd rule**, so cut-outs show what's behind them, with the body
@@ -756,6 +777,11 @@ instances show).
   requestAnimationFrame render/solve loop. `timedSolve` captures the solver's `ConstraintBreak`s
   into `solveBreaks`; `updateSimError` shows/hides the red **"Assembly impossible"** banner
   (`#sim-error`), and the breaks are passed to the renderer in sim mode (cleared on leaving sim).
+  **Containment watch**: every draw-mode frame recomputes `containmentErrors` from
+  `scene.jointsOutsideBody()` (cleared in sim), passes it to the renderer, and refreshes the
+  hint when the count changes — `updateHint` prepends `containmentWarning()` ("⚠ N joints lie
+  outside their bodies (red) — drag them back inside, or fix the body / component shape.")
+  to the normal mode/tool hint while any exist.
   The **Joint** tool auto-attaches a placed node to a slider when it lands on a rail/rail-node;
   the **body-from-joints** draft turns a bare slider-rail click into a grid-snapped rider joint
   (tracked in `jointDraftCreated`, removed if the draft is aborted). Also a `timedSolve` debug log.
@@ -778,14 +804,14 @@ instances show).
     second joint on the **same body** becomes the crank pin (mismatched second click restarts the
     draft at the new joint). Both tools select the resulting element so the inline properties panel
     appears right away.
-  - **Slider tool** (`K`, draw mode, one-shot): on an existing **rider** → toggles its
+  - **Slider tool** (`S`, draw mode, one-shot): on an existing **rider** → toggles its
     orientation lock (`setSliderRiderLocked`); on another joint near a rail (not a rail
     endpoint) → attaches it as a locked rider; on a bare rail → mints a joint at the click
     projected onto the rail — attached to the topmost body under the cursor excluding the
     rail's own body (`bodiesAt` is topmost-first), else free — and attaches it locked
-    (`attachSliderRider(id, jid, true)`). Selects the resulting joint. The rail tool keeps
-    `S` (renamed from "Slider"; tool id `"rail"`, selection kind `"rail"`, renderer input
-    `railDraft`).
+    (`attachSliderRider(id, jid, true)`). Selects the resulting joint. The rail tool is
+    `K` (renamed from "Slider", which took the `S` key with it; tool id `"rail"`,
+    selection kind `"rail"`, renderer input `railDraft`).
   - **Guideline tool** (`L`, draw mode; the actuator's shortcut moved to `A`): two clicks
     through `guidePlacementAt` — exactly on a picked point element (joint / body corner /
     guide point; recorded and turned into an **auto-coincident** via `tryAddConstraint`),
@@ -999,7 +1025,7 @@ instances show).
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or shortcut —
-`B`/`U` hole/`J`/`C`/`G`/`S` rail/`K` slider/`L` guideline/`A` actuator/`M`) lets you place one
+`B`/`U` hole/`J`/`C`/`G`/`K` rail/`S` slider/`L` guideline/`A` actuator/`M`) lets you place one
 element, then it returns to **Select** mode. `Esc` aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
@@ -1034,11 +1060,11 @@ element, then it returns to **Select** mode. `Esc` aborts the current placement.
   the cursor**, clicking a **body** toggles grounding of the whole body — fixed position
   *and* rotation in sim — and, through a grouped body, of its **whole group** (any member
   grounded → all ungrounded, else all grounded).
-- **Rail** (`S` — called "Slider" pre-v17) — click two joints on the *same body* (a rail that
+- **Rail** (`K` — called "Slider" pre-v17) — click two joints on the *same body* (a rail that
   moves with it), or two *free joints* (a world-fixed track — they get grounded automatically),
   to create a rail (riders are attached later via Connect, the Joint tool, or the Slider tool).
   A free+body or cross-body pair restarts the draft.
-- **Slider** (`K`) — click a **rail** to add a slider: an **orientation-locked rider** that
+- **Slider** (`S`) — click a **rail** to add a slider: an **orientation-locked rider** that
   travels along the rail while its body keeps its drawn angle relative to it (prismatic —
   a plain rider is a pin-in-slot). The click projects onto the rail; the joint attaches to
   the topmost body under the cursor (excluding the rail's own body), else it's free (the
@@ -1415,7 +1441,7 @@ Persistence:
   locked joints is a group-riding track (addSlider doesn't auto-ground them; riders slide
   and follow the towed group); serialize/load round-trip + legacy files; copy/paste carries
   group joints.
-- **components.ts** — hierarchical components end-to-end (77 checks): creation from a
+- **components.ts** — hierarchical components end-to-end (81 checks): creation from a
   selection (def carries sketch/measurements/grounded flags; assembly carries neither;
   instance replaces the originals exactly in place; sketch constraints on instance geometry
   rejected); joint-ground conversion (synthesized chassis anchor + pin; grounding the
@@ -1423,7 +1449,10 @@ Persistence:
   instances (rotated placement; chassis rigid under tow; other instances untouched);
   **cascade** (recolor/reshape/add/remove def bodies → every instance reconciles, surviving
   scene ids kept, placement — translation *and* rotation — preserved, new def material
-  arrives in the instance's frame); **pose snap** (a posed body / free joint snaps back to
+  arrives in the instance's frame); **containment warning** (`jointsOutsideBody`: clean
+  scene reports none, an edge-clamped joint is not flagged, a def-shrink cascade flags the
+  stranded assembly joint *without moving it*, and dragging it back inside clears the
+  flag); **pose snap** (a posed body / free joint snaps back to
   the def layout on re-expansion, instance placement kept — the def is the reference);
   **empty components** (`createEmptyComponent` stores a blank def; instantiation refused
   until it has content; fillable with bodies or with *only* an instance of another def —
@@ -1620,9 +1649,10 @@ Persistence:
   persistent relative angle is ever wanted, store a per-lock phase in the constraint instead
   of the solver-side baseline map. A group-locked *free* rider has no orientation, so its
   lock is inert (attach the slider to a body of the group instead).
-- Joint containment covers placement + drags only (by choice): **reshaping** a body (corner
-  handles, radius shrink, vertex removal) can still strand an already-placed joint outside the
-  new outline. If that bites, clamp stranded joints back in `rebuildBody`.
+- ~~Joint containment covers placement + drags only: reshaping a body can strand a joint
+  outside the new outline with no feedback~~ (resolved — stranded joints are now **flagged**,
+  deliberately not auto-clamped: `jointsOutsideBody()` + red dashed ring + hint warning; the
+  user drags the joint back in or fixes the shape / component definition).
 - **Actuator / motor follow-ups**: editing speed/profile while in sim (selection clears on mode
   change today, so the inline panel only appears in draw). ~~Copy/paste carrying actuators +
   motors~~ (done in v14 — `SelectionClip` carries both, needed so components keep their
