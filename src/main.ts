@@ -31,7 +31,7 @@ import {
 } from "./sketch";
 import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolated } from "./pose";
 import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
-import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
+import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
@@ -65,6 +65,7 @@ const toolGroup = document.getElementById("tool-group")!;
 const editGroup = document.getElementById("edit-group")!;
 const gridBtn = document.getElementById("grid-btn") as HTMLButtonElement;
 const snapBtn = document.getElementById("snap-btn") as HTMLButtonElement;
+const osnapBtn = document.getElementById("osnap-btn") as HTMLButtonElement;
 const gridSizeInput = document.getElementById("grid-size") as HTMLInputElement;
 const gridSizePresets = document.getElementById("grid-size-presets") as HTMLSelectElement;
 const themeBtn = document.getElementById("theme-btn") as HTMLButtonElement;
@@ -195,6 +196,8 @@ let jointDraftExpanding = false; // body-from-joints: sizing the outward margin
 let cursor: Vec2 | null = null; // world coordinates
 let hoverJoint: number | null = null;
 let hoverBody: number | null = null; // body under the cursor in normal mode
+/** Object snap on, select mode: the reference a drag started at the cursor would use (preview). */
+let hoverObjSnap: ResolvedMeasureRef | null = null;
 let hoverDef: number | null = null; // component definition hovered in the browser list
 let selectedJoint: number | null = null; // first pick for connect
 let railDraftIds: number[] = []; // rail joints picked so far for the rail tool (0–2)
@@ -325,6 +328,17 @@ let gridStep = 40;
 let snapEnabled = false;
 /** When true, the world-locked grid is drawn (snapping still works when hidden). */
 let gridVisible = true;
+/**
+ * Object snap (draw-mode drags): when true, a body / joint / multi-selection drag picks a
+ * reference feature of what's grabbed — a control vertex, an edge midpoint, a control edge,
+ * or (default) the object's centre — and that feature snaps onto the same features of the
+ * other objects (plus guidelines and rails). Takes precedence over the grid/guide snap.
+ */
+let objSnapEnabled = false;
+/** Screen-px capture range for object snapping (dragged reference onto a target feature). */
+const OBJ_SNAP_PX = 12;
+/** A line reference only snaps onto (near-)parallel lines: within this angle (≈2°). */
+const OBJ_SNAP_PARALLEL_TOL = (2 * Math.PI) / 180;
 
 /** Screen-px capture range for snapping onto a construction guideline. */
 const GUIDE_SNAP_PX = 10;
@@ -374,9 +388,21 @@ let pan: { lastScreen: Vec2 } | null = null;
  * of the centroid / control vertices was closest to the grab point, stored as a fixed
  * `anchorOffset` from the centroid (a plain move only translates, so it stays constant).
  */
+/**
+ * Object-snap state carried by a body / joint / multi drag: `ref` is the feature of the
+ * dragged object that snaps (a control vertex, an edge midpoint or the centre as a
+ * `bodyPoint`, a control edge, or a joint), re-resolved live each frame — the drag anchor
+ * is its point (a line's midpoint). `hit` is what it last snapped onto (for the
+ * highlight), drawn as an infinite line when `hitInfinite`.
+ */
+type DragObjSnap = { ref: MeasureRef; hit: ResolvedMeasureRef | null; hitInfinite: boolean };
+
+/** A drag anchor spec: a fixed offset from a body's centroid, or a joint. */
+type DragAnchorSpec = { bodyId: number; offset: Vec2 } | { jointId: number };
+
 type LeftDrag =
-  | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean }
-  | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean }
+  | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap }
+  | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap }
   // `hole` scopes a vertex/fillet drag to one of the body's holes (null = the outer outline).
   | { kind: "vertex"; bodyId: number; index: number; hole: number | null; grabOffset: Vec2; moved: boolean }
   // Per-corner radius handle: the cursor's position maps straight to that corner's radius.
@@ -394,9 +420,10 @@ type LeftDrag =
       kind: "multi";
       bodies: number[];
       joints: number[];
-      anchor: { bodyId: number; offset: Vec2 } | { jointId: number };
+      anchor: DragAnchorSpec;
       grabOffset: Vec2;
       moved: boolean;
+      osnap?: DragObjSnap;
     }
   // Rigid (Shift) drag: the grabbed selection moves like in simulation — the solver drives
   // it each frame, grounds hold, and the rest of the scene is frozen (`freeze`).
@@ -446,6 +473,272 @@ function bodyDragAnchor(bodyId: number, grab: Vec2): Vec2 {
     }
   }
   return best;
+}
+
+// --- object snapping ----------------------------------------------------------
+/** A candidate object-snap reference: the ref, its world point (the drag anchor) and spec. */
+type ObjSnapPick = { ref: MeasureRef; anchor: Vec2; spec: DragAnchorSpec };
+
+/** The control loops (outer outline + holes) of a body in world space. */
+function bodyControlLoops(body: Body): { verts: Vec2[]; hole: number | null }[] {
+  const loops = [{ verts: scene.bodyControlWorld(body), hole: null as number | null }];
+  for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
+    loops.push({ verts: scene.bodyHoleControlWorld(body, hi), hole: hi });
+  }
+  return loops;
+}
+
+/**
+ * Choose the object-snap reference for a drag of `bodyIds` + `jointIds` grabbed at
+ * `grab`. The nearest feature within pick range wins, by priority: a control vertex (or
+ * a dragged free joint), then an edge midpoint, then a control edge (its midpoint becomes
+ * the anchor); with nothing in range the object's centre is the default — a single
+ * body's centroid, or the bounding-box centre of a multi-selection. Null only when
+ * nothing dragged still exists.
+ */
+function pickObjSnapRef(bodyIds: number[], jointIds: number[], grab: Vec2): ObjSnapPick | null {
+  const r = pickRadius();
+  const bodies: Body[] = [];
+  for (const id of bodyIds) {
+    const b = scene.getBody(id);
+    if (b) bodies.push(b);
+  }
+  const joints = jointIds.map((id) => scene.getJoint(id)).filter((j) => !!j);
+  type Cand = ObjSnapPick & { d: number };
+  let vert: Cand | null = null;
+  let mid: Cand | null = null;
+  let edge: Cand | null = null;
+  const better = (cur: Cand | null, c: Cand): Cand | null => (c.d <= r && (!cur || c.d < cur.d) ? c : cur);
+  const bodyRef = (body: Body, at: Vec2, ref: MeasureRef, d: number): Cand => ({
+    ref,
+    anchor: at,
+    spec: { bodyId: body.id, offset: sub(at, body.pos) },
+    d,
+  });
+  for (const body of bodies) {
+    for (const { verts, hole } of bodyControlLoops(body)) {
+      const n = verts.length;
+      for (let i = 0; i < n; i++) {
+        const v = verts[i];
+        const vref: MeasureRef =
+          hole === null ? { kind: "vertex", bodyId: body.id, index: i } : { kind: "vertex", bodyId: body.id, index: i, hole };
+        vert = better(vert, bodyRef(body, v, vref, dist(grab, v)));
+        if (n < 2) continue; // a 1-point loop (disk hole) has no edges
+        const w = verts[(i + 1) % n];
+        const m = scale(add(v, w), 0.5);
+        const mref: MeasureRef = { kind: "bodyPoint", bodyId: body.id, local: rotate(sub(m, body.pos), -body.angle) };
+        mid = better(mid, bodyRef(body, m, mref, dist(grab, m)));
+        const eref: MeasureRef =
+          hole === null ? { kind: "edge", bodyId: body.id, index: i } : { kind: "edge", bodyId: body.id, index: i, hole };
+        edge = better(edge, bodyRef(body, m, eref, distToSegment(grab, v, w)));
+      }
+    }
+  }
+  for (const j of joints) {
+    const p = scene.jointWorld(j);
+    vert = better(vert, { ref: { kind: "joint", jointId: j.id }, anchor: p, spec: { jointId: j.id }, d: dist(grab, p) });
+  }
+  const pick = vert ?? mid ?? edge;
+  if (pick) return pick;
+
+  // Default: the centre of what's dragged.
+  if (bodies.length === 0) {
+    // Free joints only: the nearest joint stands in for the centre.
+    let best = joints[0];
+    if (!best) return null;
+    let bd = Infinity;
+    for (const j of joints) {
+      const d = dist(grab, scene.jointWorld(j));
+      if (d < bd) {
+        bd = d;
+        best = j;
+      }
+    }
+    return { ref: { kind: "joint", jointId: best.id }, anchor: scene.jointWorld(best), spec: { jointId: best.id } };
+  }
+  let centre = bodies[0].pos;
+  if (bodies.length > 1 || joints.length > 0) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const extend = (p: Vec2): void => {
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    };
+    for (const body of bodies) for (const v of scene.bodyControlWorld(body)) extend(v);
+    for (const j of joints) extend(scene.jointWorld(j));
+    centre = vec((minX + maxX) / 2, (minY + maxY) / 2);
+  }
+  // The centre rides the first body (a plain move only translates, so it stays put).
+  const host = bodies[0];
+  return bodyRef(host, centre, { kind: "bodyPoint", bodyId: host.id, local: rotate(sub(centre, host.pos), -host.angle) }, 0);
+}
+
+/** What a drag moves (so those features are left out of the object-snap targets). */
+function dragMembers(d: LeftDrag): { bodies: Set<number>; joints: Set<number> } {
+  const bodies = new Set<number>();
+  const joints = new Set<number>();
+  if (d.kind === "body") bodies.add(d.id);
+  else if (d.kind === "joint") joints.add(d.id);
+  else if (d.kind === "multi") {
+    d.bodies.forEach((id) => bodies.add(id));
+    d.joints.forEach((id) => joints.add(id));
+  }
+  return { bodies, joints };
+}
+
+/**
+ * Object-snap targets: the same features on everything that isn't being dragged —
+ * other bodies' control vertices, edge midpoints, centroids and control edges (outer +
+ * holes), joints (not on a dragged body), rails, and guidelines (defining points +
+ * the infinite line).
+ */
+function objSnapTargets(
+  excludeBodies: Set<number>,
+  excludeJoints: Set<number>
+): { points: Vec2[]; lines: { a: Vec2; b: Vec2; infinite: boolean }[] } {
+  const points: Vec2[] = [];
+  const lines: { a: Vec2; b: Vec2; infinite: boolean }[] = [];
+  for (const body of scene.bodies) {
+    if (excludeBodies.has(body.id)) continue;
+    points.push(body.pos);
+    for (const { verts } of bodyControlLoops(body)) {
+      const n = verts.length;
+      for (let i = 0; i < n; i++) {
+        const v = verts[i];
+        points.push(v);
+        if (n < 2) continue;
+        const w = verts[(i + 1) % n];
+        points.push(scale(add(v, w), 0.5));
+        lines.push({ a: v, b: w, infinite: false });
+      }
+    }
+  }
+  const jointExcluded = (id: number): boolean => {
+    const j = scene.getJoint(id);
+    return !j || excludeJoints.has(id) || (j.bodyId !== null && excludeBodies.has(j.bodyId));
+  };
+  for (const j of scene.joints) {
+    if (!jointExcluded(j.id)) points.push(scene.jointWorld(j));
+  }
+  for (const c of scene.constraints) {
+    if (c.kind !== "slider" || jointExcluded(c.railA) || jointExcluded(c.railB)) continue;
+    lines.push({ a: scene.jointWorld(scene.getJoint(c.railA)!), b: scene.jointWorld(scene.getJoint(c.railB)!), infinite: false });
+  }
+  for (const g of scene.guides) {
+    points.push(g.a, g.b);
+    lines.push({ a: g.a, b: g.b, infinite: true });
+  }
+  return { points, lines };
+}
+
+/**
+ * Object-snap a drag: `raw` is where the drag anchor (the reference point, or a line
+ * reference's midpoint) would land unsnapped. A point reference lands on the nearest
+ * target point within range, else projects onto the nearest target line (segments
+ * clamped, guidelines infinite). A line reference translates perpendicular onto the
+ * nearest (near-)parallel target line so the two become collinear — motion along the
+ * line stays free. Records the hit for the highlight; null (hit cleared) when nothing
+ * is within range, so the caller falls back to the grid/guide snap.
+ */
+function objSnapTarget(d: LeftDrag, os: DragObjSnap, raw: Vec2): Vec2 | null {
+  os.hit = null;
+  os.hitInfinite = false;
+  const cur = scene.resolveMeasureRef(os.ref);
+  if (!cur) return null;
+  const excl = dragMembers(d);
+  const targets = objSnapTargets(excl.bodies, excl.joints);
+  const r = OBJ_SNAP_PX / view.scale;
+  if (cur.kind === "point") {
+    let bestP: Vec2 | null = null;
+    let bd = r;
+    for (const p of targets.points) {
+      const dd = dist(raw, p);
+      if (dd <= bd) {
+        bd = dd;
+        bestP = p;
+      }
+    }
+    if (bestP) {
+      os.hit = { kind: "point", p: bestP };
+      return bestP;
+    }
+    let bestL: { a: Vec2; b: Vec2; infinite: boolean } | null = null;
+    let proj: Vec2 | null = null;
+    bd = r;
+    for (const l of targets.lines) {
+      const ab = sub(l.b, l.a);
+      const L = lenSq(ab);
+      if (L < 1e-12) continue;
+      let t = dot(sub(raw, l.a), ab) / L;
+      if (!l.infinite) t = Math.max(0, Math.min(1, t));
+      const q = add(l.a, scale(ab, t));
+      const dd = dist(raw, q);
+      if (dd <= bd) {
+        bd = dd;
+        bestL = l;
+        proj = q;
+      }
+    }
+    if (bestL && proj) {
+      os.hit = { kind: "line", a: bestL.a, b: bestL.b };
+      os.hitInfinite = bestL.infinite;
+      return proj;
+    }
+    return null;
+  }
+  // Line reference: the dragged edge, translated so its midpoint sits at `raw`.
+  const dir = normalize(sub(cur.b, cur.a));
+  if (dir.x === 0 && dir.y === 0) return null;
+  const sinTol = Math.sin(OBJ_SNAP_PARALLEL_TOL);
+  let bestL: { a: Vec2; b: Vec2 } | null = null;
+  let corr: Vec2 | null = null;
+  let bd = r;
+  for (const l of targets.lines) {
+    const e = normalize(sub(l.b, l.a));
+    if (e.x === 0 && e.y === 0) continue;
+    if (Math.abs(cross(dir, e)) > sinTol) continue; // not parallel — can't align by translation
+    const n = perp(e);
+    const off = dot(sub(raw, l.a), n); // signed perpendicular distance to the target line
+    if (Math.abs(off) <= bd) {
+      bd = Math.abs(off);
+      bestL = l;
+      corr = scale(n, -off);
+    }
+  }
+  if (bestL && corr) {
+    os.hit = { kind: "line", a: bestL.a, b: bestL.b };
+    os.hitInfinite = true;
+    return add(raw, corr);
+  }
+  return null;
+}
+
+/**
+ * Hover preview for object snap (select mode): the reference a plain drag started at
+ * `p` would use — for the multi-selection when `p` is on it, else the joint or body
+ * under the cursor. None over a selected body's edit handles (those drags reshape).
+ */
+function hoverObjSnapRef(p: Vec2): ResolvedMeasureRef | null {
+  if (selectedBodyNodeAt(p) || selectedBodyFilletHandleAt(p)) return null;
+  let ref: MeasureRef | null = null;
+  if (multiSel && multiHitAt(p)) ref = pickObjSnapRef([...multiSel.bodies], [...multiSel.joints], p)?.ref ?? null;
+  else if (hoverJoint !== null) ref = { kind: "joint", jointId: hoverJoint };
+  else if (hoverBody !== null) ref = pickObjSnapRef([hoverBody], [], p)?.ref ?? null;
+  return ref ? scene.resolveMeasureRef(ref) : null;
+}
+
+/**
+ * Object-snap highlight for the renderer: during a drag, the dragged reference (solid)
+ * and what it's snapped onto (dashed); before one, the reference a drag would pick.
+ */
+function dragSnapView(): { ref: ResolvedMeasureRef; hit: ResolvedMeasureRef | null; hitInfinite: boolean } | null {
+  if (mode !== "draw" || !objSnapEnabled) return null;
+  if (leftDrag) {
+    if (!("osnap" in leftDrag) || !leftDrag.osnap) return null;
+    const ref = scene.resolveMeasureRef(leftDrag.osnap.ref);
+    return ref ? { ref, hit: leftDrag.osnap.hit, hitInfinite: leftDrag.osnap.hitInfinite } : null;
+  }
+  if (tool === null && !boxSelect && !rotateDrag && hoverObjSnap) return { ref: hoverObjSnap, hit: null, hitInfinite: false };
+  return null;
 }
 
 // --- multi-selection (Ctrl+click / box select) + permanent groups -----------
@@ -584,11 +877,10 @@ function multiHitAt(p: Vec2): boolean {
 /** Begin dragging the whole multi-selection; the snap anchor is the nearest landmark to the grab. */
 function startMultiDrag(grab: Vec2): void {
   if (!multiSel) return;
-  type MultiAnchor = { bodyId: number; offset: Vec2 } | { jointId: number };
-  let anchor: MultiAnchor | null = null;
+  let anchor: DragAnchorSpec | null = null;
   let anchorPos = grab;
   let bestD = Infinity;
-  const consider = (c: Vec2, spec: MultiAnchor): void => {
+  const consider = (c: Vec2, spec: DragAnchorSpec): void => {
     const d = dist(grab, c);
     if (d < bestD) {
       bestD = d;
@@ -608,6 +900,12 @@ function startMultiDrag(grab: Vec2): void {
     const j = scene.getJoint(id);
     if (j) consider(scene.jointWorld(j), { jointId: id });
   }
+  // Object snap on: the reference feature nearest the grab becomes the anchor instead.
+  const os = objSnapEnabled ? pickObjSnapRef([...multiSel.bodies], [...multiSel.joints], grab) : null;
+  if (os) {
+    anchor = os.spec;
+    anchorPos = os.anchor;
+  }
   if (!anchor) return; // no live members — nothing to drag
   leftDrag = {
     kind: "multi",
@@ -616,6 +914,7 @@ function startMultiDrag(grab: Vec2): void {
     anchor,
     grabOffset: sub(grab, anchorPos),
     moved: false,
+    osnap: os ? { ref: os.ref, hit: null, hitInfinite: false } : undefined,
   };
   canvas.style.cursor = "move";
 }
@@ -852,7 +1151,7 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
+  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   hole: "Click inside a body to start a cut-out, then click more vertices (all inside that body). Click the first vertex (or press Enter) to close the hole.",
   split: "Click a point on a body's outline (edge or corner) to start the cut, click inside to route it, then click the outline again to split the body in two along the path.",
@@ -996,6 +1295,10 @@ gridBtn.addEventListener("click", () => {
 snapBtn.addEventListener("click", () => {
   snapEnabled = !snapEnabled;
   snapBtn.classList.toggle("active", snapEnabled);
+});
+osnapBtn.addEventListener("click", () => {
+  objSnapEnabled = !objSnapEnabled;
+  osnapBtn.classList.toggle("active", objSnapEnabled);
 });
 sketchVisBtn.addEventListener("click", () => setSketchVisible(!sketchVisible));
 measureVisBtn.addEventListener("click", () => setMeasureVisible(!measureVisible));
@@ -3417,18 +3720,30 @@ canvas.addEventListener("mousedown", (e) => {
           leftDrag = { kind: "measureLabel", id: m.id, grabOffset: sub(world, anchor), moved: false };
           canvas.style.cursor = "move";
         } else if (selection?.kind === "body") {
-          const anchor = bodyDragAnchor(selection.id, world); // centroid or nearest corner
+          // Object snap on: the reference feature nearest the grab is the anchor (and
+          // what snaps); otherwise the centroid or nearest corner grid-snaps.
+          const body = scene.getBody(selection.id)!;
+          const os = objSnapEnabled ? pickObjSnapRef([body.id], [], world) : null;
+          const anchor = os ? os.anchor : bodyDragAnchor(selection.id, world);
           leftDrag = {
             kind: "body",
             id: selection.id,
-            anchorOffset: sub(anchor, scene.getBody(selection.id)!.pos),
+            anchorOffset: sub(anchor, body.pos),
             grabOffset: sub(world, anchor),
             moved: false,
+            osnap: os ? { ref: os.ref, hit: null, hitInfinite: false } : undefined,
           };
           canvas.style.cursor = "move";
         } else if (selection?.kind === "joint") {
           const anchor = scene.jointWorld(scene.getJoint(selection.id)!);
-          leftDrag = { kind: "joint", id: selection.id, grabOffset: sub(world, anchor), moved: false };
+          leftDrag = {
+            kind: "joint",
+            id: selection.id,
+            grabOffset: sub(world, anchor),
+            moved: false,
+            // A joint is its own object-snap reference.
+            osnap: objSnapEnabled ? { ref: { kind: "joint", jointId: selection.id }, hit: null, hitInfinite: false } : undefined,
+          };
           canvas.style.cursor = "move";
         } else if (selection?.kind === "guide") {
           // On a defining point: re-aim the line; elsewhere on the line: move it whole.
@@ -3572,12 +3887,13 @@ canvas.addEventListener("mousemove", (e) => {
       solveSketchLive(); // constraints on the guide hold while it follows
       return;
     }
-    // Snap the dragged anchor to the grid (in absolute terms), preserving where it was
-    // grabbed. A dragged guideline is left out of the snap targets (it can't snap to itself).
-    const target = snap(
-      sub(world, leftDrag.grabOffset),
-      leftDrag.kind === "guide" ? leftDrag.id : undefined
-    );
+    // Snap the dragged anchor (in absolute terms, preserving where it was grabbed): the
+    // object-snap reference onto the other objects' features when enabled and something
+    // is in range, else the grid / guidelines. A dragged guideline is left out of the
+    // snap targets (it can't snap to itself).
+    const raw = sub(world, leftDrag.grabOffset);
+    const osnapped = "osnap" in leftDrag && leftDrag.osnap ? objSnapTarget(leftDrag, leftDrag.osnap, raw) : null;
+    const target = osnapped ?? snap(raw, leftDrag.kind === "guide" ? leftDrag.id : undefined);
     const delta = sub(target, dragAnchorWorld(leftDrag));
     if (leftDrag.kind === "vertex") scene.moveBodyVertex(leftDrag.bodyId, leftDrag.index, delta, leftDrag.hole);
     else if (leftDrag.kind === "body") scene.moveBody(leftDrag.id, delta);
@@ -3599,6 +3915,8 @@ canvas.addEventListener("mousemove", (e) => {
     mode === "draw" && tool === null && hoverJoint === null
       ? scene.bodyAt(world)?.id ?? null
       : null;
+  // Object snap preview: which feature a plain drag from here would snap by (Shift = rigid drag, no snap).
+  hoverObjSnap = mode === "draw" && tool === null && objSnapEnabled && !e.shiftKey ? hoverObjSnapRef(world) : null;
   // Hint that elements are grabbable: a move cursor over a joint/body/handle/label in select mode.
   if (mode === "draw" && tool === null) {
     const grabbable =
@@ -4432,6 +4750,7 @@ function frame(now?: number): void {
     measureDraft: measureDraftView(),
     sketchGlyphs: sketchGlyphsView(),
     sketchDraft: sketchDraftView(),
+    dragSnap: dragSnapView(),
     flash: sketchFlash?.ids ?? null,
     theme: theme === "light" ? LIGHT_THEME : DARK_THEME,
   });

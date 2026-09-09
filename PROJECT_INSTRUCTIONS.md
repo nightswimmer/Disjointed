@@ -27,7 +27,9 @@ at a configurable speed + motion profile) and **motors** (a pivot + crank pair o
 crank pin orbits the pivot at a configurable angular speed in animation), with a sim-mode
 **Run animation** toggle (▶/⏸ button or Space) that drives them all and **phase-fit on play** so
 toggling pause/play resumes smoothly from the current pose;
-a configurable, toggle-able grid with snap-to-grid for placement and dragging;
+a configurable, toggle-able grid with snap-to-grid for placement and dragging, plus an
+**object snap** toggle (drags pick a corner / edge midpoint / edge / centre of the grabbed
+object and snap it onto the same features of other objects, rails and guidelines);
 editing utilities (copy/paste a body + its joints/constraints — including its fully-internal
 sketch constraints and driving dimensions — mirror H/V in place, and a rotate
 tool that turns a body about its centroid or a node and snaps to 45°);
@@ -1105,7 +1107,9 @@ callers that want it. New test block in `scripts/components.ts`.
   is over one of the constraint's elements or a badge — with selection / reject-flash
   always at full strength;
   `sketchDraft` highlights constraint-tool picks in violet (reusing
-  `drawMeasureRefHighlight`, which took a colour param). In draw mode a **driven**
+  `drawMeasureRefHighlight`, which took a colour param); `dragSnap` draws the object-snap
+  reference (solid) and its snapped target (dashed; a line target extended across the view
+  when `hitInfinite`) in orange (`OSNAP_COLOR`). In draw mode a **driven**
   dimension's value renders **in parentheses** and a **driving** one plain with a bolder
   pill border (`measureText(info, paren)`); a **violated** driving dimension
   (`MeasureInfo.violated` — off its target, or on the flipped side of its held direction)
@@ -1378,6 +1382,29 @@ callers that want it. New test block in `scripts/components.ts`.
     the grabbed control vertex; a whole-body move snaps whichever of the centroid / control
     vertices is nearest the grab point (`bodyDragAnchor`), stored as a fixed `anchorOffset` from
     the centroid (`dragAnchorWorld` reconstructs its live position).
+  - **Object snap** (`objSnapEnabled`, `#osnap-btn`, session-only; independent of grid snap):
+    a body / joint / multi-selection drag in select mode picks a **reference feature** of what's
+    grabbed at mousedown (`pickObjSnapRef`): nearest within `pickRadius()`, by priority a
+    control vertex (or a dragged free joint), then an edge midpoint, then a control edge —
+    outer outline and holes alike — else the **centre** by default (a single body's centroid; the
+    bounding-box centre of a multi-selection, hosted on its first body). The reference is stored
+    on the drag as a `MeasureRef` (`osnap: DragObjSnap` — vertex / edge / joint, or a
+    `bodyPoint` for midpoints and centres) and re-resolved live; its point (a line's midpoint)
+    **becomes the drag anchor**, so `grabOffset` / `anchorOffset` work unchanged (a multi drag's
+    `anchor` spec is `DragAnchorSpec`). Each move, `objSnapTarget` runs **before** `snap()`:
+    targets (`objSnapTargets`, computed live, excluding the dragged members and joints on them)
+    are the other bodies' vertices, midpoints, centroids and edges, joints, rails and guidelines
+    (defining points + infinite line). A **point** reference lands on the nearest target point
+    within `OBJ_SNAP_PX` (12 px), else projects onto the nearest target line (segments clamped,
+    guidelines infinite); a **line** reference only considers (near-)parallel lines
+    (`OBJ_SNAP_PARALLEL_TOL` ≈ 2°) and translates perpendicular onto the nearest so the two become
+    collinear (motion along the line stays free). Nothing in range → the usual grid/guide snap.
+    The hit is recorded on the drag for the highlight; `dragSnapView()` feeds the renderer's
+    `dragSnap` input (the reference solid, the hit dashed, a line hit extended across the view
+    via `drawGuideLine` when `hitInfinite`; `OSNAP_COLOR` orange). Hovering in select mode
+    (`hoverObjSnap`, via `hoverObjSnapRef`) previews the reference a drag would pick — for the
+    multi-selection when the cursor is on it, else the joint / body under the cursor; none over a
+    selected body's reshape handles or with Shift held (rigid drag, no snap).
   - **Working units + DXF import**: the `#unit-select` dropdown writes `scene.unit`
     (markDirty → saved/undoable) and re-syncs from the scene each frame (`syncUnitSelect`,
     change-detected — load/undo can change the unit). Canvas `dragover`/`drop` handlers:

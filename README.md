@@ -384,9 +384,21 @@ and dragging snaps too: a per-vertex reshape snaps the grabbed corner, while mov
 snaps whichever is nearest the grab point — the body's centroid or one of its corners. Visibility
 and snapping are independent (you can snap to a hidden grid).
 
+**Object snap** (the toolbar button next to Snap; independent of grid snap) makes drags snap
+objects to each other. When you start dragging a body, joint or multi-selection, the feature of
+it nearest the grab becomes the **reference** — a **corner**, then an **edge midpoint**, then an
+**edge**, or the object's **centre** if nothing is close (holes count too). It's highlighted in
+orange (and previewed while you hover, so you can see what you're about to grab). While dragging,
+that reference snaps onto the same features of everything else — other bodies' corners, midpoints,
+centres and edges, joints, rails and guidelines — with the target highlighted dashed. A corner or
+midpoint can also land on another edge or guideline; an edge snaps onto **parallel** edges and
+guidelines only, sliding sideways until the two are flush (it can't rotate the body), and the
+target line is shown extended so you can line up bodies that don't overlap. With nothing in
+range the drag falls back to the grid/guideline snap (or moves freely when Snap is off).
+
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor (0.05× to 200×).
-- **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode).
+- **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode; turn on **Object snap** to drag by a corner / edge / centre and snap it onto other objects).
 - **Fit to screen** (`F`, or the toolbar button) — frame the whole mechanism centered in the canvas.
 - **Tab** — switch between Draw and Simulate mode.
 

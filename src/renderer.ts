@@ -49,6 +49,13 @@ export interface RenderInput {
   sketchGlyphs: SketchGlyphView[];
   /** Constraint-tool state: references picked so far and the one under the cursor. */
   sketchDraft: { refs: ResolvedMeasureRef[]; hover: ResolvedMeasureRef | null } | null;
+  /**
+   * Object-snap highlight (draw mode): the dragged object's snapping reference (solid)
+   * and, while snapped, the target feature it landed on (dashed; a line target is
+   * extended across the view when `hitInfinite`). Before a drag, just the reference
+   * a drag from the cursor would use.
+   */
+  dragSnap: { ref: ResolvedMeasureRef; hit: ResolvedMeasureRef | null; hitInfinite: boolean } | null;
   /** Ids of sketch constraints / dimensions flashing red after a rejected edit. */
   flash: Set<number> | null;
   /** Control-vertex handles to draw for the selected body (draggable to reshape it). */
@@ -655,6 +662,18 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     if (hover) drawMeasureRefHighlight(ctx, hover, px, true, SKETCH_COLOR);
     for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false, SKETCH_COLOR);
   }
+  // Object snap: the target it snapped onto (dashed, a line target extended when it acts
+  // as an infinite line), then the dragged reference itself on top.
+  if (input.dragSnap) {
+    const { ref, hit, hitInfinite } = input.dragSnap;
+    if (hit) {
+      if (hit.kind === "line" && hitInfinite) {
+        drawGuideLine(ctx, hit.a, hit.b, left, top, right, bottom, px, OSNAP_COLOR, false);
+      }
+      drawMeasureRefHighlight(ctx, hit, px, true, OSNAP_COLOR);
+    }
+    drawMeasureRefHighlight(ctx, ref, px, false, OSNAP_COLOR);
+  }
 
   // Measurements (drawn last: dimension annotations sit on top of everything).
   const selectedMeasure = input.selection?.kind === "measure" ? input.selection.id : null;
@@ -709,6 +728,8 @@ const MEASURE_COLOR = "#46c2cb";
 const GUIDE_COLOR = "#9aa0ac";
 /** Accent colour for sketch constraints (violet, distinct from every other accent). */
 const SKETCH_COLOR = "#b48cff";
+/** Object-snap highlights (dragged reference + snapped target): warm orange. */
+const OSNAP_COLOR = "#ff9f43";
 /** Rejected sketch edits flash the conflicting items in the error red. */
 const FLASH_COLOR = "#ff4d4d";
 
