@@ -276,7 +276,8 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   (the new outline no longer covers it), the joint is flagged **red with a dashed ring** rather
   than moved — drag it back inside or adjust the definition.
 - The **component browser** lists definitions: rename inline, **＋** inserts an instance (click
-  the canvas to place it), **✎** edits, **×** deletes (refused while instances exist).
+  the canvas to place it), **✎** edits, **×** deletes — any instances of it become plain
+  bodies (each keeps its rigid group, but they no longer share a definition).
   Circular references are rejected. Drag a row's **⋮⋮** grip to **reorder** the list (the
   other rows slide out of the way; the order is saved with the file). The list and the canvas
   **mirror each other**: hovering a row **fades everything else** and highlights every

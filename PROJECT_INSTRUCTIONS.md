@@ -492,6 +492,17 @@ attached to a highlighted body) are redrawn on top at full strength. The body an
 drawing loops became closures (`drawBodyShape`, `drawJoint`) so the focus pass reuses them.
 While a row is being dragged the canvas highlight stays on the dragged definition. Seven new
 checks in `scripts/components.ts` (occurrences + chains on the nested Inner/Outer fixture).
+**Deleting a component with instances (no format change)**: the browser's **×** no longer
+refuses while instances exist — it **converts them to plain bodies**. `Scene.dissolveComponent(defId)`
+dissolves every live instance (record dropped, material stays put; the chassis group
+survives as an ordinary rigid group so one ex-instance's bodies still move as a block, but
+ex-instances share nothing with each other any more), strips the instance records from
+every other definition's stored data (no re-expansion needed — an enclosing def already
+carries the expanded elements), and deletes the definition; returns the instance count.
+`deleteComponentUI` also filters the stashed `rootData.instances` when a def is open, then
+`markDirty` (one undo step) and a toast reports the count. The only remaining refusal is a
+def that is itself on `editPath`. `removeComponent` keeps the strict refusing behaviour for
+callers that want it. New test block in `scripts/components.ts`.
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -646,8 +657,9 @@ checks in `scripts/components.ts` (occurrences + chains on the nested Inner/Oute
     `T·defPose`, where `T` = the instance placement derived from a chassis body's scene
     pose vs its cached def pose — the definition is the pose reference; only the
     instance-level grounded flag is instance state), `removeInstance` / `dissolveInstance`
-    (explode to plain elements) / `removeComponent` (refused while instances exist
-    anywhere), `instanceOfBody/Joint/Constraint`, `instanceOfRef(ref)` /
+    (explode to plain elements) / `removeComponent` (strict: refused while instances exist
+    anywhere) / `dissolveComponent` (delete the def, converting every instance — live and
+    inside other defs' data — to plain elements; returns the count), `instanceOfBody/Joint/Constraint`, `instanceOfRef(ref)` /
     `refInstanceOwned(ref)` (instance *shape* belongs to the def: the sketch solver never
     moves it — a constraint/dimension with one free end moves the free side, one with every
     end instance-owned drives *poses*, see pose.ts; `addSketchConstraint` rejects only
@@ -1326,8 +1338,9 @@ checks in `scripts/components.ts` (occurrences + chains on the nested Inner/Oute
     (`#comp-panel`, toggled by `#comp-panel-btn`): rename inline, **＋** arms `pendingInsert`
     (next canvas click instantiates at the snapped point, centered via `componentCenter`;
     cycle-guarded against `componentUses`; **refused with an alert for a still-empty def**),
-    **✎** edits, **×** deletes (refused while instances exist anywhere or the def is on
-    `editPath`); a `⋮⋮` grip per row starts `startCompRowDrag` (pointer-driven reorder —
+    **✎** edits, **×** deletes via `deleteComponentUI` (instances everywhere — live
+    context, stashed `rootData`, nested defs — become plain bodies keeping their rigid
+    group; refused only while the def is on `editPath`); a `⋮⋮` grip per row starts `startCompRowDrag` (pointer-driven reorder —
     the dragged row follows the cursor, the others translate out of the way, release
     re-splices `scene.components` + `markDirty`); `compRows` (def id → row) is rebuilt with
     the panel and `syncCompPanelHighlight` (called per frame) toggles `.selected`
@@ -1870,7 +1883,10 @@ Persistence:
   Outer→Inner for a nested body, Outer for Outer's own body, empty for plain material);
   powered constraints inside a
   component (slider + actuator expand with no world grounds; anchors drive the rider along
-  the chassis track); removal / dissolve / removeComponent guards; **fork / make-unique**
+  the chassis track); removal / dissolve / removeComponent guards; **dissolveComponent**
+  (live + nested count, def gone, Outer's data keeps the nested bodies minus the record,
+  poses untouched, chassis groups survive, ex-instances move independently, round-trip);
+  **fork / make-unique**
   (`makeInstanceUnique`: new def, re-pointed instance, sibling untouched, drift-0 no-op
   reconcile, two-way edit independence after the fork, name dedup, nested defs stay shared
   in the DAG); serialize/load v14 round-trip, idempotent re-expansion after load,

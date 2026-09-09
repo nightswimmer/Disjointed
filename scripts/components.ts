@@ -556,6 +556,66 @@ function editDef(scene: Scene, defId: number, mutate: (s: Scene) => void): Set<n
   check("removeComponent works once unused", scene.removeComponent(defId) === true && scene.components.length === 0, "deleted");
 }
 
+// --- dissolveComponent: delete a definition, instances become plain bodies -----------
+{
+  const scene = new Scene();
+  const b1 = square(scene, 0, 0);
+  const b2 = square(scene, 60, 0);
+  scene.toggleBodyGround(b1.id); // grounded in the def → rigid chassis group
+  scene.toggleBodyGround(b2.id);
+  const res = scene.createComponentFromSelection("Widget", [b1.id, b2.id])!;
+  const defId = res.def.id;
+  const inst2 = scene.instantiateComponent(defId, { pos: { x: 200, y: 0 }, angle: 0.3 })!;
+  // A second definition whose data nests a Widget next to its own body (built the way
+  // the app does when editing a def context: a fresh context that instantiates Widget).
+  const outerId = scene.components.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+  {
+    const tmp = new Scene();
+    tmp.components = scene.components;
+    square(tmp, 400, 0);
+    tmp.instantiateComponent(defId, { pos: { x: 500, y: 0 }, angle: 0 });
+    scene.components.push({ id: outerId, name: "Outer", data: tmp.serializeContext() });
+  }
+  const outerDef = scene.getComponent(outerId)!;
+  scene.instantiateComponent(outerId, { pos: { x: 0, y: 300 }, angle: 0 })!;
+  check("outer def nests a Widget instance", (outerDef.data.instances ?? []).some((i) => i.defId === defId), "nested");
+  check("outer def holds its nested bodies", outerDef.data.bodies.length === 3, `${outerDef.data.bodies.length} def bodies`);
+
+  const bodiesBefore = scene.bodies.length;
+  const poses = scene.bodies.map((b) => ({ id: b.id, pos: { ...b.pos }, angle: b.angle }));
+  const groupsBefore = scene.groups.length;
+  check("dissolveComponent on unknown def is -1", scene.dissolveComponent(9999) === -1, "-1");
+  const n = scene.dissolveComponent(defId);
+  check("dissolveComponent counts live + nested instances", n === 3, `${n}`);
+  check("definition gone, Outer survives", scene.components.length === 1 && scene.components[0].id === outerDef.id, `${scene.components.length} defs`);
+  check("no live Widget instance records remain", scene.instances.every((i) => i.defId !== defId), "records");
+  check("Outer keeps its instance record", scene.instances.some((i) => i.defId === outerDef.id), "outer inst");
+  check("nested record stripped from Outer's data", !(outerDef.data.instances ?? []).some((i) => i.defId === defId), "stripped");
+  check("Outer's data keeps the nested bodies", outerDef.data.bodies.length === 3, `${outerDef.data.bodies.length}`);
+  check("all bodies survive", scene.bodies.length === bodiesBefore, `${scene.bodies.length} vs ${bodiesBefore}`);
+  check(
+    "no body moved",
+    poses.every((p) => {
+      const b = scene.getBody(p.id)!;
+      return dist(b.pos, p.pos) < 1e-12 && Math.abs(b.angle - p.angle) < 1e-12;
+    }),
+    "poses"
+  );
+  check("chassis groups survive as rigid groups", scene.groups.length === groupsBefore, `${scene.groups.length} vs ${groupsBefore}`);
+  const g2 = scene.groupOf(inst2.bodyMap[0].id);
+  check("dissolved instance's bodies still share a group", g2 !== undefined && inst2.bodyMap.every((e) => scene.groupOf(e.id) === g2), "group");
+  check("dissolved bodies are no longer instance material", inst2.bodyMap.every((e) => scene.instanceOfBody(e.id) === undefined), "plain");
+  // Independence: moving one ex-instance's body must not touch the other's.
+  const other = scene.getBody(res.instance.bodyMap[0].id)!;
+  const otherPos = { ...other.pos };
+  scene.moveBody(inst2.bodyMap[0].id, { x: 10, y: 0 });
+  check("ex-instances are independent", dist(other.pos, otherPos) < 1e-12, "moved together");
+  // Round-trip: the document still loads cleanly.
+  const re = new Scene();
+  re.load(JSON.parse(JSON.stringify(scene.serialize())) as SceneData);
+  check("post-dissolve document round-trips", re.bodies.length === scene.bodies.length && re.components.length === 1, "round-trip");
+}
+
 // --- fork: make an instance unique --------------------------------------------------
 {
   const scene = new Scene();

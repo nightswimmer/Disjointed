@@ -1541,7 +1541,7 @@ function updateCompPanel(): void {
     row.appendChild(name);
     row.appendChild(mkBtn("＋", "Insert an instance — then click the canvas to place it", "", () => startInsertInstance(def.id)));
     row.appendChild(mkBtn("✎", "Edit this component's definition", "", () => enterComponent(def.id)));
-    row.appendChild(mkBtn("×", "Delete this component (refused while instances of it exist)", "danger", () => deleteComponentUI(def.id)));
+    row.appendChild(mkBtn("×", "Delete this component — its instances become plain bodies (each keeps its rigid group)", "danger", () => deleteComponentUI(def.id)));
     compList.appendChild(row);
   });
   syncCompPanelHighlight();
@@ -1725,20 +1725,34 @@ function placePendingInsert(p: Vec2): boolean {
   return true;
 }
 
-/** Delete a definition from the browser (refused while any instance of it exists, or
- *  while the definition itself is open for editing). */
+/** Delete a definition from the browser. Every instance of it — in the live context,
+ *  the stashed root, and inside other definitions — is converted into plain elements
+ *  (its material stays put; the chassis becomes an ordinary rigid group). Refused only
+ *  while the definition itself is open for editing. */
 function deleteComponentUI(defId: number): void {
   if (editPath.includes(defId)) {
     notify("This component is being edited — close its context first.");
     return;
   }
-  const usedInRoot = rootData ? (rootData.instances ?? []).some((i) => i.defId === defId) : false;
-  if (usedInRoot || !scene.removeComponent(defId)) {
-    notify("This component still has instances — delete (or dissolve) them first.");
-    return;
+  const name = scene.getComponent(defId)?.name ?? "?";
+  let n = 0;
+  if (rootData) {
+    const insts = rootData.instances ?? [];
+    const kept = insts.filter((i) => i.defId !== defId);
+    n += insts.length - kept.length;
+    rootData = { ...rootData, instances: kept };
   }
+  const live = scene.dissolveComponent(defId);
+  if (live < 0) return;
+  n += live;
+  // A selected instance of this def keeps its bodies, so the selection stays valid as-is.
   markDirty();
   updateCompPanel();
+  notify(
+    n === 0
+      ? `Deleted component “${name}”.`
+      : `Deleted component “${name}” — ${n} instance${n === 1 ? "" : "s"} converted to plain bodies.`
+  );
 }
 
 makeCompBtn.addEventListener("click", makeComponentFromSelection);

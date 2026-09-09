@@ -3300,7 +3300,8 @@ export class Scene {
   }
 
   /** Delete a definition. Refused (returns false) while any instance of it exists in this
-   *  context or inside any other definition's data. */
+   *  context or inside any other definition's data (see `dissolveComponent` for the
+   *  converting variant). */
   removeComponent(defId: number): boolean {
     if (this.instances.some((i) => i.defId === defId)) return false;
     for (const c of this.components) {
@@ -3309,6 +3310,35 @@ export class Scene {
     const before = this.components.length;
     this.components = this.components.filter((c) => c.id !== defId);
     return this.components.length !== before;
+  }
+
+  /**
+   * Delete a definition, converting every instance of it into plain elements: each
+   * instance's expanded bodies / joints / constraints stay exactly where they are and
+   * stop following the definition (its chassis group survives as an ordinary rigid
+   * group, so the bodies from one instance still move as a block — but instances no
+   * longer share anything with each other). Applies to instances in this context AND
+   * inside every other definition's stored data. Nested material needs no re-expansion:
+   * a definition that instantiated the deleted one already carries the expanded
+   * elements in its own data, so dropping the record there changes nothing anyone sees.
+   * Returns the number of instances dissolved, or -1 for an unknown definition.
+   */
+  dissolveComponent(defId: number): number {
+    if (!this.getComponent(defId)) return -1;
+    let n = 0;
+    for (const inst of [...this.instances]) {
+      if (inst.defId !== defId) continue;
+      this.dissolveInstance(inst.id);
+      n++;
+    }
+    for (const c of this.components) {
+      if (c.id === defId || !c.data.instances) continue;
+      const kept = c.data.instances.filter((i) => i.defId !== defId);
+      n += c.data.instances.length - kept.length;
+      c.data.instances = kept;
+    }
+    this.components = this.components.filter((c) => c.id !== defId);
+    return n;
   }
 
   /** Public view of an instance's current placement (def frame → context). */
