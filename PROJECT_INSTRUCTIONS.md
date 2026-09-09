@@ -168,6 +168,29 @@ save-load; **picking + joint containment deliberately use the outer outline only
 joint can sit at the centre of a shaft hole, and clicking in a cut-out still selects the
 body). Originally baked loops — since **v16 holes are editable outlines** with their own
 control polygon, rounding and measurement/sketch refs (see the v15/v16 paragraph below).
+**Cut-file export (DXF / SVG)** (`src/export.ts`, no format change): an **Export** button
+next to Save opens a small panel (top-right of the canvas) that writes the **selected body /
+multi-selection — or every body when nothing is selected —** at its current pose as a flat
+cutting file for CNC / laser / plasma work. Geometry is collected as `CutLoop`s (closed
+rings of vertices carrying DXF-style *bulges* `tan(sweep/4)`, or circles): fillet corners
+are emitted as **exact tangent arcs** via `filletCornerArcs`, offset-mode disks as circles,
+stadiums and uniform-margin offset hulls as exact arcs + tangent lines (mixed-margin hulls
+fall back to the sampled outline), and every hole is its own loop. **DXF** is R12 ASCII
+(POLYLINE / VERTEX with bulges + CIRCLE — the broadest CAM compatibility) in the working
+units with a matching `$INSUNITS`, y flipped to DXF's y-up (bulges negated with it),
+translated into the positive quadrant, outlines on layer `CUT`; **SVG** is written in
+millimetres (`width`/`height` in mm + matching `viewBox`, so nothing rescales on import),
+y-down, one `<path>` per body (outer + holes as even-odd subpaths, arcs as `A` commands),
+circles as `<circle>`. An optional **drill hole at every attached joint** of an exported
+body (diameter in working units, deduplicated by position; free joints and other bodies'
+joints skipped) goes on DXF layer `JOINTS` / SVG group `joints`. File names (`exportFileStem`
+in main.ts): the bodies' *component* is the one instance they all belong to, else the
+definition being edited, else none. With a component — `<component>-<stamp>` when the export
+covers all of its bodies (a whole instance, or "export all" inside a definition),
+`<component>-body_<n>-<stamp>` for one body of several (n = position in the component),
+`<component>-bodies-<stamp>` for a partial selection; without one — `body-<stamp>` /
+`bodies-<stamp>`. Exported DXFs round-trip through the importer with their fillets
+reconstructed (tested).
 **Z-order reordering** (no format change): **Send to back / Bring to front** on the selected
 body or multi-selection — toolbar buttons in the edit group (layer-stack icons, the moving
 layer highlighted, with a down/up arrow) and **PageDown / PageUp**. The `bodies` array *is*
@@ -469,6 +492,12 @@ bodyPoint refs re-anchor. Refused with an alert when the bodies **don't all conn
   tangent side for both convex (into the body) and reflex (into the notch) corners.
   `filletCornerArcs` exposes each corner's solved arc (centre, actual radius, sweep)
   without sampling — the editor places the per-corner radius handles exactly on the arcs.
+- **export.ts** — cut-file export (DOM-free): `collectCutSheet(scene, bodies, {jointHoleDiameter})`
+  → `CutSheet` of parts (outer + hole `CutLoop`s: bulge rings or circles) + joint circles,
+  `toDxf` (R12 POLYLINE/VERTEX/CIRCLE, y-flip, `$INSUNITS`, layers CUT / JOINTS) and `toSvg`
+  (mm, `A` arcs, even-odd subpaths); `sheetBounds` (arc-aware) and `arcOf` (bulge → centre /
+  radius / sweep) are shared helpers. Exact arcs come from `filletCornerArcs` and an
+  in-module uniform-margin offset-hull ring; anything else falls back to the sampled outline.
 - **model.ts** — `Scene` owning:
   - `Body` = rigid shape defined by an **editable control polygon** (`controlLocal`) + a
     corner `radius` + optional per-corner overrides `radii: (number | null)[]` (v15;
@@ -1893,6 +1922,22 @@ Persistence:
   bodies with holes: net mass, composite centroid, reduced inertia, `pointInBody` true
   inside a hole (joint placeable at a hole centre), holes round-tripping through save/load,
   mirror reflecting the hole, copy/paste carrying it, scale scaling it, rotate riding it.
+
+- **export.ts (scripts)** — the cut-file exporter: a rounded rectangle → 8-vertex ring with
+  four `tan(22.5°)` bulges whose arc centres sit inside; DXF = one closed POLYLINE / 8
+  VERTEX, `$INSUNITS` 4, layer CUT only; **round trip through `parseDxf`** reconstructs 4
+  corners with radius 5, translated to the origin, and the sampled loop hugs
+  `filletPolygon` to < 0.02; SVG has mm size + viewBox, 4 `A` commands, y unflipped. Sharp
+  square (no bulges, M + 3 L + Z). L-shape with a reflex fillet (6 arcs, right turn
+  direction) and a single per-corner override (5 verts, radii {6,0,0,0} back). Offset disk
+  → CIRCLE (round-trips as `circle`, SVG `<circle>`), stadium (two |bulge| = 1 half circles,
+  every point 5 from the spine), offset triangle (6 verts, every point 6 from the hull,
+  arcs reconstruct as fillets), mixed margins → sampled ring. Plate with a disk hole + a
+  square hole + joints: 2 joint holes (duplicate spot deduped, other body + free joint
+  excluded), 2 POLYLINE + 3 CIRCLE, JOINTS layer declared and used, importer nests into one
+  solid with 4 holes, SVG evenodd path with 2 subpaths + 3 circles; two bodies → 2 parts.
+  Inches (`$INSUNITS` 1, unscaled coordinates, importer reads 25.4, SVG 50.8 × 25.4 mm),
+  cm code 5; a rotated body exports rotated.
 
 ## Bugs found & fixed so far
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from

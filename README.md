@@ -340,7 +340,7 @@ these exist for dialing in complex closed-loop scenes where the animation occasi
 solvable assembly as impossible. The browser console logs rolling solve statistics while the
 animation runs.
 
-### Units & DXF import
+### Units, DXF import & cut-file export
 A **unit dropdown** in the toolbar's grid group declares what one world unit means — **mm, cm,
 m or in** (default mm). It's purely a declaration (changing it never moves geometry): distance
 measurements show the unit, and imports convert into it. The choice is saved with the file.
@@ -357,6 +357,19 @@ shapes land multi-selected, ready to move or group. If an import covers your mec
 **PageDown** (or the Send-to-back button) to push it behind everything. Dropping a `.json`
 file loads it as a scene, same as the Load button. (`dxf import test.dxf` in the repo is a
 small sample to try.)
+
+**Export a cut file** with the Export button (next to Save): it writes the **selected body or
+multi-selection — or every body when nothing is selected —** as a flat file ready for CNC /
+laser / plasma work. Pick **DXF** (true arcs, in your working units, for CAM software such as
+Fusion 360, VCarve, Carbide Create, Easel or SheetCAM) or **SVG** (in millimetres, for laser
+software such as LightBurn, Glowforge, xTool or Inkscape). Rounded corners, disks and rounded
+hulls export as exact arcs, every hole as its own loop, and geometry is placed in the positive
+quadrant. Tick **Drill holes at joints** to add a hole of the given diameter at every joint of
+the exported bodies (on its own layer / group), so a linkage can be cut and pinned straight
+away. Files are named after the body (`body-…`, or `bodies-…` for several), or after its component
+when it belongs to one — `Crank-…` for the whole component (a selected instance, or everything
+while editing its definition), `Crank-body_2-…` for one body of several, `Crank-bodies-…` for
+a partial selection — with the date and time appended. An exported DXF drops straight back onto the canvas with its fillets editable.
 
 ### Grid & snapping
 The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**
@@ -387,7 +400,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, hierarchical components, slider orientation locks, welds (rigid joints), pose-level driving dimensions, sketch constraints on components
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, welds (rigid joints), pose-level driving dimensions, sketch constraints on components
 ```
 
 ## How it works
@@ -487,8 +500,13 @@ snapshot, and unsatisfied items render red. Every driving dimension carries its 
 direction): corrections are signed toward it, so an overshooting drag reads as a large
 error back — the two sides can never flip through each other.
 
+**Cut-file export** (`export.ts`) is the importer's mirror image: bodies become closed rings whose
+edges carry DXF-style *bulges* (so fillets, disks and rounded hulls stay true arcs) plus hole
+loops and optional joint circles; the DXF writer flips y and emits R12 polylines with bulges in
+the working units, the SVG writer converts to millimetres and emits `A` arcs in even-odd paths.
+
 Source lives in [`src/`](src/): `geometry.ts`, `model.ts`, `solver.ts`, `sketch.ts`,
-`pose.ts` (pose-level dimensions + constraints on components), `dxf.ts` (DXF import), `view.ts` (camera),
+`pose.ts` (pose-level dimensions + constraints on components), `dxf.ts` (DXF import), `export.ts` (DXF / SVG cut-file export), `view.ts` (camera),
 `renderer.ts`, `main.ts`, plus `analyzer.ts` — a standalone topology diagnostic (kinematic
 islands, degrees of freedom, loop / block decomposition) groundwork for future solver
 optimizations. Tests live in [`scripts/`](scripts/).

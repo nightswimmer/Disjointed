@@ -206,6 +206,9 @@
           <button id="save-btn" class="icon-btn" title="Save mechanism to a file" aria-label="Save">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h9l3 3v9H4z"/><path d="M7 4v4h6V5"/><rect x="7" y="11" width="6" height="5"/></svg>
           </button>
+          <button id="export-btn" class="icon-btn" title="Export a cut file (DXF / SVG) of the selected bodies — or all bodies when nothing is selected" aria-label="Export cut file">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9"/><path d="M6.5 8.5 10 12l3.5-3.5"/><path d="M4 13v2.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V13"/></svg>
+          </button>
           <button id="load-btn" class="icon-btn" title="Load mechanism from a file" aria-label="Load">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7a1 1 0 0 1 1-1h3l2 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>
           </button>
@@ -230,6 +233,33 @@
         <div id="toast-stack" aria-live="polite"></div>
         <!-- Component-editing breadcrumb: hidden at the root assembly; clicking a crumb
              exits back to that context (Esc with nothing selected also exits one level). -->
+        <!-- Cut-file export (src/export.ts): DXF / SVG of the selected bodies, or all of them. -->
+        <div id="export-panel" class="hidden" role="dialog" aria-label="Export cut file">
+          <div class="export-head">Export cut file</div>
+          <div class="export-scope" id="export-scope">All bodies</div>
+          <div class="export-row export-formats" role="radiogroup" aria-label="File format">
+            <label title="DXF R12 with true arcs, in the working units — for CAM software (Fusion 360, VCarve, Carbide Create, Easel, SheetCAM…)">
+              <input type="radio" name="export-format" value="dxf" checked /> DXF <span class="export-hint">CAM / router / plasma</span>
+            </label>
+            <label title="SVG in millimetres with true arcs — for laser software (LightBurn, Glowforge, xTool, Inkscape…)">
+              <input type="radio" name="export-format" value="svg" /> SVG <span class="export-hint">laser</span>
+            </label>
+          </div>
+          <div class="export-row">
+            <label title="Add a drill hole at every joint attached to an exported body (on its own layer / group)">
+              <input type="checkbox" id="export-joint-holes" /> Drill holes at joints
+            </label>
+            <label class="select-label" title="Joint hole diameter, in working units">
+              <span class="prop-tag">⌀</span>
+              <input id="export-joint-dia" type="number" min="0" step="any" value="3" />
+              <span class="prop-unit" id="export-joint-unit">mm</span>
+            </label>
+          </div>
+          <div class="export-actions">
+            <button type="button" id="export-cancel">Cancel</button>
+            <button type="button" id="export-go" class="active">Export</button>
+          </div>
+        </div>
         <nav id="crumb-bar" class="hidden" aria-label="Component editing path"></nav>
         <!-- Component browser: definitions with rename / insert / edit / delete. -->
         <aside id="comp-panel" class="hidden" aria-label="Component browser">

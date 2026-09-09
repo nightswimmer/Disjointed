@@ -22,6 +22,7 @@ import {
   reexpandData,
 } from "./model";
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
+import { collectCutSheet, toDxf, toSvg } from "./export";
 import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig, resetPoseBaselines } from "./solver";
 import {
   solveSketch, tryAddConstraint, autoConstrainBody, SketchBreak,
@@ -1243,17 +1244,115 @@ function redo(): void {
   setDocument(JSON.parse(e.snap) as SceneData, e.path);
 }
 
-function saveToFile(): void {
-  const json = JSON.stringify(canonicalData(), null, 2);
-  const blob = new Blob([json], { type: "application/json" });
+/** Offer `text` as a file download named `name`. */
+function downloadText(text: string, name: string, mime: string): void {
+  const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
   const a = document.createElement("a");
   a.href = url;
-  a.download = `mechanism-${stamp}.json`;
+  a.download = name;
   a.click();
   URL.revokeObjectURL(url);
 }
+
+function timeStamp(): string {
+  return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+}
+
+function saveToFile(): void {
+  downloadText(JSON.stringify(canonicalData(), null, 2), `mechanism-${timeStamp()}.json`, "application/json");
+}
+
+// --- cut-file export (src/export.ts) -----------------------------------------
+const exportPanel = document.getElementById("export-panel")!;
+const exportBtn = document.getElementById("export-btn") as HTMLButtonElement;
+const exportScopeLabel = document.getElementById("export-scope")!;
+const exportJointHoles = document.getElementById("export-joint-holes") as HTMLInputElement;
+const exportJointDia = document.getElementById("export-joint-dia") as HTMLInputElement;
+const exportJointUnit = document.getElementById("export-joint-unit")!;
+
+/** The bodies an export covers: the selected one(s), or every body when nothing is selected. */
+function exportTargets(): Body[] {
+  if (selection?.kind === "body") {
+    const b = scene.getBody(selection.id);
+    return b ? [b] : [];
+  }
+  if (multiSel && multiSel.bodies.size) {
+    return scene.bodies.filter((b) => multiSel!.bodies.has(b.id));
+  }
+  return scene.bodies;
+}
+
+function setExportPanelVisible(on: boolean): void {
+  if (on) {
+    const targets = exportTargets();
+    const all = targets.length === scene.bodies.length;
+    exportScopeLabel.textContent =
+      targets.length === 0
+        ? "No bodies to export"
+        : `${targets.length} ${targets.length === 1 ? "body" : "bodies"} (${all ? "all" : "selected"}), in ${scene.unit}`;
+    exportJointUnit.textContent = scene.unit;
+    exportJointDia.disabled = !exportJointHoles.checked;
+  }
+  exportPanel.classList.toggle("hidden", !on);
+  exportBtn.classList.toggle("active", on);
+}
+
+/**
+ * File stem of an export. The bodies' **component** is the single instance they all
+ * belong to (in any context), else the definition being edited (`editPath`), else none.
+ * With a component: its name when the export covers every body of it (a whole instance,
+ * or "export all" inside a definition), `<component>-body_<n>` for one body of several
+ * (n = its position in the component), `<component>-bodies` for a partial selection.
+ * Without one: `body` for a single body, `bodies` otherwise.
+ */
+function exportFileStem(targets: Body[]): string {
+  const safe = (name: string) => name.trim().replace(/[^\w\-]+/g, "_").replace(/^_+|_+$/g, "") || "component";
+  let comp: { name: string; bodyIds: number[] } | null = null;
+  const insts = targets.map((b) => scene.instanceOfBody(b.id));
+  if (insts[0] && insts.every((i) => i === insts[0])) {
+    comp = { name: scene.getComponent(insts[0].defId)?.name ?? `component_${insts[0].defId}`, bodyIds: insts[0].bodyMap.map((e) => e.id) };
+  } else if (editPath.length) {
+    const defId = editPath[editPath.length - 1];
+    comp = { name: scene.getComponent(defId)?.name ?? "component", bodyIds: scene.bodies.map((b) => b.id) };
+  }
+  if (!comp) return targets.length === 1 ? "body" : "bodies";
+  const members = comp.bodyIds.filter((id) => scene.getBody(id));
+  const name = safe(comp.name);
+  if (targets.every((b) => members.includes(b.id)) && members.every((id) => targets.some((b) => b.id === id))) return name;
+  if (targets.length === 1) return `${name}-body_${members.indexOf(targets[0].id) + 1}`;
+  return `${name}-bodies`;
+}
+
+function runExport(): void {
+  const targets = exportTargets();
+  if (!targets.length) {
+    notify("Nothing to export — draw a body first.");
+    return;
+  }
+  const picked = document.querySelector('input[name="export-format"]:checked') as HTMLInputElement | null;
+  const format = picked?.value ?? "dxf";
+  const dia = exportJointHoles.checked ? Math.max(0, parseFloat(exportJointDia.value) || 0) : 0;
+  const sheet = collectCutSheet(scene, targets, { jointHoleDiameter: dia });
+  const stem = `${exportFileStem(targets)}-${timeStamp()}`;
+  if (format === "svg") downloadText(toSvg(sheet), `${stem}.svg`, "image/svg+xml");
+  else downloadText(toDxf(sheet), `${stem}.dxf`, "application/dxf");
+  setExportPanelVisible(false);
+  const holes = sheet.joints.length ? `, ${sheet.joints.length} joint hole${sheet.joints.length === 1 ? "" : "s"}` : "";
+  notify(`Exported ${targets.length} ${targets.length === 1 ? "body" : "bodies"} as ${format.toUpperCase()}${holes}.`, "info");
+}
+
+exportBtn.addEventListener("click", () => setExportPanelVisible(exportPanel.classList.contains("hidden")));
+document.getElementById("export-cancel")!.addEventListener("click", () => setExportPanelVisible(false));
+document.getElementById("export-go")!.addEventListener("click", runExport);
+exportJointHoles.addEventListener("change", () => {
+  exportJointDia.disabled = !exportJointHoles.checked;
+});
+exportPanel.addEventListener("keydown", (e) => {
+  e.stopPropagation(); // keep canvas shortcuts out of the panel's fields
+  if (e.key === "Escape") setExportPanelVisible(false);
+  else if (e.key === "Enter" && e.target instanceof HTMLInputElement) runExport();
+});
 
 async function loadFromFile(file: File): Promise<void> {
   try {
@@ -3612,6 +3711,10 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Escape") {
+    if (!exportPanel.classList.contains("hidden")) {
+      setExportPanelVisible(false);
+      return;
+    }
     // Abort the current placement / drag and return to the mode's normal state
     // (in sim this also disarms the measure tool). With nothing armed or selected
     // while editing a component definition, Esc steps back out one level.
