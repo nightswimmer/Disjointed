@@ -414,7 +414,7 @@ input[type="color"]#body-color::-webkit-color-swatch {
   top: 10px;
   right: 12px;
   z-index: 2;
-  width: 240px;
+  width: 320px;
   max-height: calc(100% - 20px);
   display: flex;
   flex-direction: column;
@@ -438,11 +438,40 @@ input[type="color"]#body-color::-webkit-color-swatch {
   flex: 1 1 auto;
 }
 #comp-list .comp-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 8px;
+  padding: 4px 8px 4px 4px;
   border-bottom: 1px solid var(--panel-border);
+  background: var(--panel);
+}
+/* Canvas ↔ list mirroring: the hovered instance's row, and the selected instances' rows. */
+#comp-list .comp-row.hover {
+  background: var(--control-hover);
+}
+#comp-list .comp-row.selected {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+/* Drag-to-reorder: grab the grip; while a row is dragged the others slide out of its way. */
+#comp-list .comp-grip {
+  flex: 0 0 auto;
+  width: 14px;
+  color: var(--text-dim);
+  letter-spacing: -3px;
+  cursor: grab;
+  text-align: center;
+}
+#comp-list .comp-row.dragging {
+  z-index: 1;
+  background: var(--control);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+#comp-list .comp-row.dragging .comp-grip {
+  cursor: grabbing;
+}
+#comp-list.reordering .comp-row:not(.dragging) {
+  transition: transform 140ms ease;
 }
 #comp-list .comp-name {
   flex: 1 1 auto;
@@ -464,12 +493,16 @@ input[type="color"]#body-color::-webkit-color-swatch {
 }
 #comp-list .comp-btn {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   border-radius: 4px;
   background: var(--control);
   color: var(--text);
   width: 24px;
   height: 24px;
+  padding: 0;
   cursor: pointer;
   font-size: 12px;
   line-height: 1;

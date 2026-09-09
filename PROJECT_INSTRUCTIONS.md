@@ -467,6 +467,31 @@ bodyPoint refs re-anchor. Refused with an alert when the bodies **don't all conn
 (overlap or share an edge — "N bodies don't touch the rest"), **touch only at a point**
 (the union would pinch), or include component instances. New test script
 `scripts/split-combine.ts` (69 checks). Not yet confirmed by eye in the browser.
+**Component browser polish (no format change)**: the panel is wider (320 px, buttons with
+centred glyphs) and gained three interactions. **Drag-to-reorder**: every row starts with a
+`⋮⋮` grip — press and drag it and the row follows the cursor (clamped to the list) while
+the other rows slide out of its way (CSS transform transitions); on release
+`scene.components` is re-spliced, then `markDirty` (so the order persists in save/autosave
+and is an undo step). This is *list order only* — nothing else refers to the array order
+(the def cascade is a fixpoint loop). **Canvas → list**: every frame the rows mirror the
+canvas — rows of definitions whose instances are selected get an accent bar, and the row(s)
+of the component material under the cursor get a hover background. Hover uses the **whole
+def chain** (`Scene.componentChainOf(kind, id)`: enclosing def → … → the element's own
+def), so hovering a body of B nested inside an A instance lights both rows; selection
+highlights only the top-level def. Works in both modes (falls back to `bodyAt(cursor)` when
+`hoverBody` is unset). **List → canvas, recursive**: hovering a row highlights **every
+occurrence** of that definition in the current context — direct instances *and* ones
+nested inside other components' instances at any depth — via
+`Scene.componentOccurrences(defId)` (a nested instance has no record in the context; its
+material is traced def-local id → enclosing instance map → … → context ids). The renderer
+gets `highlightOccurrences: ComponentOccurrence[] | null` and runs a **focus pass** after
+everything else: a `theme.surface` veil at `FOCUS_VEIL_ALPHA = 0.8` fades the whole
+picture (grid, annotations included) to ~20 %, then the occurrences' bodies (hover tint),
+one dashed hull each (`drawMaterialHull`), and their joints (plus any assembly-level joint
+attached to a highlighted body) are redrawn on top at full strength. The body and joint
+drawing loops became closures (`drawBodyShape`, `drawJoint`) so the focus pass reuses them.
+While a row is being dragged the canvas highlight stays on the dragged definition. Seven new
+checks in `scripts/components.ts` (occurrences + chains on the nested Inner/Outer fixture).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -633,7 +658,12 @@ bodyPoint refs re-anchor. Refused with an alert when the bodies **don't all conn
     free joint — two refs with the same key can never be pose-dimensioned apart),
     `moveInstance(id, delta)` (rigid translation of everything the instance expanded),
     `instancePlacement(id)`, `componentUses(defId)` (transitive, for cycle
-    guards), `componentCenter(defId)`. **Ground conversion** in `expandInstance`: def
+    guards), `componentCenter(defId)`, `componentOccurrences(defId)` (every occurrence of
+    a def in this context as `ComponentOccurrence { bodyIds, jointIds }` in context ids —
+    direct instances plus ones nested inside other instances at any depth, traced through
+    the enclosing instances' src→id maps; UI highlight source), `componentChainOf(kind,
+    id)` (the defs a body / joint belongs to, outermost first; empty for plain material).
+    **Ground conversion** in `expandInstance`: def
     grounded bodies → chassis members (flag stripped; the *instance's* grounded flag is
     user state and survives re-expansion); def grounded free joints → group-locked chassis
     points; def joint-grounds on non-grounded bodies → `addFreeJoint` at the anchor +
@@ -1007,7 +1037,11 @@ bodyPoint refs re-anchor. Refused with an alert when the bodies **don't all conn
   behaviour is unchanged. Styled in `style.css` (`.toast*`, theme-aware).
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.05..20).
-- **renderer.ts** — **construction guidelines** (draw mode only) draw right after the grid:
+- **renderer.ts** — **component focus pass** (`highlightOccurrences`): after everything is
+  drawn, a surface-coloured veil (`FOCUS_VEIL_ALPHA` 0.8) fades the picture and the hovered
+  component's occurrences are redrawn on top (bodies via the `drawBodyShape` closure, a
+  dashed hull per occurrence via `drawMaterialHull`, joints via `drawJoint`). **Construction
+  guidelines** (draw mode only) draw right after the grid:
   muted dash-dot lines (`GUIDE_COLOR` grey) clipped to the viewport via `drawGuideLine`
   (the segment is centred on the view, so the line always spans it), with dots on the two
   defining points; the selected guide uses theme ink; `guideDraft` previews the infinite
@@ -1293,7 +1327,14 @@ bodyPoint refs re-anchor. Refused with an alert when the bodies **don't all conn
     (next canvas click instantiates at the snapped point, centered via `componentCenter`;
     cycle-guarded against `componentUses`; **refused with an alert for a still-empty def**),
     **✎** edits, **×** deletes (refused while instances exist anywhere or the def is on
-    `editPath`). `#make-comp-btn` packs the selection (`makeComponentFromSelection`;
+    `editPath`); a `⋮⋮` grip per row starts `startCompRowDrag` (pointer-driven reorder —
+    the dragged row follows the cursor, the others translate out of the way, release
+    re-splices `scene.components` + `markDirty`); `compRows` (def id → row) is rebuilt with
+    the panel and `syncCompPanelHighlight` (called per frame) toggles `.selected`
+    (`selectedDefIds`, top-level defs of selected instances) and `.hover`
+    (`hoveredCanvasDefs`, the def chain under the cursor); row `mouseenter` sets
+    `hoverDef`, and `highlightedOccurrences()` feeds the renderer's focus pass with
+    `scene.componentOccurrences(hoverDef)`. `#make-comp-btn` packs the selection (`makeComponentFromSelection`;
     refuses selections touching other instances; with exactly one instance selected forks
     it; **with nothing selected creates an empty component** via `createEmptyComponent`
     and enters it for editing straight away).
@@ -1824,7 +1865,10 @@ Persistence:
   **empty components** (`createEmptyComponent` stores a blank def; instantiation refused
   until it has content; fillable with bodies or with *only* an instance of another def —
   the wrapper appears in the def DAG); **nested defs** (editing the inner def ripples through
-  the outer def to the root; componentUses DAG direction); powered constraints inside a
+  the outer def to the root; componentUses DAG direction; `componentOccurrences` traces a
+  nested Inner into root ids and lists Outer's direct occurrence; `componentChainOf` gives
+  Outer→Inner for a nested body, Outer for Outer's own body, empty for plain material);
+  powered constraints inside a
   component (slider + actuator expand with no world grounds; anchors drive the rider along
   the chassis track); removal / dissolve / removeComponent guards; **fork / make-unique**
   (`makeInstanceUnique`: new def, re-pointed instance, sibling untouched, drift-0 no-op
@@ -2133,8 +2177,8 @@ Persistence:
   override record); assembly measurements referencing an instance's *slider rail* survive
   re-expansion (constraints are reconciled in place) but die if the def removes the slider;
   a definition with nothing grounded has no chassis — its instance placement is derived
-  from the first body (fine, by design decision); the component browser is minimal (no
-  thumbnails / drag-to-place).
+  from the first body (fine, by design decision); the component browser has no thumbnails
+  or drag-to-place yet (it does have drag-to-reorder and two-way hover/selection highlighting).
 - **Hole follow-ups**: ~~editable hole vertices, measurements / sketch constraints on hole
   geometry, corner radius on holes~~ (all done in v16), ~~a UI to create holes~~ (done —
   the hole tool). Remaining: a hole-aware picking option (today clicking a cut-out

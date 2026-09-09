@@ -277,7 +277,11 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   than moved — drag it back inside or adjust the definition.
 - The **component browser** lists definitions: rename inline, **＋** inserts an instance (click
   the canvas to place it), **✎** edits, **×** deletes (refused while instances exist).
-  Circular references are rejected.
+  Circular references are rejected. Drag a row's **⋮⋮** grip to **reorder** the list (the
+  other rows slide out of the way; the order is saved with the file). The list and the canvas
+  **mirror each other**: hovering a row **fades everything else** and highlights every
+  occurrence of that component — including ones nested inside other components — while
+  hovering or selecting a component on the canvas highlights its row(s) in the list.
 - **Fork an instance ("make unique")**: press **⊞** with a component instance selected and its
   definition is copied into a new independent component (named *“&lt;source&gt; copy”*), with the
   selected instance re-pointed at the copy — nothing moves, and from then on the two components

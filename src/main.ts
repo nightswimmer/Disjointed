@@ -7,6 +7,7 @@ import {
   RoundMode,
   SelectionClip,
   ComponentInstance,
+  ComponentOccurrence,
   InstanceTransform,
   LinearActuatorConstraint,
   MotorConstraint,
@@ -194,6 +195,7 @@ let jointDraftExpanding = false; // body-from-joints: sizing the outward margin
 let cursor: Vec2 | null = null; // world coordinates
 let hoverJoint: number | null = null;
 let hoverBody: number | null = null; // body under the cursor in normal mode
+let hoverDef: number | null = null; // component definition hovered in the browser list
 let selectedJoint: number | null = null; // first pick for connect
 let railDraftIds: number[] = []; // rail joints picked so far for the rail tool (0–2)
 let guideDraft: Vec2 | null = null; // guide tool: the first defining point placed
@@ -1481,9 +1483,14 @@ function setCompPanelVisible(on: boolean): void {
   if (on) updateCompPanel();
 }
 
+/** Browser rows by definition id (rebuilt with the panel; highlighted per frame). */
+const compRows = new Map<number, HTMLElement>();
+
 function updateCompPanel(): void {
   if (!compPanelVisible) return;
   compList.innerHTML = "";
+  compRows.clear();
+  hoverDef = null; // the rows are recreated — the cursor re-enters one on its next move
   if (scene.components.length === 0) {
     const empty = document.createElement("div");
     empty.className = "comp-empty";
@@ -1491,9 +1498,24 @@ function updateCompPanel(): void {
     compList.appendChild(empty);
     return;
   }
-  for (const def of scene.components) {
+  scene.components.forEach((def, index) => {
     const row = document.createElement("div");
     row.className = "comp-row";
+    compRows.set(def.id, row);
+    // Hovering a row highlights that definition's instances on the canvas (while a row
+    // is being dragged the highlight stays on the dragged definition).
+    row.addEventListener("mouseenter", () => {
+      if (!compList.classList.contains("reordering")) hoverDef = def.id;
+    });
+    row.addEventListener("mouseleave", () => {
+      if (hoverDef === def.id && !compList.classList.contains("reordering")) hoverDef = null;
+    });
+    const grip = document.createElement("span");
+    grip.className = "comp-grip";
+    grip.textContent = "⋮⋮";
+    grip.title = "Drag to reorder the list";
+    grip.addEventListener("mousedown", (e) => startCompRowDrag(e, index));
+    row.appendChild(grip);
     const name = document.createElement("input");
     name.className = "comp-name";
     name.value = def.name;
@@ -1521,7 +1543,103 @@ function updateCompPanel(): void {
     row.appendChild(mkBtn("✎", "Edit this component's definition", "", () => enterComponent(def.id)));
     row.appendChild(mkBtn("×", "Delete this component (refused while instances of it exist)", "danger", () => deleteComponentUI(def.id)));
     compList.appendChild(row);
+  });
+  syncCompPanelHighlight();
+}
+
+/**
+ * Drag-to-reorder in the component browser: the grabbed row follows the cursor (kept
+ * within the list) while the other rows slide out of its way; on release
+ * `scene.components` is re-spliced to the new order. This is list order only — it is
+ * persisted with the document and undoable, but nothing else refers to it.
+ */
+function startCompRowDrag(e: MouseEvent, from: number): void {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const rows = [...compList.querySelectorAll<HTMLElement>(".comp-row")];
+  const dragged = rows[from];
+  if (!dragged || rows.length < 2) return;
+  const rects = rows.map((r) => r.getBoundingClientRect());
+  const h = rects[from].height;
+  const minDy = rects[0].top - rects[from].top;
+  const maxDy = rects[rects.length - 1].bottom - rects[from].bottom;
+  const startY = e.clientY;
+  let to = from;
+  hoverDef = scene.components[from]?.id ?? null;
+  compList.classList.add("reordering");
+  dragged.classList.add("dragging");
+  const onMove = (ev: MouseEvent): void => {
+    const dy = Math.max(minDy, Math.min(maxDy, ev.clientY - startY));
+    dragged.style.transform = `translateY(${dy}px)`;
+    // Insertion index = how many other rows have their midpoint above the dragged one's.
+    const center = rects[from].top + h / 2 + dy;
+    to = 0;
+    rects.forEach((r, i) => {
+      if (i !== from && r.top + r.height / 2 < center) to++;
+    });
+    rows.forEach((r, i) => {
+      if (i === from) return;
+      const shift = from < to && i > from && i <= to ? -h : to < from && i >= to && i < from ? h : 0;
+      r.style.transform = shift ? `translateY(${shift}px)` : "";
+    });
+  };
+  const onUp = (): void => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    compList.classList.remove("reordering");
+    dragged.classList.remove("dragging");
+    rows.forEach((r) => (r.style.transform = ""));
+    if (to !== from) {
+      const [def] = scene.components.splice(from, 1);
+      scene.components.splice(to, 0, def);
+      markDirty(); // rebuilds the list in the new order and records an undo step
+    }
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+
+/** Definitions whose instances are part of the current canvas selection. */
+function selectedDefIds(): Set<number> {
+  const out = new Set<number>();
+  const bodies = multiSel ? [...multiSel.bodies] : selection?.kind === "body" ? [selection.id] : [];
+  for (const id of bodies) {
+    const inst = scene.instanceOfBody(id);
+    if (inst) out.add(inst.defId);
   }
+  return out;
+}
+
+/** The definitions of the component material under the cursor (either mode): the
+ *  enclosing instance's def plus every nested def down to the element's own owner. */
+function hoveredCanvasDefs(): number[] {
+  if (hoverJoint !== null) {
+    const j = scene.getJoint(hoverJoint);
+    const chain = scene.componentChainOf("joint", hoverJoint);
+    if (chain.length > 0) return chain;
+    if (j && j.bodyId !== null) return scene.componentChainOf("body", j.bodyId);
+  }
+  const bodyId = hoverBody ?? (cursor ? scene.bodyAt(cursor)?.id ?? null : null);
+  return bodyId !== null ? scene.componentChainOf("body", bodyId) : [];
+}
+
+/** Per frame: mirror the canvas selection / hover onto the browser rows. */
+function syncCompPanelHighlight(): void {
+  if (!compPanelVisible || compRows.size === 0) return;
+  const selected = selectedDefIds();
+  const hovered = hoveredCanvasDefs();
+  for (const [defId, row] of compRows) {
+    row.classList.toggle("selected", selected.has(defId));
+    row.classList.toggle("hover", hovered.includes(defId));
+  }
+}
+
+/** Every occurrence of the definition hovered in the browser — direct instances and
+ *  ones nested inside other components — highlighted on the canvas. */
+function highlightedOccurrences(): ComponentOccurrence[] | null {
+  if (hoverDef === null || !compPanelVisible) return null;
+  const occ = scene.componentOccurrences(hoverDef);
+  return occ.length > 0 ? occ : null;
 }
 
 /** Pack the current selection into a new component definition (replaced by an instance).
@@ -4255,6 +4373,7 @@ function frame(now?: number): void {
   syncColorPicker();
   syncPropsPanel();
   syncUnitSelect();
+  syncCompPanelHighlight();
   if (sketchFlash && performance.now() >= sketchFlash.until) sketchFlash = null;
   // Containment check (draw mode): flag joints a shape change stranded outside their
   // body. Refresh the hint when the count changes so the warning appears/clears itself.
@@ -4275,6 +4394,7 @@ function frame(now?: number): void {
     cursor,
     hoverJoint,
     hoverBody: mode === "draw" && tool === null ? hoverBody : null,
+    highlightOccurrences: highlightedOccurrences(),
     activeJoints: activeJoints(),
     // In sim only a measurement selection is meaningful (labels stay editable there).
     selection: mode === "draw" ? selection : selection?.kind === "measure" ? selection : null,

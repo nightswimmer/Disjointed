@@ -464,6 +464,28 @@ function editDef(scene: Scene, defId: number, mutate: (s: Scene) => void): Set<n
   const outerInst = scene.instantiateComponent(outerId, { pos: { x: 500, y: 500 }, angle: 0 })!;
   check("outer instance expands nested material", outerInst.bodyMap.length === 2, `${outerInst.bodyMap.length} bodies`);
 
+  // Occurrences: Inner has no instance record at the root (it sits inside Outer), but its
+  // material is traced through Outer's maps into root ids; Outer's own occurrence is direct.
+  const occInner = scene.componentOccurrences(defA);
+  const innerBodyId = occInner[0]?.bodyIds[0];
+  check(
+    "nested occurrence traced to root ids",
+    occInner.length === 1 && occInner[0].bodyIds.length === 1 && innerBodyId !== undefined && scene.getBody(innerBodyId) !== undefined,
+    `${occInner.length} occurrence(s), bodies ${occInner[0]?.bodyIds.join(",") ?? "-"}`
+  );
+  check("nested occurrence body belongs to the Outer instance", outerInst.bodyMap.some((e) => e.id === innerBodyId), `body ${innerBodyId}`);
+  const occOuter = scene.componentOccurrences(outerId);
+  check("direct occurrence lists the whole instance", occOuter.length === 1 && occOuter[0].bodyIds.length === 2, `${occOuter[0]?.bodyIds.length ?? 0} bodies`);
+  check("no occurrences for an unused def id", scene.componentOccurrences(9999).length === 0, "none");
+  const chainInner = scene.componentChainOf("body", innerBodyId!);
+  check("chain of a nested body: Outer → Inner", chainInner.join(",") === `${outerId},${defA}`, chainInner.join(","));
+  const shellBodyId = outerInst.bodyMap.find((e) => e.id !== innerBodyId)!.id;
+  const chainShell = scene.componentChainOf("body", shellBodyId);
+  check("chain of Outer's own body: Outer only", chainShell.join(",") === `${outerId}`, chainShell.join(","));
+  const plain = square(scene, -300, -300);
+  check("plain body has an empty chain", scene.componentChainOf("body", plain.id).length === 0, "empty");
+  scene.removeBody(plain.id);
+
   // Edit Inner: scale its body; the change must ripple Outer → root.
   const before = scene.getBody(outerInst.bodyMap[1]?.id ?? outerInst.bodyMap[0].id)!;
   const beforeVerts = before.local.length;

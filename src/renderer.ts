@@ -1,5 +1,14 @@
 /** Canvas rendering of the scene plus transient editor/sim overlays. */
-import { Scene, MeasureInfo, ResolvedMeasureRef, SketchConstraintKind } from "./model";
+import {
+  Scene,
+  Body,
+  Joint,
+  ComponentInstance,
+  ComponentOccurrence,
+  MeasureInfo,
+  ResolvedMeasureRef,
+  SketchConstraintKind,
+} from "./model";
 import { Vec2, sub, distToSegment, normalize, scale, convexHull } from "./geometry";
 import { View } from "./view";
 import { ConstraintBreak } from "./solver";
@@ -13,6 +22,10 @@ export interface RenderInput {
   hoverJoint: number | null;
   /** Body hovered in normal/select mode (for pre-selection feedback). */
   hoverBody: number | null;
+  /** Occurrences of the component hovered in the component browser (direct instances and
+   *  ones nested inside other instances): the rest of the picture fades, these draw on
+   *  top with the hover tint plus a dashed hull each. */
+  highlightOccurrences: ComponentOccurrence[] | null;
   /** Joints highlighted as in-progress tool picks (connect's first pick, rail picks). */
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
@@ -217,11 +230,13 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     input.selection?.kind === "body" ? input.selection.id : null;
   const multiBodies = new Set(input.multiSelected?.bodies ?? []);
   const multiJoints = new Set(input.multiSelected?.joints ?? []);
-  for (const body of scene.bodies) {
+  const highlightBodies = new Set<number>();
+  for (const occ of input.highlightOccurrences ?? []) for (const id of occ.bodyIds) highlightBodies.add(id);
+  const drawBodyShape = (body: Body): void => {
     const verts = scene.bodyWorldVerts(body);
     const holes = scene.bodyHolesWorld(body);
     const isSelected = body.id === selectedBody || multiBodies.has(body.id);
-    const isHover = body.id === input.hoverBody;
+    const isHover = body.id === input.hoverBody || highlightBodies.has(body.id);
     // Outer outline + hole loops as subpaths: even-odd fill leaves the holes empty.
     ctx.beginPath();
     verts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
@@ -235,7 +250,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.strokeStyle = isSelected ? theme.ink : body.color;
     ctx.lineWidth = px(isSelected || isHover ? 3 : 2);
     ctx.stroke(); // strokes every subpath, so hole rims get the outline too
-  }
+  };
+  for (const body of scene.bodies) drawBodyShape(body);
 
   // Permanent groups: a faint dashed convex hull around a group's members (bodies +
   // locked free joints), drawn only while the group is selected (groups are
@@ -275,23 +291,31 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     }
     drawHull(pts);
   }
-  // Selected component instances: one dashed hull around everything the instance expanded.
+  // Selected component instances (and the ones highlighted from the component browser):
+  // one dashed hull around everything the instance expanded.
+  const drawMaterialHull = (bodyIds: Iterable<number>, jointIds: Iterable<number>): void => {
+    const pts: Vec2[] = [];
+    for (const id of bodyIds) {
+      const body = scene.getBody(id);
+      if (body) pts.push(...scene.bodyWorldVerts(body));
+    }
+    for (const id of jointIds) {
+      const j = scene.getJoint(id);
+      if (j && j.bodyId === null) pts.push(scene.jointWorld(j));
+    }
+    drawHull(pts);
+  };
+  const drawInstanceHull = (inst: ComponentInstance): void =>
+    drawMaterialHull(
+      inst.bodyMap.map((e) => e.id),
+      [...inst.jointMap, ...inst.anchorMap].map((e) => e.id)
+    );
   for (const inst of scene.instances) {
     const selected =
       inst.bodyMap.some((e) => multiBodies.has(e.id)) ||
       inst.jointMap.some((e) => multiJoints.has(e.id)) ||
       inst.anchorMap.some((e) => multiJoints.has(e.id));
-    if (!selected) continue;
-    const pts: Vec2[] = [];
-    for (const e of inst.bodyMap) {
-      const body = scene.getBody(e.id);
-      if (body) pts.push(...scene.bodyWorldVerts(body));
-    }
-    for (const e of [...inst.jointMap, ...inst.anchorMap]) {
-      const j = scene.getJoint(e.id);
-      if (j && j.bodyId === null) pts.push(scene.jointWorld(j));
-    }
-    drawHull(pts);
+    if (selected) drawInstanceHull(inst);
   }
 
   // Rails (drawn under joints): a bounded segment between the two rail joints, with
@@ -465,7 +489,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   // Joints involved in any unsatisfiable constraint — painted red to flag the stuck points.
   const brokenJoints = new Set<number>();
   for (const b of input.breaks) for (const id of b.joints) brokenJoints.add(id);
-  for (const j of scene.joints) {
+  const drawJoint = (j: Joint): void => {
     const p = scene.jointWorld(j);
     const isHover = input.hoverJoint === j.id;
     const isSelected =
@@ -523,7 +547,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       ctx.lineWidth = px(1.5);
       ctx.strokeRect(p.x - h, p.y - h, h * 2, h * 2);
     } else if (roles.pinned.has(j.id)) dot(ctx, p, px(2), theme.surface);
-  }
+  };
+  for (const j of scene.joints) drawJoint(j);
 
   // Linear-actuator riders: a green dashed ring around the joint badges it as self-driving
   // along the rail. Drawn after the joints so the badge ring sits on top of the joint dot.
@@ -648,7 +673,35 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false);
     if (preview) drawMeasurement(ctx, preview, view, dpr, theme, false, true, false, false, input.scene.unit);
   }
+
+  // Focus pass for the component browser's hover: veil the whole picture towards the
+  // background (everything else drops to ~20% strength), then redraw the highlighted
+  // occurrences — their bodies, hulls and joints — on top at full strength, so they
+  // stand out even in a crowded drawing. Occurrences nested inside other instances get
+  // their own hull, drawn around just their material.
+  if (input.highlightOccurrences && highlightBodies.size > 0) {
+    ctx.save();
+    ctx.globalAlpha = FOCUS_VEIL_ALPHA;
+    ctx.fillStyle = theme.surface;
+    ctx.fillRect(left, top, right - left, bottom - top);
+    ctx.restore();
+    for (const body of scene.bodies) if (highlightBodies.has(body.id)) drawBodyShape(body);
+    const focusJoints = new Set<number>();
+    for (const occ of input.highlightOccurrences) {
+      drawMaterialHull(occ.bodyIds, occ.jointIds);
+      for (const id of occ.jointIds) focusJoints.add(id);
+    }
+    // Joints attached to a highlighted body from outside the instance belong to the
+    // picture too (an assembly-level pin placed on an instance part).
+    for (const j of scene.joints) {
+      if (focusJoints.has(j.id) || (j.bodyId !== null && highlightBodies.has(j.bodyId))) drawJoint(j);
+    }
+  }
 }
+
+/** Focus pass veil: how far everything outside the highlighted instances fades
+ *  towards the background (0.8 leaves ~20% of the original strength). */
+const FOCUS_VEIL_ALPHA = 0.8;
 
 /** Accent colour for measurements (fixed across themes, like the other semantic accents). */
 const MEASURE_COLOR = "#46c2cb";

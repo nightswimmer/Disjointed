@@ -467,6 +467,15 @@ export interface ComponentInstance {
   groupId: number | null;
 }
 
+/** The material one occurrence of a component expanded into, in the ids of the context
+ *  being queried — a direct instance, or one nested inside other instances (see
+ *  `Scene.componentOccurrences`). */
+export interface ComponentOccurrence {
+  bodyIds: number[];
+  /** Mechanism joints + synthesized anchors. */
+  jointIds: number[];
+}
+
 /** A rigid placement mapping def-frame coordinates into the owning context. */
 export interface InstanceTransform {
   pos: Vec2;
@@ -2956,6 +2965,70 @@ export class Scene {
 
   instanceOfConstraint(constraintId: number): ComponentInstance | undefined {
     return this.instances.find((i) => i.constraintMap.some((e) => e.id === constraintId));
+  }
+
+  /**
+   * Every occurrence of `defId` in this context: its direct instances, plus instances
+   * nested inside other components' instances at any depth. A nested instance has no
+   * record in this context (only its enclosing instance does), so its material is traced
+   * def-local id → enclosing instance map → … → this context's ids.
+   */
+  componentOccurrences(defId: number): ComponentOccurrence[] {
+    const out: ComponentOccurrence[] = [];
+    type Lift = (id: number) => number | undefined;
+    const lifted = (entries: InstanceMapEntry[], lift: Lift): number[] =>
+      entries.map((e) => lift(e.id)).filter((id): id is number => id !== undefined);
+    const visit = (instances: ComponentInstance[], liftBody: Lift, liftJoint: Lift, depth: number): void => {
+      if (depth > 64) return; // defs form a DAG — a guard against corrupt data only
+      for (const inst of instances) {
+        const jointEntries = [...inst.jointMap, ...inst.anchorMap];
+        if (inst.defId === defId) {
+          out.push({ bodyIds: lifted(inst.bodyMap, liftBody), jointIds: lifted(jointEntries, liftJoint) });
+        }
+        const def = this.getComponent(inst.defId);
+        if (!def || !(def.data.instances ?? []).length) continue;
+        // Nested instances speak the def's local ids: map src → this instance's id, then lift on.
+        const bodyBySrc = new Map(inst.bodyMap.map((e) => [e.src, e.id]));
+        const jointBySrc = new Map(jointEntries.map((e) => [e.src, e.id]));
+        const through = (m: Map<number, number>, lift: Lift): Lift => (id) => {
+          const local = m.get(id);
+          return local === undefined ? undefined : lift(local);
+        };
+        visit(def.data.instances ?? [], through(bodyBySrc, liftBody), through(jointBySrc, liftJoint), depth + 1);
+      }
+    };
+    const identity: Lift = (id) => id;
+    visit(this.instances, identity, identity, 0);
+    return out;
+  }
+
+  /**
+   * The definitions a body / joint of this context belongs to, outermost first: the
+   * enclosing instance's def, then each nested def down to the one owning the element.
+   * Empty for plain (non-instance) material.
+   */
+  componentChainOf(kind: "body" | "joint", id: number): number[] {
+    const chain: number[] = [];
+    let instances = this.instances;
+    let cur = id;
+    for (let depth = 0; depth < 64; depth++) {
+      let hit: { inst: ComponentInstance; src: number } | null = null;
+      for (const inst of instances) {
+        const entries = kind === "body" ? inst.bodyMap : [...inst.jointMap, ...inst.anchorMap];
+        const e = entries.find((x) => x.id === cur);
+        if (e) {
+          hit = { inst, src: e.src };
+          break;
+        }
+      }
+      if (!hit) break;
+      chain.push(hit.inst.defId);
+      const def = this.getComponent(hit.inst.defId);
+      if (!def) break;
+      instances = def.data.instances ?? [];
+      cur = hit.src;
+    }
+    return chain;
   }
 
   /** The component instance that owns a reference's element, or undefined for plain /
