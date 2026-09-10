@@ -224,7 +224,10 @@ works in both modes. Measurements are saved with the mechanism.
   against its H) shows its badges in **red** until it's satisfied again.
 - **Sketch-aware dragging**: with constraints or driving dimensions present, dragging a node,
   joint, or body (and rotating) **re-solves the sketch live** — what you drag follows the
-  cursor as far as the constraints allow, and everything constrained to it comes along.
+  cursor as far as the constraints allow, and everything constrained to it comes along. A
+  body moved by a dimension or constraint moves **as a whole**: its holes and joints ride
+  with the outline (holes are as rigid as the outline — even a plate that gets squashed
+  against a dimension keeps its holes in place relative to it).
 - **Auto-constraints while drawing**: a freehand edge drawn within ~5° of horizontal /
   vertical snaps straight and gets the H/V constraint; a vertex clicked **on an existing
   joint or corner** lands exactly there and gets a coincident constraint.

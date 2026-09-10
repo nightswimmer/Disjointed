@@ -586,6 +586,47 @@ callers that want it. New test block in `scripts/components.ts`.
   rim-override + drive), `scripts/sketch.ts` (tied guides ×5 scenarios, two dims on one free
   guide + drag chaining).
 
+**Holes & joints ride with dimension-driven bodies + drift-free vertical dimensions (no
+format change)** — three sketch-solver fixes from one report ("the hole of the *other* square
+stays behind when a driving dimension moves it"):
+- **Whole-body rigid carry** (`applyRigidParts` in `sketch.ts`, run first in `applySystem`):
+  the sketch solver's variables are outer control vertices, written back one at a time through
+  `moveBodyVertex`, which deliberately keeps holes and non-stuck joints fixed in **world**
+  space (right for a corner tweak). A body whose outline a dimension / constraint moved as a
+  whole therefore left its holes and joints behind. Now, per body, the best-fit **translation
+  + rotation** mapping the current outer polygon onto the solved one (vertices outside the
+  system count as staying put) is applied first — when the solver holds **every** outer
+  vertex through `moveBody` / `rotateBody` (holes, joints, ground anchors all ride along) —
+  and the per-vertex pass applies only the residual reshape (zero for a rigid move).
+- **Holes on a reshaping body**: when only part of the outline is in the system (a plate
+  dimensioned to a locked guide by one edge and dragged: the far edge follows the cursor, so
+  the plate squashes), the **holes** alone follow the outline's rigid part — a squashed plate
+  keeps its hole centred instead of keeping the raw cursor motion. Non-stuck joints keep the
+  world-fixed reshape behaviour (an existing test asserts it deliberately).
+- **Hole / joint variables ride along too**: a hole vertex or joint that is itself a solver
+  variable (two holes with a vertical constraint between their centres, a joint H-aligned
+  with a hole) gets its solved position in the vertex pass — which undid the carry, because
+  the solver saw it satisfied where it was and never moved it. A body-owned variable the
+  solve left **unchanged** (within `sketchConfig.tol`) now has its solved position mapped
+  through the same rigid motion (holes always; joints only on a whole-body move); one the
+  solve *did* move (a hole dimensioned to the outline, a joint pulled by a coincident) keeps
+  its absolute solution.
+- **Axis-aligned shifts for H/V-constrained lines** (`axisNormalOf` / `alignedAxis`): a
+  line–line or point–line distance dimension shifted along the line's *momentary* normal.
+  Mid-sweep a side dimension pulls one corner before the other, tilting the edge for a
+  moment, and the shift along that tilted normal leaked a sideways component that nothing
+  pulled back (the body's x is free) — dragging a body *vertically* against a locked
+  horizontal guide made its dimensioned partner **walk sideways** (~0.1 unit per 70 of
+  refused drag, A and B in opposite directions). When either line carries a horizontal /
+  vertical sketch constraint the shift now runs along the exact world axis, signed to agree
+  with the momentary normal so the held side is unaffected. Lines without an H/V constraint
+  (two parallel 30° edges) are unchanged and still exposed to the leak — left for a general
+  fix if it ever shows. The rigid-fit rotation leaves a ~1e-4-per-frame residual on holes;
+  inside tolerance, noted in case a very long drag ever makes it visible.
+  Tests: `scripts/sketch.ts` (rigid pair + hole/joint carry, corner reshape carrying only
+  the rigid part, squashed plate keeps its hole centred, two aligned disk holes + H-aligned
+  joint on a guide-dimensioned rigid body, no sideways drift on refused vertical drag).
+
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
 - Constraint solver: **iterative position-based** (Gauss-Seidel projection).
@@ -1055,7 +1096,15 @@ callers that want it. New test block in `scripts/components.ts`.
   the exported `anchorVarsForBody` / `anchorVarsForJoint` / `anchorVarsForGuide` /
   `anchorVarForGuidePoint` / `anchorVarForVertex` helpers; main falls back to a
   symmetric re-solve whenever the anchored solve is infeasible, so live drags can never
-  leave a constraint visibly broken.
+  leave a constraint visibly broken. **Writeback** (`applySystem`): `applyRigidParts` runs
+  first — per body, the best-fit rigid motion of the outer outline (current → solved,
+  non-variables fixed) moves the whole body when every outer vertex is a variable
+  (`moveBody` / `rotateBody`), or just its holes when only part of the outline is held;
+  body-owned hole / joint variables the solve left unchanged have their solved positions
+  mapped through the same motion so the vertex pass doesn't undo the carry. Then vertices
+  (residual reshape via `moveBodyVertex`), then joints. Distance dimensions off an
+  **H/V-constrained line** shift along the exact world axis (`axisNormalOf`), not the line's
+  momentary normal, so a transient mid-sweep tilt can't leak motion into the free direction.
 - **pose.ts** — **pose-level sketch**: draw-mode driving dimensions (`isPoseDim`, both
   ends instance-owned) and sketch constraints (`isPoseConstraint`, every end
   instance-owned — a single-line H/V included) on component-instance geometry. They
@@ -1956,7 +2005,15 @@ Persistence:
   corner (guide + tied corner stay, re-solve holds); placing the tie itself still moves the
   guide; a guide on two grounded joints; a chained (guide-to-guide) tie. **Several dims on
   one free guide**: the first moves the guide, the second is accepted and moves the second
-  body, dragging the first body chains through the guide to the second.
+  body, dragging the first body chains through the guide to the second. **Rigid carry**:
+  two holed squares joined by a driving edge–edge gap — dragging one translates the other
+  whole with its hole and non-stuck joint riding along; a single pulled corner carries the
+  hole only by the outline's rigid part; a plate dimensioned by one edge to a locked guide
+  and dragged diagonally squashes but keeps its hole centred; a rigid body (H/V + side dims)
+  on a locked guide with two vertically-aligned disk holes and an H-aligned joint slides
+  horizontally only, holes and joint exact. **No sideways drift**: guide → A (edge–line) →
+  B (edge–edge), both rigid; ten refused vertical drag frames on B leave A and B within
+  1e-6 in x.
 - **measurements.ts** — axis selection from label placement (h / v / direct zones);
   point-point values + dimension-line geometry + preview parity; label move re-deriving the
   axis; values and label positions tracking moving geometry; point-line using the infinite
@@ -2278,6 +2335,18 @@ Persistence:
   cap every frame to ~2 cleanup sweeps with zero relative drift; the pre-existing
   drag-yield test tightened for free (max rail offset now exactly 0). Regression-tested
   in `scripts/welds.ts` (stats-asserted chain, snap-assembly, impossible cycle).
+
+- **Holes (and joints) stayed behind when a driving dimension moved a body.** Two holed
+  squares, a driving gap between them: dragging one moved the other's outline vertex by
+  vertex (`moveBodyVertex` keeps holes/joints world-fixed) so its hole didn't follow. Then,
+  with hole-to-hole constraints, the holes became solver variables whose stale solved
+  positions undid the carry. Fixed by `applyRigidParts` (whole-body / hole carry of the
+  outline's best-fit rigid motion, unchanged body-owned variables mapped along).
+- **Bodies walked sideways while a vertical drag was being refused.** Locked horizontal
+  guide → A → B by line–line dimensions: the edge–edge shift ran along A's *momentarily
+  tilted* edge normal (a side dimension pulls one corner first) and leaked into x, which
+  nothing constrained. Fixed by shifting along the exact world axis whenever a line in the
+  dimension is H/V-constrained (`axisNormalOf`).
 
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);

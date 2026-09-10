@@ -754,6 +754,153 @@ const TOL = sketchConfig.tol;
     `guide ${s.getGuide(g.id)!.a.y}, B top ${s.bodyControlWorld(B)[2].y}`);
 }
 
+// --- holes + joints ride along when a dimension moves a body ------------------
+{
+  // Two squares with a disk hole each; B also carries a joint not stuck to a corner.
+  // B is shape-locked (H/V edges + two driving side lengths) so a dimension to A can
+  // only translate it. Dragging A used to move B's outline vertex by vertex, leaving
+  // its hole and joint at their old world positions (`moveBodyVertex` keeps them
+  // world-fixed); the rigid part of the motion is now applied to the whole body.
+  const sq = (x: number, y: number, s: number) => [
+    { x, y }, { x: x + s, y }, { x: x + s, y: y + s }, { x, y: y + s },
+  ];
+  const s = new Scene();
+  const A = s.addBody(sq(0, 0, 100), 0, "fillet", [{ control: [{ x: 50, y: 50 }], radius: 20, round: "offset" }]);
+  const B = s.addBody(sq(200, 0, 100), 0, "fillet", [{ control: [{ x: 250, y: 50 }], radius: 20, round: "offset" }]);
+  autoConstrainBody(s, A.id);
+  autoConstrainBody(s, B.id);
+  const j = s.addJoint(B.id, { x: 270, y: 30 });
+  const vB = (i: number): MeasureRef => ({ kind: "vertex", bodyId: B.id, index: i });
+  const w = s.addMeasurement("draw", vB(0), vB(1), { x: 250, y: -20 })!;
+  const h = s.addMeasurement("draw", vB(1), vB(2), { x: 320, y: 50 })!;
+  check("B side dims drive", applyDrivingDimension(s, w.id, 100).length === 0 && applyDrivingDimension(s, h.id, 100).length === 0);
+  const gap = s.addMeasurement("draw", { kind: "edge", bodyId: A.id, index: 1 }, { kind: "edge", bodyId: B.id, index: 3 }, { x: 150, y: 50 })!;
+  check("A–B gap dimension drives", applyDrivingDimension(s, gap.id, 100).length === 0);
+  s.moveBody(A.id, { x: 30, y: 10 });
+  check("drag re-solve holds", solveSketch(s, new Set(anchorVarsForBody(s, A.id))).length === 0);
+  const c0 = s.bodyControlWorld(B)[0];
+  check("B translated whole", near(c0.x, 230, TOL * 2) && near(s.bodyControlWorld(B)[2].x, 330, TOL * 2), `${c0.x}, ${s.bodyControlWorld(B)[2].x}`);
+  const hole = s.bodyHoleControlWorld(B, 0)[0];
+  check("B's hole rode along", near(hole.x - c0.x, 50, TOL * 2) && near(hole.y - c0.y, 50, TOL * 2), `${hole.x - c0.x}, ${hole.y - c0.y}`);
+  const jw = s.jointWorld(j);
+  check("B's joint rode along", near(jw.x - c0.x, 70, TOL * 2) && near(jw.y - c0.y, 30, TOL * 2), `${jw.x - c0.x}, ${jw.y - c0.y}`);
+  check("A's hole rode along too", near(s.bodyHoleControlWorld(A, 0)[0].x, 80, TOL * 2) && near(s.bodyHoleControlWorld(A, 0)[0].y, 60, TOL * 2));
+  // A genuine reshape (one corner pulled, the others outside the system) carries the
+  // hole only by the outline's rigid part — never the full corner move.
+  const t = new Scene();
+  const P = t.addBody(sq(0, 0, 100), 0, "fillet", [{ control: [{ x: 50, y: 50 }], radius: 20, round: "offset" }]);
+  const Q = t.addBody(sq(200, 0, 100), 0, "fillet", [{ control: [{ x: 250, y: 50 }], radius: 20, round: "offset" }]);
+  const d = t.addMeasurement("draw", { kind: "vertex", bodyId: P.id, index: 1 }, { kind: "vertex", bodyId: Q.id, index: 0 }, { x: 150, y: -20 })!;
+  check("corner–corner dimension drives", applyDrivingDimension(t, d.id, 100).length === 0);
+  t.moveBody(P.id, { x: 40, y: 0 });
+  check("reshape re-solve holds", solveSketch(t, new Set(anchorVarsForBody(t, P.id))).length === 0);
+  const qh = t.bodyHoleControlWorld(Q, 0)[0];
+  const moved = Math.hypot(qh.x - 250, qh.y - 50);
+  check("reshape carries the hole only by the outline's rigid part", moved > 0 && moved < 20, `${moved}`);
+
+  // Dragging a body dimensioned to a locked (tied) horizontal guide, like main.ts
+  // does per frame: moveBody, anchored solve fails (the guide can't yield), symmetric
+  // fallback. Without internal constraints only the dimensioned edge is a variable, so
+  // the body squashes; its hole used to keep the full cursor rise — now it stays centred.
+  const u = new Scene();
+  const R = u.addBody(sq(0, 0, 100), 0, "fillet", [{ control: [{ x: 50, y: 50 }], radius: 20, round: "offset" }]);
+  const g = u.addGuide({ x: -100, y: 150 }, { x: 300, y: 150 })!;
+  const fj = u.addFreeJoint({ x: -100, y: 150 });
+  u.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "a" }, { kind: "joint", jointId: fj.id });
+  const gd = u.addMeasurement("draw", { kind: "edge", bodyId: R.id, index: 2 }, { kind: "guideLine", guideId: g.id }, { x: 50, y: 125 })!;
+  check("edge–locked-guide dimension drives", applyDrivingDimension(u, gd.id, 50).length === 0);
+  for (let f = 0; f < 5; f++) {
+    u.moveBody(R.id, { x: 10, y: 7 });
+    if (solveSketch(u, new Set(anchorVarsForBody(u, R.id))).length > 0) solveSketch(u);
+  }
+  solveSketch(u);
+  const rv = u.bodyControlWorld(R);
+  const rh = u.bodyHoleControlWorld(R, 0)[0];
+  check("guide held, top edge held", near(u.getGuide(g.id)!.a.y, 150, TOL * 2) && near(rv[2].y, 100, TOL * 2), `${rv[2].y}`);
+  check("hole followed horizontally", near(rh.x, 100, TOL * 2), `${rh.x}`);
+  check("hole stays centred in the squashed body", near(rh.y, (rv[0].y + rv[3].y) / 2, TOL * 2), `hole ${rh.y}, outline ${rv[0].y}..${rv[3].y}`);
+
+  // Rigid body (H/V + side dims) dimensioned to the locked guide, with TWO disk holes
+  // aligned by a vertical constraint between their centres and a joint aligned
+  // horizontally with one of them. Those hole centres / the joint are solver
+  // variables the solve never moves (already satisfied), so the vertex pass used to
+  // re-apply their stale positions after the whole-body carry — the holes and the
+  // joint kept the cursor's full rise while the outline shed it.
+  const r = new Scene();
+  const S = r.addBody(sq(0, 0, 100), 0, "fillet", [
+    { control: [{ x: 50, y: 30 }], radius: 10, round: "offset" },
+    { control: [{ x: 50, y: 70 }], radius: 10, round: "offset" },
+  ]);
+  autoConstrainBody(r, S.id);
+  const vS = (i: number): MeasureRef => ({ kind: "vertex", bodyId: S.id, index: i });
+  applyDrivingDimension(r, r.addMeasurement("draw", vS(0), vS(1), { x: 50, y: -20 })!.id, 100);
+  applyDrivingDimension(r, r.addMeasurement("draw", vS(1), vS(2), { x: 120, y: 50 })!.id, 100);
+  const g2 = r.addGuide({ x: -100, y: 150 }, { x: 300, y: 150 })!;
+  const fj2 = r.addFreeJoint({ x: -100, y: 150 });
+  r.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g2.id, which: "a" }, { kind: "joint", jointId: fj2.id });
+  check("rigid body–guide dimension drives",
+    applyDrivingDimension(r, r.addMeasurement("draw", { kind: "edge", bodyId: S.id, index: 2 }, { kind: "guideLine", guideId: g2.id }, { x: 50, y: 125 })!.id, 50).length === 0);
+  const sj = r.addJoint(S.id, { x: 80, y: 30 });
+  const hc0: MeasureRef = { kind: "vertex", bodyId: S.id, index: 0, hole: 0 };
+  const hc1: MeasureRef = { kind: "vertex", bodyId: S.id, index: 0, hole: 1 };
+  check("vertical between hole centres accepted", r.addSketchConstraint("vertical", hc0, hc1) !== null);
+  check("horizontal joint–hole centre accepted", r.addSketchConstraint("horizontal", { kind: "joint", jointId: sj.id }, hc0) !== null);
+  check("hole-aligned body solves", solveSketch(r).length === 0);
+  for (let f = 0; f < 5; f++) {
+    r.moveBody(S.id, { x: 10, y: 7 });
+    if (solveSketch(r, new Set(anchorVarsForBody(r, S.id))).length > 0) solveSketch(r);
+  }
+  solveSketch(r);
+  const sv = r.bodyControlWorld(S);
+  check("rigid body slid horizontally only", near(sv[0].x, 50, TOL * 2) && near(sv[0].y, 0, TOL * 2) && near(sv[2].y, 100, TOL * 2), `${sv[0].x}, ${sv[0].y}`);
+  const k0 = r.bodyHoleControlWorld(S, 0)[0];
+  const k1 = r.bodyHoleControlWorld(S, 1)[0];
+  check("first aligned hole rode along", near(k0.x - sv[0].x, 50, TOL * 2) && near(k0.y - sv[0].y, 30, TOL * 2), `${k0.x - sv[0].x}, ${k0.y - sv[0].y}`);
+  check("second aligned hole rode along", near(k1.x - sv[0].x, 50, TOL * 2) && near(k1.y - sv[0].y, 70, TOL * 2), `${k1.x - sv[0].x}, ${k1.y - sv[0].y}`);
+  const sjw = r.jointWorld(sj);
+  check("constrained joint rode along", near(sjw.x - sv[0].x, 80, TOL * 2) && near(sjw.y - sv[0].y, 30, TOL * 2), `${sjw.x - sv[0].x}, ${sjw.y - sv[0].y}`);
+}
+
+// --- no sideways drift when dragging against vertical line–line dimensions --------
+{
+  // Locked horizontal guide → A (edge–line), A → B (edge–edge), both bodies rigid
+  // (H/V edges + side dims). Dragging B vertically is refused by the dimensions, but
+  // used to walk A (and B) sideways: mid-sweep a side dimension tilts A's top edge for
+  // a moment and the edge–edge shift along that tilted normal leaked into x, which
+  // nothing pulls back. H/V-constrained lines now shift along the exact world axis.
+  const sq = (x: number, y: number, s: number) => [
+    { x, y }, { x: x + s, y }, { x: x + s, y: y + s }, { x, y: y + s },
+  ];
+  const s = new Scene();
+  const rigid = (x: number, y: number) => {
+    const b = s.addBody(sq(x, y, 100), 0, "fillet", [{ control: [{ x: x + 50, y: y + 50 }], radius: 15, round: "offset" }]);
+    autoConstrainBody(s, b.id);
+    const v = (i: number): MeasureRef => ({ kind: "vertex", bodyId: b.id, index: i });
+    applyDrivingDimension(s, s.addMeasurement("draw", v(0), v(1), { x: x + 50, y: y - 20 })!.id, 100);
+    applyDrivingDimension(s, s.addMeasurement("draw", v(1), v(2), { x: x + 120, y: y + 50 })!.id, 100);
+    return b;
+  };
+  const g = s.addGuide({ x: -100, y: -50 }, { x: 300, y: -50 })!;
+  const fj = s.addFreeJoint({ x: -100, y: -50 });
+  s.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "a" }, { kind: "joint", jointId: fj.id });
+  const A = rigid(0, 0);
+  const B = rigid(0, 200);
+  check("guide–A edge dimension drives",
+    applyDrivingDimension(s, s.addMeasurement("draw", { kind: "edge", bodyId: A.id, index: 0 }, { kind: "guideLine", guideId: g.id }, { x: 50, y: -25 })!.id, 50).length === 0);
+  check("A–B edge–edge dimension drives",
+    applyDrivingDimension(s, s.addMeasurement("draw", { kind: "edge", bodyId: A.id, index: 2 }, { kind: "edge", bodyId: B.id, index: 0 }, { x: 150, y: 150 })!.id, 100).length === 0);
+  for (let f = 0; f < 10; f++) {
+    s.moveBody(B.id, { x: 0, y: 7 });
+    if (solveSketch(s, new Set(anchorVarsForBody(s, B.id))).length > 0) solveSketch(s);
+  }
+  solveSketch(s);
+  const a = s.bodyControlWorld(A)[0];
+  const b = s.bodyControlWorld(B)[0];
+  check("vertical drag of B refused (both stay at their heights)", near(a.y, 0, TOL * 2) && near(b.y, 200, TOL * 2), `${a.y}, ${b.y}`);
+  check("A did not drift sideways", near(a.x, 0, 1e-6), `${a.x}`);
+  check("B did not drift sideways", near(b.x, 0, 1e-6), `${b.x}`);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

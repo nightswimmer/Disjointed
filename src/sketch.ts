@@ -11,6 +11,7 @@
  * and returns the offending items as `SketchBreak`s (the UI flashes them red).
  */
 import {
+  sameMeasureRef,
   Scene,
   SketchConstraint,
   Measurement,
@@ -256,6 +257,30 @@ function acquire(scene: Scene, sys: System, key: string): number | null {
 function shareOf(rankA: number, rankB: number): number {
   if (rankA === rankB) return 0.5;
   return rankA < rankB ? 1 : 0;
+}
+
+/**
+ * The world-axis normal of a line ref that carries a horizontal / vertical sketch
+ * constraint ((0,1) for a horizontal line, (1,0) for a vertical one), or null. A
+ * distance measured off such a line shifts along this exact axis rather than the
+ * line's momentary normal: mid-sweep the line can be transiently tilted (a side
+ * dimension has pulled one end before the other), and a shift along that tilted
+ * normal leaks motion into the free direction that nothing pulls back — bodies drift
+ * sideways while being dragged against a vertical dimension.
+ */
+function axisNormalOf(scene: Scene, ref: MeasureRef): Vec2 | null {
+  for (const c of scene.sketch) {
+    if (c.refB !== null && c.refB !== undefined) continue;
+    if (c.kind !== "horizontal" && c.kind !== "vertical") continue;
+    if (!sameMeasureRef(c.refA, ref)) continue;
+    return c.kind === "horizontal" ? vec(0, 1) : vec(1, 0);
+  }
+  return null;
+}
+
+/** `axis` signed to agree with the momentary normal `n` (keeps the held side stable). */
+function alignedAxis(axis: Vec2, n: Vec2): Vec2 {
+  return dot(axis, n) < 0 ? scale(axis, -1) : axis;
 }
 
 // --- projections -------------------------------------------------------------
@@ -538,6 +563,7 @@ function buildDimensionItem(
     // align the directions, then set the gap along the common normal. The held side
     // (see the h/v case) keeps the pair from flipping through each other.
     const side = m.side ?? null;
+    const axisN = axisNormalOf(scene, m.refA) ?? axisNormalOf(scene, m.refB);
     return {
       id: m.id,
       kind: "dimension",
@@ -546,7 +572,8 @@ function buildDimensionItem(
         const d1 = sub(pos[a1], pos[a0]);
         const n1 = len(d1);
         if (n1 < EPS) return alignErr;
-        const n = perp(scale(d1, 1 / n1));
+        const nRaw = perp(scale(d1, 1 / n1));
+        const n = axisN ? alignedAxis(axisN, nRaw) : nRaw;
         const m1 = scale(add(pos[a0], pos[a1]), 0.5);
         const m2 = scale(add(pos[b0], pos[b1]), 0.5);
         const s = dot(sub(m2, m1), n);
@@ -576,6 +603,7 @@ function buildDimensionItem(
   if (p === null || l0 === null || l1 === null || p === l0 || p === l1) return "invalid";
   const wp = shareOf(rank(p), Math.min(rank(l0), rank(l1))); // fraction the point absorbs
   const side = m.side ?? null; // held side — the point can't flip across the line
+  const axisN = axisNormalOf(scene, lRef);
   return {
     id: m.id,
     kind: "dimension",
@@ -583,7 +611,8 @@ function buildDimensionItem(
       const d = sub(pos[l1], pos[l0]);
       const l = len(d);
       if (l < EPS) return target; // degenerate line: can't measure, full residual
-      const n = perp(scale(d, 1 / l));
+      const nRaw = perp(scale(d, 1 / l));
+      const n = axisN ? alignedAxis(axisN, nRaw) : nRaw;
       const s = dot(sub(pos[p], pos[l0]), n);
       const sg = side ?? (s === 0 ? 1 : Math.sign(s));
       const err = sg * target - s;
@@ -665,11 +694,13 @@ function residualBreaks(sys: System, items: SolveItem[]): SketchBreak[] {
 }
 
 /**
- * Write the solved positions back through the scene's edit paths: control vertices
- * first (bodies reshape; linked joints are carried), then joints (attached joints are
- * clamped into their — already reshaped — bodies; ground anchors follow).
+ * Write the solved positions back through the scene's edit paths: whole-body rigid
+ * motion first (see `applyRigidParts`), then control vertices (bodies reshape; linked
+ * joints are carried), then joints (attached joints are clamped into their — already
+ * reshaped — bodies; ground anchors follow).
  */
 function applySystem(scene: Scene, sys: System): void {
+  applyRigidParts(scene, sys);
   const order = sys.keys
     .map((key, i) => ({ key, i }))
     .sort((a, b) => Number(b.key.startsWith("v")) - Number(a.key.startsWith("v")));
@@ -689,6 +720,90 @@ function applySystem(scene: Scene, sys: System): void {
     } else if (parts[0] === "g") {
       scene.moveGuidePoint(Number(parts[1]), parts[2] as "a" | "b", sys.pos[i]);
     } else scene.moveJoint(Number(parts[1]), delta);
+  }
+}
+
+/**
+ * Move each body by the **rigid part** of its solved outline motion before the
+ * per-vertex writeback. `moveBodyVertex` keeps holes and non-stuck joints fixed in
+ * *world* space (right for a corner tweak), so a body whose whole outline is shifted
+ * by a dimension / constraint would otherwise leave its holes and joints behind. The
+ * best-fit translation + rotation mapping the current outer polygon onto the solved
+ * one (vertices outside the system count as staying put) is applied first, and the
+ * vertex pass then applies only the residual reshape (zero when the outline moved
+ * rigidly):
+ * - every outer vertex a solver variable → the whole body moves (`moveBody` /
+ *   `rotateBody`): holes, joints and ground anchors ride along;
+ * - otherwise the body is reshaping, not moving: only its **holes** follow the rigid
+ *   part (holes are material, as rigid as the outline — a squashed plate keeps its
+ *   hole centred), while non-stuck joints keep their world-fixed reshape behaviour.
+ *
+ * Hole vertices / joints that are solver **variables** (e.g. two holes with a
+ * vertical constraint between them) get their solved position in the vertex pass,
+ * which would undo the carry: the solver saw them satisfied where they were and
+ * never moved them. So a body-owned variable the solve left **unchanged** rides
+ * along — its solved position is mapped through the same rigid motion — while one
+ * the solve did move (a hole dimensioned to the outline, a joint pulled by a
+ * coincident) keeps its absolute solution.
+ */
+function applyRigidParts(scene: Scene, sys: System): void {
+  const init = sys.keys.map((k) => varWorld(scene, k)); // pre-writeback positions
+  const perBody = new Map<number, Map<number, Vec2>>();
+  sys.keys.forEach((key, i) => {
+    const parts = key.split(":");
+    if (parts[0] !== "v" || parts.length > 3) return; // outer control vertices only
+    const bodyId = Number(parts[1]);
+    let m = perBody.get(bodyId);
+    if (!m) perBody.set(bodyId, (m = new Map()));
+    m.set(Number(parts[2]), sys.pos[i]);
+  });
+  for (const [bodyId, solved] of perBody) {
+    const body = scene.getBody(bodyId);
+    if (!body) continue;
+    const whole = solved.size >= body.controlLocal.length; // solver holds every vertex
+    if (!whole && !body.holes?.length) continue; // a plain reshape: nothing to carry
+    const cur = scene.bodyControlWorld(body);
+    const tgt = cur.map((p, i) => solved.get(i) ?? p);
+    if (tgt.every((q, i) => len(sub(q, cur[i])) < EPS)) continue;
+    const n = cur.length;
+    const c0 = scale(cur.reduce((a, p) => add(a, p), vec(0, 0)), 1 / n);
+    const c1 = scale(tgt.reduce((a, p) => add(a, p), vec(0, 0)), 1 / n);
+    let sc = 0; // Σ cross(p', q')
+    let sd = 0; // Σ dot(p', q')
+    for (let i = 0; i < n; i++) {
+      const p = sub(cur[i], c0);
+      const q = sub(tgt[i], c1);
+      sc += p.x * q.y - p.y * q.x;
+      sd += dot(p, q);
+    }
+    const ang = Math.hypot(sc, sd) > EPS ? Math.atan2(sc, sd) : 0;
+    const delta = sub(c1, c0);
+    const carry = (p: Vec2) => add(c1, rotate(sub(p, c0), ang));
+    // Body-owned variables the solve left where they were ride with the body (holes
+    // always; joints only when the whole body moves — on a reshape they stay put).
+    sys.keys.forEach((key, i) => {
+      const parts = key.split(":");
+      const holeVar = parts[0] === "v" && parts.length > 3 && Number(parts[1]) === bodyId;
+      const jointVar = whole && parts[0] === "j" && scene.getJoint(Number(parts[1]))?.bodyId === bodyId;
+      const p0 = init[i];
+      if ((!holeVar && !jointVar) || !p0 || dist(sys.pos[i], p0) >= sketchConfig.tol) return;
+      sys.pos[i] = carry(sys.pos[i]);
+    });
+    if (whole) {
+      if (Math.abs(ang) > 1e-12) scene.rotateBody(bodyId, c0, ang);
+      if (len(delta) >= EPS) scene.moveBody(bodyId, delta);
+      continue;
+    }
+    // Partial reshape: carry each hole vertex by the outline's rigid part. Hole
+    // vertices that are variables themselves get their solved position in the vertex
+    // pass (deltas are re-read live), so moving them here is harmless.
+    for (let hi = 0; hi < body.holes!.length; hi++) {
+      const hw = scene.bodyHoleControlWorld(body, hi);
+      hw.forEach((p, k) => {
+        const d = sub(carry(p), p);
+        if (len(d) >= EPS) scene.moveBodyVertex(bodyId, k, d, hi);
+      });
+    }
   }
 }
 
