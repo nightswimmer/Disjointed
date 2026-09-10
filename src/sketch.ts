@@ -71,6 +71,16 @@ interface System {
    * body, the only thing that could move, never does).
    */
   tied: Pick<ReadonlySet<string>, "has">;
+  /**
+   * Guides carrying **two or more ties**. A single point-on-line tie is met by
+   * translating the guide onto the point (construction yields); a second one can't be —
+   * the translation that reaches one point leaves the other, and the two ties oscillate
+   * forever. Such a guide is the *reference* for its point-on-line ties: the points come
+   * to the line (like every other demand on a tied guide), so several corners / joints
+   * can be aligned on one guideline. Point–point ties are unaffected — they keep the
+   * guide's defining point glued to its joint / corner.
+   */
+  multiTied: ReadonlySet<number>;
 }
 
 /**
@@ -120,6 +130,21 @@ function tiedGuideVars(scene: Scene): Set<string> {
     }
   }
   return tied;
+}
+
+/** Ids of guides tied to geometry by two or more coincidences (see System.multiTied). */
+function multiTiedGuides(scene: Scene): Set<number> {
+  const count = new Map<number, number>();
+  for (const c of scene.sketch) {
+    if (c.kind !== "coincident" || !c.refB) continue;
+    const ga = isGuideRef(c.refA);
+    const gb = isGuideRef(c.refB);
+    if (ga === gb) continue; // geometry–geometry, or guide–guide: not a tie
+    const r = ga ? c.refA : c.refB;
+    if (r.kind !== "guidePoint" && r.kind !== "guideLine") continue;
+    count.set(r.guideId, (count.get(r.guideId) ?? 0) + 1);
+  }
+  return new Set([...count].filter(([, n]) => n >= 2).map(([id]) => id));
 }
 
 /** Mobility rank of a variable (see System.rank). */
@@ -377,8 +402,13 @@ function buildConstraintItem(
   const isLineRef = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
   // A guide–geometry coincidence is a *tie*: it always brings the guide to the geometry.
   const tie = kind === "coincident" && !!c.refB && isGuideRef(c.refA) !== isGuideRef(c.refB);
-  const rank = (i: number) => itemRank(sys, i, tie);
+  let rank = (i: number) => itemRank(sys, i, tie);
   if (kind === "coincident" && c.refB && (isLineRef(c.refA) || isLineRef(c.refB))) {
+    // A point-on-line tie onto a guide that carries several ties can't be met by
+    // translating the guide (see System.multiTied): the guide is the reference and
+    // the point comes to it.
+    const gl = c.refA.kind === "guideLine" ? c.refA : c.refB.kind === "guideLine" ? c.refB : null;
+    if (gl && sys.multiTied.has(gl.guideId)) rank = (i: number) => itemRank(sys, i, false);
     // Point on an infinite line: zero the signed perpendicular distance. The model
     // normalizes the point into refA, but handle either order (robust to hand-edited
     // saves). Same projection as a point+line driving dimension with target 0.
@@ -671,6 +701,7 @@ function buildSystem(
   const sys: System = {
     keys: [], pos: [], index: new Map(), rank: [], anchorSet: anchors,
     tied: guidesAsReference ? { has: () => true } : tiedGuideVars(scene),
+    multiTied: multiTiedGuides(scene),
   };
   const items: SolveItem[] = [];
   const invalid: SketchBreak[] = [];

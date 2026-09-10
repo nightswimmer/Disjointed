@@ -317,7 +317,18 @@ point is normalized into `refA`, where the single badge anchors) and holds the p
 the signed perpendicular distance, split by the usual mobility ranks (a joint constrained
 onto a guideline moves the guide, not the joint; a drag stays pinned). A point that *is* a
 defining point of the line (an edge's end vertex, a rail's own joint, a guide's own point)
-is rejected as a permanent no-op.
+is rejected as a permanent no-op. **Several points on one guideline** (`System.multiTied`,
+`multiTiedGuides` in `sketch.ts`): the point-on-line correction only *translates* a guide
+(angle kept), so a second point onto the same guide could never be met that way — the two
+ties oscillated and the constraint was rejected. A guide carrying **two or more ties** (of
+either kind) is now the **reference** for its point-on-line ties: later points move
+perpendicular onto the line while the guide and the first tie stay; dragging any aligned
+point across the line carries the guide and the other aligned points, dragging the guide
+carries them all. Point–point ties are untouched (the guide's defining point stays glued to
+its joint / corner — the blunt version, "every tie yields to a multi-demand guide", broke
+the locked-guide drag tests: a body dragged against a dimension to a glued guide would tow
+the guide and its joint). Also fixes the mixed case (guide glued to joint A + joint B on
+its line: B comes to the line; used to be rejected).
 **Rails & sliders (v17)**: the old slider-line tool is now called **Rail** (`K`; the line
 joints ride along — "track"/"rail" in CAD terms; the constraint keeps `kind: "slider"`
 internally for format compatibility, but the tool id, selection kind `"rail"`, and all
@@ -2109,7 +2120,10 @@ Persistence:
   driving; rejects (conflicting dims leave the scene byte-identical, angle dims and
   sim-mode dims can't drive, non-positive targets); `tryAddConstraint` rollback;
   `autoConstrainBody` H/V inference (diagonals left alone); cascade removal + vertex/edge
-  index remapping; serialize/load v8 round-trip + pre-v8 files. **Hole geometry (v16)**:
+  index remapping; serialize/load v8 round-trip + pre-v8 files; **several points onto one
+  guideline** (three joints accepted, guide + first joint held, later joints moved
+  perpendicular; dragging an aligned joint / the guide carries the rest; glued guide +
+  point-on-line accepted). **Hole geometry (v16)**:
   a horizontal constraint on a hole edge solves by reshaping the hole (outer outline
   untouched), and joint ↔ hole-corner coincident solves to coincidence. **Point-on-line
   coincident**: validation (line-first pick order normalized to point-as-refA, line+line
@@ -2485,6 +2499,11 @@ Persistence:
   tilted* edge normal (a side dimension pulls one corner first) and leaked into x, which
   nothing constrained. Fixed by shifting along the exact world axis whenever a line in the
   dimension is H/V-constrained (`axisNormalOf`).
+- **A second point coincident onto the same guideline was always rejected.** Point-on-line
+  ties only translate the guide, so reaching one point left the other and the two ties
+  oscillated to the iteration cap (the guides-as-reference fallback didn't help — ties were
+  exempt from it). Fixed by making a guide with 2+ ties the reference for its point-on-line
+  ties (`multiTiedGuides`); point–point ties keep the old glued behaviour.
 
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);

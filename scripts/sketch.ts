@@ -654,6 +654,53 @@ const TOL = sketchConfig.tol;
   check("guide moved onto the joint", gDist < TOL * 2, `dist ${gDist.toExponential(2)}`);
 }
 
+// --- several points onto one guideline: the guide becomes the reference ------------
+{
+  // One tie translates the guide onto the point; a second can't be met that way (the
+  // translation reaching one point leaves the other). With 2+ ties the guide is the
+  // reference: later points move perpendicular onto it, the guide + first point stay.
+  const s = new Scene();
+  const g = s.addGuide({ x: 0, y: 100 }, { x: 100, y: 100 })!;
+  s.addSketchConstraint("horizontal", { kind: "guideLine", guideId: g.id });
+  const gl: MeasureRef = { kind: "guideLine", guideId: g.id };
+  const js = [s.addFreeJoint({ x: 40, y: 60 }), s.addFreeJoint({ x: 140, y: 20 }), s.addFreeJoint({ x: 240, y: 90 })];
+  const jy = (i: number) => s.jointWorld(s.getJoint(js[i].id)!).y;
+  const jx = (i: number) => s.jointWorld(s.getJoint(js[i].id)!).x;
+  check("1st joint onto guide", tryAddConstraint(s, "coincident", { kind: "joint", jointId: js[0].id }, gl).constraint !== null);
+  check("guide came to the 1st joint", near(s.getGuide(g.id)!.a.y, 60, TOL * 2), `${s.getGuide(g.id)!.a.y}`);
+  check("2nd joint onto the same guide accepted", tryAddConstraint(s, "coincident", { kind: "joint", jointId: js[1].id }, gl).constraint !== null);
+  check("3rd joint onto the same guide accepted", tryAddConstraint(s, "coincident", { kind: "joint", jointId: js[2].id }, gl).constraint !== null);
+  check("guide + 1st joint held, later joints moved onto the line",
+    near(s.getGuide(g.id)!.a.y, 60, TOL * 2) && [0, 1, 2].every((i) => near(jy(i), 60, TOL * 2)), `${jy(0)} ${jy(1)} ${jy(2)}`);
+  check("aligned joints only moved perpendicular to the guide", near(jx(0), 40) && near(jx(1), 140) && near(jx(2), 240));
+  // Dragging one aligned joint carries the guide and the other aligned joints.
+  s.moveJoint(js[0].id, { x: 0, y: 30 });
+  check("drag an aligned joint: solves", solveSketch(s, new Set([`j:${js[0].id}`])).length === 0);
+  check("guide and the other joints followed the drag",
+    near(s.getGuide(g.id)!.a.y, 90, TOL * 2) && near(jy(1), 90, TOL * 2) && near(jy(2), 90, TOL * 2), `${jy(1)} ${jy(2)}`);
+  // Dragging the guide carries every aligned joint.
+  const gg = s.getGuide(g.id)!;
+  gg.a = { x: gg.a.x, y: gg.a.y + 20 };
+  gg.b = { x: gg.b.x, y: gg.b.y + 20 };
+  check("drag the guide: solves", solveSketch(s, new Set([`g:${g.id}:a`, `g:${g.id}:b`])).length === 0);
+  check("aligned joints followed the guide", [0, 1, 2].every((i) => near(jy(i), 110, TOL * 2)), `${jy(0)} ${jy(1)} ${jy(2)}`);
+
+  // Mixed: a guide glued point–point to joint A plus joint B on its line — B comes to
+  // the line, A and the guide stay (used to be rejected: the two ties fought).
+  const t = new Scene();
+  const g2 = t.addGuide({ x: 0, y: 100 }, { x: 100, y: 100 })!;
+  const A = t.addFreeJoint({ x: 0, y: 100 });
+  t.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g2.id, which: "a" }, { kind: "joint", jointId: A.id });
+  const B = t.addFreeJoint({ x: 150, y: 130 });
+  check("glued guide + point-on-line accepted",
+    tryAddConstraint(t, "coincident", { kind: "joint", jointId: B.id }, { kind: "guideLine", guideId: g2.id }).constraint !== null);
+  const aw = t.jointWorld(t.getJoint(A.id)!);
+  const bw = t.jointWorld(t.getJoint(B.id)!);
+  check("glued joint + guide held, the other joint came to the line",
+    near(aw.y, 100, TOL * 2) && near(t.getGuide(g2.id)!.a.y, 100, TOL * 2) && near(bw.y, 100, TOL * 2) && near(bw.x, 150, TOL * 2),
+    `A ${aw.y}, B ${bw.x},${bw.y}`);
+}
+
 // --- guides tied to geometry: dimensions to them move the geometry ------------------
 {
   const rect = (s: Scene) => s.addBody([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 50 }, { x: 0, y: 50 }], 0);

@@ -285,7 +285,10 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   demands (two driving dimensions, an attachment plus a dimension…) acts as a **reference**
   instead: the geometry moves to satisfy the dimension while the guide stays. So you can
   dimension any number of bodies to one guide, and dragging one of them pulls the guide and
-  the others along. Genuinely over-constrained edits are still rejected with a red flash
+  the others along. Likewise you can hold **any number of points on one guideline** (a quick
+  way to align corners / joints): the first coincident brings the guide to the point, every
+  further point moves straight onto the line, and dragging one aligned point across the line
+  — or dragging the guide — carries all of them. Genuinely over-constrained edits are still rejected with a red flash
   (e.g. Horizontal on a guide whose both points are bound to joints at different heights).
   Constraints hold **during** drags too: dragging the free point of a joint-bound vertical
   guide slides it vertically — it can't be pulled off-axis even momentarily.
