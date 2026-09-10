@@ -226,13 +226,13 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       const sel = g.id === selectedGuide;
       const color = sel ? theme.ink : GUIDE_COLOR;
       drawGuideLine(ctx, g.a, g.b, left, top, right, bottom, px, color, sel);
-      dot(ctx, g.a, px(sel ? 4.5 : 3.5), color);
-      dot(ctx, g.b, px(sel ? 4.5 : 3.5), color);
+      crosshair(ctx, g.a, px, color, sel);
+      crosshair(ctx, g.b, px, color, sel);
     }
     if (input.guideDraft) {
       const { a, cursor } = input.guideDraft;
       drawGuideLine(ctx, a, cursor, left, top, right, bottom, px, GUIDE_COLOR, false);
-      dot(ctx, a, px(3.5), theme.ink);
+      crosshair(ctx, a, px, theme.ink, false);
     }
   }
 
@@ -1029,6 +1029,34 @@ function drawGrid(
     ctx.moveTo(left, y);
     ctx.lineTo(right, y);
   }
+  ctx.stroke();
+}
+
+/**
+ * Construction-point marker for guideline base points: a thin "+" with a small open ring
+ * at the centre. Reads as a reference point (CAD convention) rather than a joint, whose
+ * marker is a filled disk. Slightly larger and heavier when its guide is selected.
+ */
+function crosshair(
+  ctx: CanvasRenderingContext2D,
+  p: Vec2,
+  px: (n: number) => number,
+  color: string,
+  selected: boolean
+): void {
+  const arm = px(selected ? 8 : 6.5);
+  const ring = px(selected ? 3 : 2.5);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = px(selected ? 1.6 : 1.2);
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(p.x - arm, p.y);
+  ctx.lineTo(p.x + arm, p.y);
+  ctx.moveTo(p.x, p.y - arm);
+  ctx.lineTo(p.x, p.y + arm);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, ring, 0, Math.PI * 2);
   ctx.stroke();
 }
 

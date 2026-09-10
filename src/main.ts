@@ -68,8 +68,12 @@ const editGroup = document.getElementById("edit-group")!;
 const gridBtn = document.getElementById("grid-btn") as HTMLButtonElement;
 const snapBtn = document.getElementById("snap-btn") as HTMLButtonElement;
 const osnapBtn = document.getElementById("osnap-btn") as HTMLButtonElement;
-const gridSizeInput = document.getElementById("grid-size") as HTMLInputElement;
-const gridSizePresets = document.getElementById("grid-size-presets") as HTMLSelectElement;
+const gridSizeBtn = document.getElementById("grid-size-btn") as HTMLButtonElement;
+const gridSizeValue = document.getElementById("grid-size-value") as HTMLSpanElement;
+const gridSizeMenu = document.getElementById("grid-size-menu") as HTMLDivElement;
+const gridSizeList = document.getElementById("grid-size-list") as HTMLDivElement;
+const gridSizeAddForm = document.getElementById("grid-size-add") as HTMLFormElement;
+const gridSizeNew = document.getElementById("grid-size-new") as HTMLInputElement;
 const themeBtn = document.getElementById("theme-btn") as HTMLButtonElement;
 const colorGroup = document.getElementById("color-group")!;
 const colorInput = document.getElementById("body-color") as HTMLInputElement;
@@ -1365,26 +1369,120 @@ sketchVisBtn.addEventListener("click", () => setSketchVisible(!sketchVisible));
 measureVisBtn.addEventListener("click", () => setMeasureVisible(!measureVisible));
 const GRID_MIN = 1;
 const GRID_MAX = 200;
-/** Read the grid-size field, clamped to [GRID_MIN, GRID_MAX]; null while it's empty/invalid. */
-function parseGridSize(): number | null {
-  const n = Number(gridSizeInput.value);
-  if (!Number.isFinite(n) || gridSizeInput.value.trim() === "") return null;
-  return Math.min(GRID_MAX, Math.max(GRID_MIN, n));
+/** Built-in grid sizes; the user's own additions are appended and kept in localStorage. */
+const GRID_BASE_PRESETS = [1, 2, 5, 10, 20, 25, 40, 50, 100, 200];
+const GRID_PRESETS_KEY = "disjointed:gridPresets";
+let gridCustomPresets: number[] = (() => {
+  try {
+    const raw = localStorage.getItem(GRID_PRESETS_KEY);
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(arr)
+      ? arr.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n >= GRID_MIN && n <= GRID_MAX)
+      : [];
+  } catch {
+    return [];
+  }
+})();
+function saveGridPresets(): void {
+  try {
+    localStorage.setItem(GRID_PRESETS_KEY, JSON.stringify(gridCustomPresets));
+  } catch {
+    /* storage unavailable — presets just don't persist */
+  }
 }
-// Live-update the grid while typing a valid value; normalize the field text on commit.
-gridSizeInput.addEventListener("input", () => {
-  const n = parseGridSize();
-  if (n !== null) gridStep = n;
+/** Short label for a grid size (trailing zeros trimmed). */
+function fmtGrid(n: number): string {
+  return String(Math.round(n * 1000) / 1000);
+}
+function setGridStep(n: number): void {
+  gridStep = Math.min(GRID_MAX, Math.max(GRID_MIN, n));
+  gridSizeValue.textContent = fmtGrid(gridStep);
+  if (!gridSizeMenu.classList.contains("hidden")) renderGridSizeList();
+}
+/** Rebuild the preset list: base presets, then custom ones (removable), sorted ascending. */
+function renderGridSizeList(): void {
+  gridSizeList.replaceChildren();
+  const all = [...GRID_BASE_PRESETS, ...gridCustomPresets].sort((a, b) => a - b);
+  for (const n of all) {
+    const row = document.createElement("div");
+    row.className = "combo-item";
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(n === gridStep));
+    if (n === gridStep) row.classList.add("selected");
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "combo-pick";
+    pick.textContent = fmtGrid(n);
+    pick.addEventListener("click", () => {
+      setGridStep(n);
+      closeGridSizeMenu();
+    });
+    row.appendChild(pick);
+    if (!GRID_BASE_PRESETS.includes(n)) {
+      row.classList.add("custom");
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "combo-remove";
+      rm.title = "Remove this custom size from the list";
+      rm.setAttribute("aria-label", `Remove grid size ${fmtGrid(n)}`);
+      rm.textContent = "×";
+      rm.addEventListener("click", (e) => {
+        e.stopPropagation();
+        gridCustomPresets = gridCustomPresets.filter((v) => v !== n);
+        saveGridPresets();
+        renderGridSizeList();
+      });
+      row.appendChild(rm);
+    }
+    gridSizeList.appendChild(row);
+  }
+}
+function openGridSizeMenu(): void {
+  renderGridSizeList();
+  gridSizeMenu.classList.remove("hidden");
+  gridSizeBtn.setAttribute("aria-expanded", "true");
+  gridSizeBtn.classList.add("active");
+  gridSizeNew.value = "";
+  // Scroll the current value into view, then hand focus to the custom field.
+  gridSizeList.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
+  gridSizeNew.focus();
+}
+function closeGridSizeMenu(): void {
+  if (gridSizeMenu.classList.contains("hidden")) return;
+  gridSizeMenu.classList.add("hidden");
+  gridSizeBtn.setAttribute("aria-expanded", "false");
+  gridSizeBtn.classList.remove("active");
+}
+gridSizeBtn.addEventListener("click", () => {
+  if (gridSizeMenu.classList.contains("hidden")) openGridSizeMenu();
+  else closeGridSizeMenu();
 });
-gridSizeInput.addEventListener("change", () => {
-  gridStep = parseGridSize() ?? gridStep;
-  gridSizeInput.value = String(gridStep);
+// Adding a custom value applies it immediately and (if new) keeps it in the list.
+gridSizeAddForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const n = Number(gridSizeNew.value);
+  if (gridSizeNew.value.trim() === "" || !Number.isFinite(n)) return;
+  const v = Math.min(GRID_MAX, Math.max(GRID_MIN, n));
+  if (!GRID_BASE_PRESETS.includes(v) && !gridCustomPresets.includes(v)) {
+    gridCustomPresets.push(v);
+    saveGridPresets();
+  }
+  setGridStep(v);
+  closeGridSizeMenu();
 });
-// Picking a preset fills the number field; reset the select so the same preset re-fires.
-gridSizePresets.addEventListener("change", () => {
-  gridStep = Number(gridSizePresets.value) || gridStep;
-  gridSizeInput.value = String(gridStep);
-  gridSizePresets.value = "";
+gridSizeMenu.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    closeGridSizeMenu();
+    gridSizeBtn.focus();
+  }
+});
+// Click anywhere outside the combo dismisses it.
+document.addEventListener("pointerdown", (e) => {
+  if (gridSizeMenu.classList.contains("hidden")) return;
+  const t = e.target;
+  if (t instanceof Node && (gridSizeMenu.contains(t) || gridSizeBtn.contains(t))) return;
+  closeGridSizeMenu();
 });
 
 const fileInput = document.getElementById("file-input") as HTMLInputElement;

@@ -158,17 +158,129 @@ input[type="number"] {
   cursor: pointer;
 }
 
-input[type="number"]#grid-size {
-  width: 56px;
+/* Grid-size combo: a value button that drops a preset list with a "Custom" field at the
+   bottom. Custom entries (added from that field) show a x to remove them. */
+.combo {
+  position: relative;
+}
+
+.combo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  min-width: 58px;
+  padding: 0 7px 0 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.combo-btn svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.8;
+}
+
+.combo-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 128px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.combo-menu.hidden {
+  display: none;
+}
+
+.combo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 262px;
+  overflow-y: auto;
+}
+
+.combo-item {
+  display: flex;
+  align-items: center;
+  border-radius: 5px;
+}
+
+.combo-item:hover {
+  background: var(--control-hover);
+}
+
+.combo-item.selected {
+  background: var(--accent-dim);
+  color: #fff;
+}
+
+.combo-pick,
+.combo-remove {
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: inherit;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.combo-pick {
+  flex: 1;
+  text-align: left;
+}
+
+.combo-pick:hover,
+.combo-remove:hover {
+  background: transparent;
+}
+
+.combo-remove {
+  padding: 3px 8px;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.combo-item.selected .combo-remove {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.combo-remove:hover {
+  color: #ff8a8a;
+}
+
+.combo-add {
+  display: flex;
+  gap: 3px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.combo-add input[type="number"] {
+  flex: 1;
+  width: 0;
+  min-width: 70px;
   cursor: text;
 }
 
-.select-label {
-  gap: 2px;
-}
-
-select#grid-size-presets {
-  padding: 5px 2px;
+.combo-add-btn {
+  width: 30px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
 }
 
 .spacer {

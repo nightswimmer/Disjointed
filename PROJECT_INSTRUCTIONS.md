@@ -139,7 +139,9 @@ two points — pure drawing aids (invisible and unpickable in sim, never simulat
 **`L`** (the linear actuator moved to **`A`**): two clicks; each click lands **exactly on**
 a joint / body corner / another guide's point (recording a CAD-style **auto-coincident**),
 projects onto a slider rail / body edge, or falls back to the grid/guide snap. Rendered as
-muted dash-dot lines spanning the viewport with dots on the two defining points; click to
+muted dash-dot lines spanning the viewport with **crosshair** markers (thin `+` and a small open
+ring, `crosshair()` in the renderer — joints stay filled disks so the two never read alike) on
+the two defining points; click to
 select (endpoints beat the line, the line beats body areas), **drag the line** to move it
 whole (angle kept), **drag a defining point** to re-aim it (endpoint drags also land on
 joints / corners / other guides' points), Delete removes (constraints + measurements on the
@@ -626,6 +628,14 @@ stays behind when a driving dimension moves it"):
   Tests: `scripts/sketch.ts` (rigid pair + hole/joint carry, corner reshape carrying only
   the rigid part, squashed plate keeps its hole centred, two aligned disk holes + H-aligned
   joint on a guide-dimensioned rigid body, no sideways drift on refused vertical drag).
+
+**Toolbar & marker polish** (no format change): guide base points render as **crosshairs**
+instead of small dots (see the guidelines paragraph); the snap-to-grid icon is a faded grid with
+a solid dot on one intersection (the old magnet read as a "U"); the grid group is now
+*Grid · Snap · Object snap · grid-size combo · units*, followed by the **measure group** (Measure
+tool + measurements toggle) and then Fit; the grid-size number field + preset `<select>` were
+merged into one **combo with user-addable presets** (details in the interaction model's
+*Grid / snapping* entry).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -1515,8 +1525,14 @@ stays behind when a driving dimension moves it"):
     is synced to the selection each frame by `syncColorPicker` (change-detected so it never clobbers
     the picker mid-drag). The `#color-group` hides in sim mode like the tool/edit groups.
   - **Grid / snapping** (session-only state, not persisted): `gridVisible`, `snapEnabled`,
-    `gridStep` (clamped 1–200 via `parseGridSize`, **decimals allowed** — the input uses
-    `step="any"` and the value is no longer rounded; number input + a preset `<select>`). `snap(p)`
+    `gridStep` (clamped 1–200 via `setGridStep`, **decimals allowed**). The size is set from a
+    **custom combo** (`#grid-size-combo`): a value button (`#grid-size-value` + chevron) drops a
+    `#grid-size-menu` listing `GRID_BASE_PRESETS` (1 2 5 10 20 25 40 50 100 200) merged with the
+    user's `gridCustomPresets` (sorted; the current value highlighted) and a "Custom…" number
+    field + `+` at the bottom — submitting applies the value at once and, if new, appends it to
+    the custom list (each custom row has a `×` to remove it). Custom presets persist in
+    localStorage (`disjointed:gridPresets`); the *current* step is still session-only. Esc /
+    outside click closes the menu (`openGridSizeMenu` / `closeGridSizeMenu`). `snap(p)`
     rounds a world point to the nearest grid intersection when enabled (identity otherwise) and is
     applied to placements (free/attached joints, freehand vertices) and to drags. Drags snap an
     **anchor** in absolute terms via a `grabOffset` captured at mousedown: a vertex reshape snaps

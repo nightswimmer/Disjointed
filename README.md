@@ -242,7 +242,8 @@ through two points — CAD-style scaffolding for laying out a mechanism:
 - **Snapping prefers guidelines over the grid**: with Snap on, anything you place or drag
   lands *on* a nearby guideline (projected onto it) — and where two guidelines cross, on
   their **intersection**. Great for laying out joints along a line or at a crossing.
-- **Editing**: click to select (its two defining points show as dots); drag the **line** to
+- **Editing**: click to select (its two defining points show as small **crosshairs**, so they
+  never look like joints); drag the **line** to
   move it whole (angle preserved), drag a **defining point** to re-aim it, **Delete** to
   remove it (its constraints and measurements go with it).
 - **Constraints on guidelines** (H / V / parallel / perpendicular / coincident — a guide
@@ -397,8 +398,11 @@ a partial selection — with the date and time appended. An exported DXF drops s
 
 ### Grid & snapping
 The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**
-toggles snap-to-grid, and the number field (with a preset dropdown) sets the spacing — any value
-from **1 to 200** world units, decimals included. With Snap on, new joints and freehand vertices land on the grid,
+toggles snap-to-grid, and the **grid-size selector** sets the spacing: click the value to open a
+list of presets (1 to 200), pick one, or type your own in the **Custom…** field at the bottom and
+press Enter / `+` — it applies straight away and joins the list (custom sizes are remembered in the
+browser; the `×` next to one removes it). Decimals are allowed. The **units** dropdown sits right
+after it. With Snap on, new joints and freehand vertices land on the grid,
 and dragging snaps too: a per-vertex reshape snaps the grabbed corner, while moving a whole body
 snaps whichever is nearest the grab point — the body's centroid or one of its corners. Visibility
 and snapping are independent (you can snap to a hidden grid).

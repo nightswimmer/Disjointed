@@ -111,14 +111,6 @@
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none"/><line x1="10" y1="10" x2="15" y2="6.5"/><circle cx="15" cy="6.5" r="1.6" fill="currentColor" stroke="none"/></svg>
           </button>
         </div>
-        <div class="group" id="measure-group">
-          <button data-tool="measure" class="tool-btn icon-btn" title="Measure — click two references (points or lines), then place the value (D)" aria-label="Measure tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="7.5" width="15" height="5.5" rx="1"/><line x1="6" y1="7.5" x2="6" y2="10.2"/><line x1="9.5" y1="7.5" x2="9.5" y2="10.2"/><line x1="13" y1="7.5" x2="13" y2="10.2"/></svg>
-          </button>
-          <button id="measure-vis-btn" class="active icon-btn" title="Show or hide all measurements (toggle)" aria-label="Toggle measurement visibility">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="5" x2="3" y2="15"/><line x1="17" y1="5" x2="17" y2="15"/><line x1="3" y1="10" x2="17" y2="10"/><path d="M6.5 8L3 10l3.5 2"/><path d="M13.5 8L17 10l-3.5 2"/></svg>
-          </button>
-        </div>
         <div class="group" id="sketch-group">
           <button data-tool="coincident" class="tool-btn icon-btn" title="Coincident — click two points to make them share a position, or a point and a line to hold the point on it (O)" aria-label="Coincident constraint tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5.5"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
@@ -170,11 +162,24 @@
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="7" y1="3" x2="7" y2="17"/><line x1="13" y1="3" x2="13" y2="17"/><line x1="3" y1="7" x2="17" y2="7"/><line x1="3" y1="13" x2="17" y2="13"/></svg>
           </button>
           <button id="snap-btn" class="icon-btn" title="Snap placement and dragging to the grid (toggle)" aria-label="Toggle snap to grid">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3v7a4 4 0 0 0 8 0V3"/><line x1="4" y1="3" x2="8" y2="3"/><line x1="12" y1="3" x2="16" y2="3"/><line x1="6" y1="10" x2="6" y2="12"/><line x1="14" y1="10" x2="14" y2="12"/></svg>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="7" y1="3" x2="7" y2="17" stroke-opacity="0.45"/><line x1="13" y1="3" x2="13" y2="17" stroke-opacity="0.45"/><line x1="3" y1="7" x2="17" y2="7" stroke-opacity="0.45"/><line x1="3" y1="13" x2="17" y2="13" stroke-opacity="0.45"/><circle cx="13" cy="7" r="2.6" fill="currentColor" stroke="none"/></svg>
           </button>
           <button id="osnap-btn" class="icon-btn" title="Object snap (toggle): drag a body by the corner, edge midpoint, edge or centre nearest the grab (highlighted) and it snaps onto the same features of other objects, rails and guidelines" aria-label="Toggle object snap">
             <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="8" height="10"/><line x1="11" y1="3" x2="11" y2="11"/><line x1="11" y1="7" x2="17" y2="7"/><circle cx="11" cy="7" r="2.2"/></svg>
           </button>
+          <div class="combo" id="grid-size-combo">
+            <button id="grid-size-btn" class="combo-btn" title="Grid spacing in working units (1–200) — pick a preset or add your own" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid size">
+              <span id="grid-size-value">40</span>
+              <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
+            </button>
+            <div id="grid-size-menu" class="combo-menu hidden" role="listbox" aria-label="Grid size presets">
+              <div id="grid-size-list" class="combo-list"></div>
+              <form id="grid-size-add" class="combo-add" autocomplete="off">
+                <input id="grid-size-new" type="number" min="1" max="200" step="any" placeholder="Custom…" aria-label="Add a custom grid size" />
+                <button type="submit" class="combo-add-btn" title="Add this value to the list and use it" aria-label="Add grid size">+</button>
+              </form>
+            </div>
+          </div>
           <label class="select-label" title="Working units — what one world unit means; measurements display it and DXF import converts into it (saved with the file)">
             <select id="unit-select" aria-label="Working units">
               <option value="mm">mm</option>
@@ -183,22 +188,14 @@
               <option value="in">in</option>
             </select>
           </label>
-          <label class="select-label" title="Grid spacing in working units (1–200)">
-            <input id="grid-size" type="number" min="1" max="200" step="any" value="40" />
-            <select id="grid-size-presets" title="Pick a preset grid size">
-              <option value="" selected disabled hidden>·</option>
-              <option value="1">1</option>
-              <option value="2">2</option>
-              <option value="5">5</option>
-              <option value="10">10</option>
-              <option value="20">20</option>
-              <option value="25">25</option>
-              <option value="40">40</option>
-              <option value="50">50</option>
-              <option value="100">100</option>
-              <option value="200">200</option>
-            </select>
-          </label>
+        </div>
+        <div class="group" id="measure-group">
+          <button data-tool="measure" class="tool-btn icon-btn" title="Measure — click two references (points or lines), then place the value (D)" aria-label="Measure tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="7.5" width="15" height="5.5" rx="1"/><line x1="6" y1="7.5" x2="6" y2="10.2"/><line x1="9.5" y1="7.5" x2="9.5" y2="10.2"/><line x1="13" y1="7.5" x2="13" y2="10.2"/></svg>
+          </button>
+          <button id="measure-vis-btn" class="active icon-btn" title="Show or hide all measurements (toggle)" aria-label="Toggle measurement visibility">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="5" x2="3" y2="15"/><line x1="17" y1="5" x2="17" y2="15"/><line x1="3" y1="10" x2="17" y2="10"/><path d="M6.5 8L3 10l3.5 2"/><path d="M13.5 8L17 10l-3.5 2"/></svg>
+          </button>
         </div>
         <div class="group" id="view-group">
           <button id="fit-btn" class="icon-btn" title="Fit the mechanism to the screen (F)" aria-label="Fit to screen">
