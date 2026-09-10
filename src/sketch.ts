@@ -556,6 +556,9 @@ function buildSystem(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<str
     // Pose dimensions (both ends on instance geometry) are not shape material: they
     // move rigid parts and are enforced by pose.ts, never by this solver.
     .filter((m) => !(scene.refInstanceOwned(m.refA) && scene.refInstanceOwned(m.refB)))
+    // Diameter dimensions set a disk's radius directly (no vertex moves) — see
+    // `enforceDiameterDims`; they have no place in the vertex/joint system.
+    .filter((m) => m.axis !== "diameter")
     .filter((m) => !override || m.id !== override.m.id)
     .map((m) => ({ m, target: m.target! }));
   if (override) dims.push(override);
@@ -661,7 +664,25 @@ function solveAndApply(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<s
  * solves omit it and stay fully symmetric.
  */
 export function solveSketch(scene: Scene, anchors?: ReadonlySet<string>): SketchBreak[] {
-  return solveAndApply(scene, undefined, anchors);
+  const breaks = solveAndApply(scene, undefined, anchors);
+  enforceDiameterDims(scene);
+  return breaks;
+}
+
+/**
+ * Re-apply every driving diameter dimension: set its disk's radius to target / 2. A
+ * disk's radius never moves a vertex or joint, so this is independent of the vertex
+ * system — but a uniform body scale (first-dimension behaviour) scales hole radii too,
+ * and this puts a dimensioned disk back. A dimension whose disk is gone (a node was
+ * added to the hole) is left alone; it renders violated / not at all.
+ */
+export function enforceDiameterDims(scene: Scene): void {
+  for (const m of scene.measurements) {
+    if (m.mode !== "draw" || !m.driving || m.target === undefined || m.axis !== "diameter") continue;
+    const disk = scene.diskOfRef(m.refA);
+    if (!disk || Math.abs(disk.r * 2 - m.target) <= sketchConfig.tol) continue;
+    scene.setBodyRadius(disk.bodyId, m.target / 2, disk.hole);
+  }
 }
 
 // --- drag anchoring ------------------------------------------------------------
@@ -796,10 +817,20 @@ export function applyDrivingDimension(
   if (scene.refInstanceOwned(m.refA) && scene.refInstanceOwned(m.refB)) return reject;
   const info = scene.measureInfo(m);
   if (!info || info.kind !== "distance") return reject; // angle dimensions can't drive (v1)
+  if (m.axis === "diameter") {
+    // A disk's diameter is its own parameter: set the radius directly. No vertex or
+    // joint moves, so nothing else in the sketch can be disturbed.
+    const disk = scene.diskOfRef(m.refA);
+    if (!disk) return reject;
+    scene.setBodyRadius(disk.bodyId, target / 2, disk.hole);
+    scene.setMeasurementDriving(m.id, target);
+    return [];
+  }
   const body = scaleEligibleBody(scene, m);
   if (body !== null && info.value > EPS) {
     const snap = snapshot(scene);
     scene.scaleBody(body, target / info.value);
+    enforceDiameterDims(scene); // dimensioned disks on the body keep their diameter
     scene.setMeasurementDriving(m.id, target);
     const check = scene.measureInfo(m);
     if (!check || Math.abs(check.value - target) > sketchConfig.tol) {
@@ -861,6 +892,8 @@ function scaleEligibleBody(scene: Scene, m: Measurement): number | null {
   if (a === null || a !== b) return null;
   for (const other of scene.measurements) {
     if (other.id === m.id || other.mode !== "draw" || !other.driving) continue;
+    // A diameter dimension is re-applied after a scale, so it never blocks one.
+    if (other.axis === "diameter") continue;
     if (refTouchesBody(scene, other.refA, a) || refTouchesBody(scene, other.refB, a)) {
       return null;
     }

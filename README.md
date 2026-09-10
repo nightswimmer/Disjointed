@@ -14,8 +14,10 @@ you can then drag and watch move.
   can carry its own radius; the outline you see is derived from those, so you can reshape it
   (drag corners) or round it (drag a corner's round radius handle) any time. A body can carry
   **holes** (inner cut-outs — drawn with the **Hole** tool or imported from DXF) — each hole is a full editable outline of
-  its own: drag its nodes, round its corners, and a **circular hole** is a true parametric
-  disk you resize by its rim. Holes render hollow, are subtracted from the body's mass and
+  its own: drag its nodes, round its corners, and a **circular hole** (drag one out with the
+  Hole tool, or import a DXF circle) is a true parametric disk: move it by its centre node,
+  resize it by its rim, and **dimension its diameter** with the Measure tool (type a value to
+  drive it). Holes render hollow, are subtracted from the body's mass and
   inertia, mirror / rotate / scale / copy with the body, and their corners and edges are
   **measurable and constrainable** just like the outer profile. Holes don't restrict where
   joints can go — a joint can sit anywhere inside the outer outline, including dead-centre
@@ -81,9 +83,9 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | Tool | Shortcut | Action |
 | --- | --- | --- |
 | **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
-| **Hole** | `U` | Cut a hole in a body. The **first click picks the body** (topmost under the cursor) and starts the cut-out polygon; further clicks add vertices — each kept **inside** that body (a grid snap that would land outside falls back to the exact click point). Close it by clicking the **first vertex**, **double-clicking**, or pressing **Enter** — the loop becomes an editable hole (sharp corners; round them with its radius handles afterwards), and the body is selected so the hole's handles show right away. Esc aborts. |
+| **Hole** | `U` | Cut a hole in a body. **Round hole:** press inside a body and **drag** — the press point is the centre (grid- / object-snapped, so it can sit exactly on a joint or a corner) and the drag sets the radius (clamped so the disk stays inside the body's material); release to cut a parametric disk hole. **Polygon hole:** the **first click picks the body** (topmost under the cursor) and starts the cut-out polygon; further clicks add vertices — each kept **inside** that body (a grid snap that would land outside falls back to the exact click point). Close it by clicking the **first vertex**, **double-clicking**, or pressing **Enter** — the loop becomes an editable hole (sharp corners; round them with its radius handles afterwards), and the body is selected so the hole's handles show right away. Esc aborts. |
 | **Split** | `X` | Cut a body in two. Click a point on a body's **outline** (a corner, or anywhere on an edge) to start the cut, click inside the body to route it (as many vertices as you like — each kept inside), then click the outline again to finish: the body splits along that path into two bodies (same colour, grounded flag and group; the new one sits right above the original in the stacking order). Existing corners keep their rounding, the cut corners start sharp. Holes stay whole on their side (a cut through a hole is refused); joints stay where they are and belong to the side they're on; a rail or motor whose two joints end up on different sides is dropped. Bodies built from joints are converted to an editable sharp outline first. Esc aborts. |
-| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. Drop a joint on a **rail (or rail node)** and it's automatically attached to that rail as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
+| **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. With **Object snap** on, the joint lands on the nearest corner / edge midpoint / centroid / **hole centre** / joint / guide point in range (else the grid). Drop a joint on a **rail (or rail node)** and it's automatically attached to that rail as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
 | **Weld** | `W` | Click where **bodies overlap** to weld them rigidly together at that point — a joint in each, sharing the position **and** locked at the drawn relative angle (no relative rotation; the angle re-captures from the drawn pose on every sim entry, like a slider's lock). Click an **existing pinned joint** to toggle its pin(s) **weld ↔ revolute**. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed rail keeps its ground — the track must stay anchored). |
@@ -93,7 +95,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `A` | Click a **rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
-| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a guideline). Works in **both modes** — see *Measurements* below. |
+| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a guideline). Click the **rim of a round hole** (or disk body) as the first pick for a **diameter** dimension — it needs no second reference, the next click places the label. Works in **both modes** — see *Measurements* below. |
 | **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position — or a **point and a line** (body edge, rail or guideline, either order) to hold the point on the **infinite** line. |
 | **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, rail or guideline** (one click), or **two points**, to make it horizontal / vertical. |
 | **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails or guidelines) to constrain their directions — or, for Equal, their lengths (Equal doesn't take guidelines: an infinite line has no length). |
@@ -109,7 +111,8 @@ corner, drop it onto the corner to make it sharp, **double-click** it to go back
 default radius. **`[` / `]`** still decrease / increase the body-wide default radius (this is
 how you round a freehand polygon: draw it, select it, press `]`; corners with their own radius
 keep it). On a circular (disk) hole the round handle rides the rim — drag it to resize the
-hole, drag the centre node to move it. With a body selected you can also edit any outline by
+hole, drag the centre node to move it (with **Object snap** on, a dragged node — a hole
+centre included — snaps onto other corners, centres, joints and edges). With a body selected you can also edit any outline by
 **double-click**: double-click an **edge** (outer or hole) to add a node there (snapped to the
 grid when Snap is on), or double-click a **node** to remove it (outer outlines keep a minimum
 of 3) — double-clicking a hole's **last removable node deletes the whole hole**. Press
@@ -172,6 +175,9 @@ set of measurements. What gets measured follows from the two references you pick
 - **Two lines** — the **distance** while they're parallel, the **angle** otherwise. This is
   re-evaluated live, so a line pair can flip between distance and angle mid-simulation, and
   the side you place the label on picks θ vs 180°−θ.
+- **A disk** — click the rim of a round hole (or a disk body) and place the label: a
+  **diameter** dimension (`⌀`), drawn through the centre towards the label. In draw mode you
+  can type a value into it (double-click the label) and it **drives** the hole's diameter.
 
 References anchor to the elements themselves, so in **Simulate mode the values update live**
 as the mechanism moves — measure a stroke length by dimensioning two joints, or a transmission
@@ -395,6 +401,10 @@ midpoint can also land on another edge or guideline; an edge snaps onto **parall
 guidelines only, sliding sideways until the two are flush (it can't rotate the body), and the
 target line is shown extended so you can line up bodies that don't overlap. With nothing in
 range the drag falls back to the grid/guideline snap (or moves freely when Snap is off).
+Object snap also applies to **reshaping**: a dragged corner node or hole centre is its own
+reference and snaps onto the other features (its own body's other corners included, but not
+the features that move with it), and to **placement**: a new joint, or the centre of a round
+hole being dragged out, lands on the nearest corner / midpoint / centre / joint in range.
 
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor (0.05× to 200×).

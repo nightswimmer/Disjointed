@@ -4,6 +4,7 @@
  * remapping across control-polygon edits, cascade removal, and serialize/load.
  */
 import { Scene, MeasureRef, SceneData, measureAxisForPlacement } from "../src/model";
+import { applyDrivingDimension, solveSketch } from "../src/sketch";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -203,6 +204,104 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   const u = new Scene();
   u.load(legacy);
   check("pre-v7 file loads with no measurements", u.measurements.length === 0);
+}
+
+// --- diameter dimensions on disks (round holes / disk bodies) -----------------
+{
+  const s = new Scene();
+  const sq = [
+    { x: 0, y: 0 },
+    { x: 100, y: 0 },
+    { x: 100, y: 100 },
+    { x: 0, y: 100 },
+  ];
+  const body = s.addBody(sq, 0, "fillet", [{ control: [{ x: 50, y: 50 }], radius: 10, round: "offset" }]);
+  const refC: MeasureRef = { kind: "vertex", bodyId: body.id, index: 0, hole: 0 };
+  const refV: MeasureRef = { kind: "vertex", bodyId: body.id, index: 0 };
+
+  const disk = s.diskOfRef(refC);
+  check("diskOfRef finds the disk hole", !!disk && near(disk.c.x, 50) && near(disk.c.y, 50) && near(disk.r, 10));
+  check("diskOfRef rejects a polygon vertex", s.diskOfRef(refV) === null);
+  check("diskOfRef rejects a non-zero index", s.diskOfRef({ ...refC, index: 1 }) === null);
+
+  // The same disk vertex twice → a diameter dimension.
+  const m = s.addMeasurement("draw", refC, refC, { x: 80, y: 50 })!;
+  check("same-disk pair gets the diameter axis", m.axis === "diameter", m.axis);
+  let info = s.measureInfo(m)!;
+  check("diameter value is 2·r", near(info.value, 20), `${info.value}`);
+  check("diameter info carries the circle", !!info.circle && near(info.circle.r, 10));
+  check(
+    "diameter line runs rim to rim towards the label",
+    !!info.dim && near(info.dim.a.x, 40) && near(info.dim.a.y, 50) && near(info.dim.b.x, 60) && near(info.dim.b.y, 50)
+  );
+  check("leader from the rim to a label outside the disk", info.ext.length === 1 && near(info.ext[0].b.x, 80));
+  const pv = s.measurePreview(refC, refC, { x: 50, y: 90 })!;
+  check("preview of a same-disk pair is a diameter too", !!pv.circle && near(pv.value, 20));
+
+  // The label can move anywhere: the axis stays "diameter", the line follows the label.
+  s.setMeasurementLabel(m.id, { x: 50, y: 10 });
+  info = s.measureInfo(m)!;
+  check("label move keeps the diameter axis", m.axis === "diameter" && !!info.dim && near(info.dim.b.y, 40));
+
+  // Centre + another point is an ordinary point–point dimension.
+  const mc = s.addMeasurement("draw", refC, refV, { x: 25, y: 25 })!;
+  check("centre + corner is a plain distance", mc.axis !== "diameter" && near(s.measureInfo(mc)!.value, Math.hypot(50, 50)));
+
+  // Driving: sets the hole's radius directly.
+  check("driving the diameter succeeds", applyDrivingDimension(s, m.id, 30).length === 0);
+  check("hole radius became target / 2", near(body.holes![0].radius, 15), `${body.holes![0].radius}`);
+  check("dimension marked driving", m.driving === true && m.target === 30);
+  check("driven value tracks", near(s.measureInfo(m)!.value, 30) && !s.measureInfo(m)!.violated);
+
+  // A first driving dimension on the body scales it uniformly — the dimensioned hole
+  // keeps its diameter (re-applied after the scale), and nothing is violated.
+  const mEdge = s.addMeasurement("draw", refV, { kind: "vertex", bodyId: body.id, index: 1 }, { x: 50, y: -30 })!;
+  check("outer driving dimension scales the body", applyDrivingDimension(s, mEdge.id, 200).length === 0);
+  const vw = s.bodyControlWorld(body);
+  check("body doubled", near(vw[1].x - vw[0].x, 200, 1e-6));
+  check("dimensioned hole kept its radius through the scale", near(body.holes![0].radius, 15, 1e-9), `${body.holes![0].radius}`);
+  check("diameter dimension not violated after the scale", !s.measureInfo(m)!.violated);
+
+  // A plain sketch solve re-enforces too (e.g. after a radius-handle drag).
+  s.setBodyRadius(body.id, 4, 0);
+  solveSketch(s);
+  check("solveSketch re-applies a driving diameter", near(body.holes![0].radius, 15, 1e-9), `${body.holes![0].radius}`);
+
+  // Serialize / load round-trips the axis.
+  const t = new Scene();
+  t.load(JSON.parse(JSON.stringify(s.serialize())) as SceneData);
+  const tm = t.getMeasurement(m.id)!;
+  check("diameter axis survives load", tm.axis === "diameter" && near(t.measureInfo(tm)!.value, 30));
+
+  // Removing the hole cascades the dimension away.
+  s.removeBodyHole(body.id, 0);
+  check("hole removal drops its diameter dimension", s.getMeasurement(m.id) === undefined && s.getMeasurement(mc.id) === undefined);
+
+  // A one-point offset *body* is a disk too.
+  const diskBody = s.addBody([{ x: 300, y: 300 }], 25, "offset");
+  const refD: MeasureRef = { kind: "vertex", bodyId: diskBody.id, index: 0 };
+  const dd = s.diskOfRef(refD);
+  check("a disk body is a disk ref", !!dd && near(dd.r, 25) && near(dd.c.x, 300) && near(dd.c.y, 300));
+  const md = s.addMeasurement("draw", refD, refD, { x: 300, y: 250 })!;
+  check("disk body diameter dimension", md.axis === "diameter" && near(s.measureInfo(md)!.value, 50));
+  check("driving a disk body's diameter", applyDrivingDimension(s, md.id, 80).length === 0 && near(diskBody.radius, 40));
+}
+
+// --- bodyInscribedRadius (largest disk that fits around a centre) --------------
+{
+  const s = new Scene();
+  const sq = [
+    { x: 0, y: 0 },
+    { x: 100, y: 0 },
+    { x: 100, y: 100 },
+    { x: 0, y: 100 },
+  ];
+  const body = s.addBody(sq, 0, "fillet", [{ control: [{ x: 20, y: 50 }], radius: 10, round: "offset" }]);
+  check("inscribed radius: nearest outer edge", near(s.bodyInscribedRadius(body, { x: 50, y: 20 }), 20, 1e-6));
+  check("inscribed radius: a hole is closer than the outline", near(s.bodyInscribedRadius(body, { x: 50, y: 50 }), 20, 0.2));
+  check("inscribed radius: centre outside → 0", s.bodyInscribedRadius(body, { x: 150, y: 50 }) === 0);
+  check("inscribed radius: centre inside a hole → 0", s.bodyInscribedRadius(body, { x: 20, y: 50 }) === 0);
+  check("inscribed radius: the excluded hole is ignored", near(s.bodyInscribedRadius(body, { x: 20, y: 50 }, 0), 20, 1e-6));
 }
 
 if (failures > 0) {

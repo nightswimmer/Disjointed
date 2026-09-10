@@ -13,6 +13,8 @@ import {
   MotorConstraint,
   Measurement,
   MeasureInfo,
+  MeasureHighlight,
+  VERTEX_LINK_EPS,
   MeasureRef,
   ResolvedMeasureRef,
   SketchConstraintKind,
@@ -187,6 +189,16 @@ let draftBodySnaps: (MeasureRef | null)[] = [];
 /** Hole tool: freehand cut-out vertices, and the body being cut (set by the first click). */
 let holeDraft: Vec2[] = [];
 let holeDraftBodyId: number | null = null;
+/**
+ * Hole tool, round-hole gesture: the press that may become a circle drag (body picked,
+ * snapped centre, and the screen point pressed), then the circle being dragged out
+ * (radius clamped to `maxR`, the largest disk that fits the body around that centre).
+ * A press released without dragging falls back to the polygon path (first vertex).
+ */
+let holePress: { bodyId: number; centre: Vec2; screen: Vec2; maxR: number } | null = null;
+let holeCircle: { c: Vec2; r: number } | null = null;
+/** Screen-pixel travel before a hole-tool press counts as a circle drag. */
+const HOLE_DRAG_PX = 4;
 /** Split tool: the cut path so far (first point on the body's outline) and the body being cut. */
 let splitDraft: Vec2[] = [];
 let splitBodyId: number | null = null;
@@ -404,7 +416,8 @@ type LeftDrag =
   | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap }
   | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap }
   // `hole` scopes a vertex/fillet drag to one of the body's holes (null = the outer outline).
-  | { kind: "vertex"; bodyId: number; index: number; hole: number | null; grabOffset: Vec2; moved: boolean }
+  // With object snap on, the dragged vertex is its own snapping reference (`osnap`).
+  | { kind: "vertex"; bodyId: number; index: number; hole: number | null; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap }
   // Per-corner radius handle: the cursor's position maps straight to that corner's radius.
   | { kind: "fillet"; bodyId: number; index: number; hole: number | null; moved: boolean }
   | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean }
@@ -593,19 +606,26 @@ function dragMembers(d: LeftDrag): { bodies: Set<number>; joints: Set<number> } 
  */
 function objSnapTargets(
   excludeBodies: Set<number>,
-  excludeJoints: Set<number>
+  excludeJoints: Set<number>,
+  excludeVertex?: { bodyId: number; hole: number | null; index: number }
 ): { points: Vec2[]; lines: { a: Vec2; b: Vec2; infinite: boolean }[] } {
   const points: Vec2[] = [];
   const lines: { a: Vec2; b: Vec2; infinite: boolean }[] = [];
   for (const body of scene.bodies) {
     if (excludeBodies.has(body.id)) continue;
-    points.push(body.pos);
-    for (const { verts } of bodyControlLoops(body)) {
+    // A vertex reshape drag: its own body's other features are fair targets (a hole
+    // centre onto a corner, say), but not the vertex itself, the two edges it ends (and
+    // their midpoints), or the centroid — all of which move with it and would stick.
+    const ex = excludeVertex?.bodyId === body.id ? excludeVertex : null;
+    if (!ex) points.push(body.pos);
+    for (const { verts, hole } of bodyControlLoops(body)) {
       const n = verts.length;
+      const exI = ex && ex.hole === hole ? ex.index : -1;
       for (let i = 0; i < n; i++) {
         const v = verts[i];
-        points.push(v);
+        if (i !== exI) points.push(v);
         if (n < 2) continue;
+        if (i === exI || (i + 1) % n === exI) continue;
         const w = verts[(i + 1) % n];
         points.push(scale(add(v, w), 0.5));
         lines.push({ a: v, b: w, infinite: false });
@@ -645,7 +665,19 @@ function objSnapTarget(d: LeftDrag, os: DragObjSnap, raw: Vec2): Vec2 | null {
   const cur = scene.resolveMeasureRef(os.ref);
   if (!cur) return null;
   const excl = dragMembers(d);
-  const targets = objSnapTargets(excl.bodies, excl.joints);
+  if (d.kind === "vertex") {
+    // Joints stuck to the dragged vertex (the joint↔node link — e.g. a shaft joint at a
+    // hole's centre) travel with it, so they can't be targets either.
+    const vw = dragAnchorWorld(d);
+    for (const j of scene.joints) {
+      if (j.bodyId === d.bodyId && dist(scene.jointWorld(j), vw) < VERTEX_LINK_EPS) excl.joints.add(j.id);
+    }
+  }
+  const targets = objSnapTargets(
+    excl.bodies,
+    excl.joints,
+    d.kind === "vertex" ? { bodyId: d.bodyId, hole: d.hole, index: d.index } : undefined
+  );
   const r = OBJ_SNAP_PX / view.scale;
   if (cur.kind === "point") {
     let bestP: Vec2 | null = null;
@@ -718,9 +750,16 @@ function objSnapTarget(d: LeftDrag, os: DragObjSnap, raw: Vec2): Vec2 | null {
  * under the cursor. None over a selected body's edit handles (those drags reshape).
  */
 function hoverObjSnapRef(p: Vec2): ResolvedMeasureRef | null {
-  if (selectedBodyNodeAt(p) || selectedBodyFilletHandleAt(p)) return null;
+  if (selectedBodyFilletHandleAt(p)) return null;
   let ref: MeasureRef | null = null;
-  if (multiSel && multiHitAt(p)) ref = pickObjSnapRef([...multiSel.bodies], [...multiSel.joints], p)?.ref ?? null;
+  const node = selectedBodyNodeAt(p);
+  if (node && selection?.kind === "body") {
+    // A vertex handle: the reshape drag snaps that vertex itself.
+    ref =
+      node.hole === null
+        ? { kind: "vertex", bodyId: selection.id, index: node.index }
+        : { kind: "vertex", bodyId: selection.id, index: node.index, hole: node.hole };
+  } else if (multiSel && multiHitAt(p)) ref = pickObjSnapRef([...multiSel.bodies], [...multiSel.joints], p)?.ref ?? null;
   else if (hoverJoint !== null) ref = { kind: "joint", jointId: hoverJoint };
   else if (hoverBody !== null) ref = pickObjSnapRef([hoverBody], [], p)?.ref ?? null;
   return ref ? scene.resolveMeasureRef(ref) : null;
@@ -739,6 +778,28 @@ function dragSnapView(): { ref: ResolvedMeasureRef; hit: ResolvedMeasureRef | nu
   }
   if (tool === null && !boxSelect && !rotateDrag && hoverObjSnap) return { ref: hoverObjSnap, hit: null, hitInfinite: false };
   return null;
+}
+
+/**
+ * Placement snap for a new point (a joint, a round hole's centre): with object snap on,
+ * the nearest object-snap target point within range (corners, edge midpoints, centroids,
+ * hole centres, joints, guide points) wins; otherwise the usual grid / guideline snap.
+ */
+function placeSnap(p: Vec2): Vec2 {
+  if (objSnapEnabled) {
+    const r = OBJ_SNAP_PX / view.scale;
+    let best: Vec2 | null = null;
+    let bd = r;
+    for (const q of objSnapTargets(new Set(), new Set()).points) {
+      const d = dist(p, q);
+      if (d <= bd) {
+        bd = d;
+        best = q;
+      }
+    }
+    if (best) return best;
+  }
+  return snap(p);
 }
 
 // --- multi-selection (Ctrl+click / box select) + permanent groups -----------
@@ -1153,7 +1214,7 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
   select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
-  hole: "Click inside a body to start a cut-out, then click more vertices (all inside that body). Click the first vertex (or press Enter) to close the hole.",
+  hole: "Round hole: press inside a body and drag out the radius. Polygon hole: click inside a body to start a cut-out, then click more vertices (all inside that body); click the first vertex (or press Enter) to close it.",
   split: "Click a point on a body's outline (edge or corner) to start the cut, click inside to route it, then click the outline again to split the body in two along the path.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   weld: "Click where bodies overlap to weld them rigidly together at that point (no relative rotation) — or click an existing pinned joint to toggle it weld ↔ pin.",
@@ -1401,6 +1462,8 @@ function resetTransient(): void {
   draftBodySnaps = [];
   holeDraft = [];
   holeDraftBodyId = null;
+  holePress = null;
+  holeCircle = null;
   splitDraft = [];
   splitBodyId = null;
   constraintPicks = [];
@@ -2201,7 +2264,7 @@ function handleDrawClick(p: Vec2): void {
       // Place on the grid; hit-test against the raw click point. If snapping would push
       // the joint outside a body it's being attached to, fall back to the click point
       // (inside every hit body by construction).
-      let at = snap(p);
+      let at = placeSnap(p); // object snap on: corners / centres / hole centres first
       if (bodies.length > 0 && !bodies.every((b) => scene.pointInBody(b, at))) at = p;
       let created: ReturnType<typeof scene.addFreeJoint>;
       if (bodies.length > 0) {
@@ -2814,6 +2877,27 @@ dimEditInput.addEventListener("blur", () => {
 
 // --- measure tool ----------------------------------------------------------
 /**
+ * The topmost disk outline (a circular hole, or a one-point offset disk body) whose rim
+ * passes within pick range of `p`: its centre vertex ref plus the circle itself (for the
+ * highlight). Used by the measure tool to pick a diameter.
+ */
+function diskRimAt(p: Vec2): { ref: MeasureRef; c: Vec2; r: number } | null {
+  const tol = pickRadius();
+  for (let i = scene.bodies.length - 1; i >= 0; i--) {
+    const body = scene.bodies[i];
+    const loops: (number | null)[] = [null];
+    for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) loops.push(hi);
+    for (const hole of loops) {
+      const ref: MeasureRef =
+        hole === null ? { kind: "vertex", bodyId: body.id, index: 0 } : { kind: "vertex", bodyId: body.id, index: 0, hole };
+      const disk = scene.diskOfRef(ref);
+      if (disk && Math.abs(dist(p, disk.c) - disk.r) <= tol) return { ref, c: disk.c, r: disk.r };
+    }
+  }
+  return null;
+}
+
+/**
  * The measure reference a click at `p` would pick, by priority: a joint, a body control
  * vertex, a slider rail, a body control-polygon edge, and finally any point inside a
  * body (fixed in that body's frame, grid-snapped when snapping keeps it inside). Empty
@@ -2824,6 +2908,10 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   if (j) return { kind: "joint", jointId: j.id };
   const v = bodyVertexRefAt(p);
   if (v) return v;
+  // A disk rim (circular hole / disk body) picks the disk's centre as a point ref —
+  // and, as the *first* pick, a diameter dimension (see handleMeasureClick).
+  const rim = diskRimAt(p);
+  if (rim) return rim.ref;
   // Guides are draw-mode-only aids (invisible in sim), so only draw-mode picks see them.
   if (mode === "draw") {
     const gp = scene.guidePointAt(p, pickRadius());
@@ -2849,6 +2937,15 @@ function measureRefAt(p: Vec2): MeasureRef | null {
 /** Measure tool click: two reference picks, then a third click places the value label. */
 function handleMeasureClick(p: Vec2): void {
   if (measurePicks.length < 2) {
+    // First pick on a disk rim: a diameter dimension — both refs are the disk's centre
+    // vertex (the model reads the pair as "diameter"); the next click places the label.
+    if (measurePicks.length === 0) {
+      const rim = diskRimAt(p);
+      if (rim) {
+        measurePicks.push(rim.ref, rim.ref);
+        return;
+      }
+    }
     const ref = measureRefAt(p);
     if (!ref) return; // empty space — keep waiting for a reference
     if (measurePicks.length === 1 && sameMeasureRef(measurePicks[0], ref)) return;
@@ -3541,6 +3638,54 @@ function handleHoleClick(p: Vec2): void {
   holeDraft.push(at);
 }
 
+/**
+ * Hole tool press with nothing drawn yet: pick the body (topmost under the cursor; an
+ * instance body is refused) and remember the snapped centre. A drag from here sizes a
+ * round hole (mousemove); a plain release adds the polygon's first vertex instead.
+ * The centre object-snaps (a hole centred on a joint or a corner) with the usual
+ * containment fallback: a snap that would leave the body uses the exact press point.
+ */
+function startHolePress(p: Vec2, screen: Vec2): void {
+  const body = scene.bodyAt(p);
+  if (!body) return; // a hole needs a body — keep the tool armed
+  if (scene.instanceOfBody(body.id)) {
+    notify("This body belongs to a component instance — edit the definition to cut a hole in it.");
+    disarmTool();
+    return;
+  }
+  let centre = placeSnap(p);
+  if (!scene.pointInBody(body, centre)) centre = p;
+  holePress = { bodyId: body.id, centre, screen, maxR: scene.bodyInscribedRadius(body, centre) };
+  holeCircle = null;
+}
+
+/**
+ * Release of a hole-tool press: a dragged circle becomes a parametric disk hole (one
+ * offset-mode control point + radius — resizable by its rim handle, movable by its
+ * centre node, dimensionable by diameter); an undragged press starts the polygon.
+ */
+function finishHolePress(): void {
+  const press = holePress;
+  const circle = holeCircle;
+  holePress = null;
+  holeCircle = null;
+  if (!press) return;
+  const body = scene.getBody(press.bodyId);
+  if (!body) return;
+  if (circle) {
+    // Too small to be a hole (a twitch): drop it, keep the tool armed.
+    if (circle.r < HOLE_DRAG_PX / view.scale) return;
+    if (scene.addBodyHole(body.id, { control: [circle.c], radius: circle.r, round: "offset" }) !== null) {
+      markDirty();
+      disarmTool();
+      selection = { kind: "body", id: body.id }; // show the new hole's handles right away
+    }
+    return;
+  }
+  holeDraftBodyId = body.id;
+  holeDraft.push(press.centre);
+}
+
 /** Close the hole draft: cut it into its body as an editable radius-0 hole outline. */
 function finishHole(): void {
   const bodyId = holeDraftBodyId;
@@ -3694,6 +3839,12 @@ canvas.addEventListener("mousedown", (e) => {
         leftDrag = { kind: "fillet", bodyId: selection.id, index: fh.index, hole: fh.hole, moved: false };
         canvas.style.cursor = "move";
       } else if (node && selection?.kind === "body") {
+        // With object snap on, the vertex itself is the snapping reference: a hole
+        // centre or a corner lands on other objects' corners / centres / edges.
+        const vref: MeasureRef =
+          node.hole === null
+            ? { kind: "vertex", bodyId: selection.id, index: node.index }
+            : { kind: "vertex", bodyId: selection.id, index: node.index, hole: node.hole };
         leftDrag = {
           kind: "vertex",
           bodyId: selection.id,
@@ -3701,6 +3852,7 @@ canvas.addEventListener("mousedown", (e) => {
           hole: node.hole,
           grabOffset: sub(world, node.at),
           moved: false,
+          osnap: objSnapEnabled ? { ref: vref, hit: null, hitInfinite: false } : undefined,
         };
         canvas.style.cursor = "move";
       } else if (e.shiftKey) {
@@ -3769,6 +3921,10 @@ canvas.addEventListener("mousedown", (e) => {
           boxSelect = { start: world, end: world, additive: false, moved: false };
         }
       }
+    } else if (tool === "hole" && holeDraft.length === 0) {
+      // Hole tool, nothing drawn yet: the press may become a round-hole drag (centre →
+      // rim), so the polygon's first vertex waits for the release (see mouseup).
+      startHolePress(world, eventScreen(e));
     } else {
       handleDrawClick(world);
     }
@@ -3812,6 +3968,17 @@ canvas.addEventListener("mousemove", (e) => {
     view.tx += s.x - pan.lastScreen.x;
     view.ty += s.y - pan.lastScreen.y;
     pan.lastScreen = s;
+    return;
+  }
+
+  if (holePress) {
+    // Round-hole gesture: once the pointer has clearly moved, the press is a circle drag
+    // — the radius runs from the centre to the (grid-snapped) cursor, clamped so the
+    // disk stays inside the body's material.
+    if (holeCircle || dist(eventScreen(e), holePress.screen) > HOLE_DRAG_PX) {
+      const r = Math.min(holePress.maxR, dist(holePress.centre, snap(world)));
+      holeCircle = { c: holePress.centre, r };
+    }
     return;
   }
 
@@ -3948,6 +4115,7 @@ canvas.addEventListener("mousemove", (e) => {
 });
 
 window.addEventListener("mouseup", (e) => {
+  if (e.button === 0 && holePress) finishHolePress();
   if (e.button === 2 && pan) {
     pan = null;
     canvas.style.cursor = defaultCursor();
@@ -4547,20 +4715,28 @@ function measurementsView(): MeasureInfo[] {
 
 /** Measure-tool overlay: picked refs, the ref under the cursor, and the placement preview. */
 function measureDraftView(): {
-  refs: ResolvedMeasureRef[];
-  hover: ResolvedMeasureRef | null;
+  refs: MeasureHighlight[];
+  hover: MeasureHighlight | null;
   preview: MeasureInfo | null;
 } | null {
   if (tool !== "measure") return null;
-  const refs = measurePicks
-    .map((r) => scene.resolveMeasureRef(r))
-    .filter((r): r is ResolvedMeasureRef => r !== null);
-  let hover: ResolvedMeasureRef | null = null;
+  // A diameter pick (the same disk vertex twice) highlights the disk's rim, not its centre.
+  const disk =
+    measurePicks.length === 2 && sameMeasureRef(measurePicks[0], measurePicks[1])
+      ? scene.diskOfRef(measurePicks[0])
+      : null;
+  const refs: MeasureHighlight[] = disk
+    ? [{ kind: "circle", c: disk.c, r: disk.r }]
+    : measurePicks
+        .map((r) => scene.resolveMeasureRef(r))
+        .filter((r): r is ResolvedMeasureRef => r !== null);
+  let hover: MeasureHighlight | null = null;
   let preview: MeasureInfo | null = null;
   if (cursor) {
     if (measurePicks.length < 2) {
-      const h = measureRefAt(cursor);
-      hover = h ? scene.resolveMeasureRef(h) : null;
+      const rim = measurePicks.length === 0 ? diskRimAt(cursor) : null;
+      const h = rim ? null : measureRefAt(cursor);
+      hover = rim ? { kind: "circle", c: rim.c, r: rim.r } : h ? scene.resolveMeasureRef(h) : null;
     } else {
       preview = scene.measurePreview(measurePicks[0], measurePicks[1], cursor);
     }
@@ -4716,7 +4892,9 @@ function frame(now?: number): void {
     scene,
     view,
     mode,
-    // The hole tool's cut-out draft previews through the same dashed-polyline channel.
+    // The hole tool's cut-out draft previews through the same dashed-polyline channel;
+    // its round-hole drag previews as a dashed circle.
+    draftCircle: mode === "draw" && tool === "hole" ? holeCircle : null,
     draftBody:
       mode !== "draw" ? null
       : tool === "body" ? draftBody

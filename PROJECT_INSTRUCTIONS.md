@@ -253,6 +253,45 @@ first vertex / double-click / Enter closes the loop into an editable **radius-0 
 (`Scene.addBodyHole`, appended after existing holes so their refs keep their indices); the
 body is then selected so the new hole's handles show immediately. Esc aborts the draft. The
 in-progress polygon previews through the body tool's dashed-polyline render channel.
+**Round holes + diameter dimensions + node object snap** (no format change): the Hole tool
+gained a **press-and-drag gesture** — with nothing drawn yet, mousedown inside a body picks it
+(`startHolePress`: instance bodies refused as before) and remembers the **centre** =
+`placeSnap(p)` (object-snap target points when osnap is on, else grid/guides; containment
+fallback to the exact press point) plus `Scene.bodyInscribedRadius(body, centre)` — the
+distance to the nearest outer-outline / other-hole segment (0 outside the material). Moving
+> `HOLE_DRAG_PX` (4 px) turns the press into a circle drag: radius = distance from the centre
+to the grid-snapped cursor, clamped to that max, previewed as a dashed circle + radius line
+(`RenderInput.draftCircle`). Release cuts `addBodyHole(body, { control: [c], radius: r,
+round: "offset" })` — a **parametric disk hole** (movable by its centre node, resizable by its
+rim handle) — and selects the body; a release without a drag falls back to the polygon path
+(the press point becomes vertex 1, so the old click flow is unchanged); a twitch smaller than
+4 px is dropped. **Diameter dimensions**: `MeasureAxis` gained `"diameter"` — a dimension whose
+two refs are the *same* vertex ref of a **disk outline** (a 1-point offset-mode outer outline
+or hole; `Scene.diskOfRef(ref) → { bodyId, hole, c, r }`). `addMeasurement` /
+`measurePreview` assign it automatically for such a pair (`measureAxisFor`), `measureInfo`
+returns `diameterInfo` (value 2r, `MeasureInfo.circle`, the dim line rim-to-rim through the
+centre towards the label, a dashed leader to a label outside the disk; renderer prefixes `⌀`),
+and `setMeasurementLabel` never re-derives the axis away from it. In the UI the Measure tool's
+**first pick on a disk rim** (`diskRimAt`: |dist − r| within pick radius, topmost body, outer
+or hole) pushes the centre ref twice and goes straight to label placement (the draft
+highlights the whole rim — `MeasureHighlight = ResolvedMeasureRef | circle`); a rim as a
+*second* pick is the centre point (`measureRefAt`). **Driving** a diameter (`applyDrivingDimension`)
+sets the disk's radius directly via `setBodyRadius(bodyId, target/2, hole)` — no vertex moves,
+so `buildSystem` skips diameter dims, `scaleEligibleBody` ignores them (they never block the
+first-dimension uniform scale), and `enforceDiameterDims(scene)` re-applies every driving
+diameter after `solveSketch` and after a body scale (a scale multiplies hole radii, so a
+dimensioned hole is put back); `isPoseDim` excludes them, and one on instance geometry is
+rejected by the both-ends-instance-owned check. Removing the hole prunes the dim like any
+vertex ref; adding a node to the hole would end its disk-ness, so `measureInfo` returns null
+(not displayed). **Object snap for node drags**: a vertex reshape drag (`LeftDrag.vertex`)
+now carries `osnap` with the vertex itself as the reference; `objSnapTargets` takes an
+`excludeVertex` — that vertex, its two edges + midpoints and its body's **centroid** are left
+out (they move with it and would stick), as are same-body joints stuck to the node
+(`VERTEX_LINK_EPS`) — the body's other corners/edges stay valid targets (a hole centre onto the
+body centre is excluded, but onto a corner / another hole's centre works). `hoverObjSnapRef`
+previews a hovered node as the reference. **Placement snap** (`placeSnap`) also applies to the
+Joint tool (a joint lands exactly on a hole centre / corner / centroid when osnap is on).
+Tests: `scripts/measurements.ts` (diameter section + `bodyInscribedRadius`).
 **Fork a component instance / "make unique"** (no format change): pressing **⊞** with exactly
 one component instance selected no longer alerts — it **forks**: `Scene.makeInstanceUnique`
 deep-copies the instance's definition into a new component (named `"<source> copy"`, deduped
@@ -745,7 +784,9 @@ callers that want it. New test block in `scripts/components.ts`.
     (`joint` id / body `vertex` index / `bodyPoint` = a local offset fixed in a body's frame)
     or a **line** (slider `rail` id / body control-polygon `edge` index). Vertex/edge refs
     carry an optional `hole` index (v16) naming one of the body's hole outlines instead of
-    the outer one (a 1-point disk hole has vertex refs but no edge refs). `resolveMeasureRef`
+    the outer one (a 1-point disk hole has vertex refs but no edge refs; the same disk vertex
+    ref twice with `axis: "diameter"` is a **diameter dimension** — `diskOfRef`,
+    `diameterInfo`, `MeasureInfo.circle`). `resolveMeasureRef`
     re-resolves a ref to world geometry every frame; `measureInfo(m)` computes the display —
     kind (`distance`/`angle`), value (world units / degrees), label position, arrowed
     dimension segment or arc, and dashed extension segments (`MeasureInfo`). Point+point uses
@@ -932,7 +973,9 @@ callers that want it. New test block in `scripts/components.ts`.
   coordinate; parallel/perpendicular → rotate both lines half-way about their midpoints;
   equal → scale both lines to the mean length; distance dims → symmetric point/line
   moves along the axis/normal — a driving line–line distance also keeps the pair
-  parallel). Sweeps run until every residual < `sketchConfig.tol` (mirrors
+  parallel). **Diameter dims** (`axis: "diameter"`) are not items at all: they set a disk
+  outline's radius directly (`applyDrivingDimension` → `setBodyRadius`) and
+  `enforceDiameterDims` re-applies them after every `solveSketch` / body scale. Sweeps run until every residual < `sketchConfig.tol` (mirrors
   `solverConfig`), then the solved positions are applied through `moveBodyVertex` /
   `moveJoint` (bodies rebuild, containment clamps apply) and **verified** against the
   actual scene; a failed verify reverts via a serialize snapshot. **Reject semantics

@@ -6,6 +6,7 @@ import {
   ComponentInstance,
   ComponentOccurrence,
   MeasureInfo,
+  MeasureHighlight,
   ResolvedMeasureRef,
   SketchConstraintKind,
 } from "./model";
@@ -18,6 +19,8 @@ export interface RenderInput {
   view: View;
   mode: "draw" | "sim";
   draftBody: Vec2[] | null;
+  /** Hole tool: the round hole being dragged out (centre + current radius), or null. */
+  draftCircle: { c: Vec2; r: number } | null;
   cursor: Vec2 | null;
   hoverJoint: number | null;
   /** Body hovered in normal/select mode (for pre-selection feedback). */
@@ -41,8 +44,8 @@ export interface RenderInput {
    * cursor would pick next, and the live preview once both references are chosen.
    */
   measureDraft: {
-    refs: ResolvedMeasureRef[];
-    hover: ResolvedMeasureRef | null;
+    refs: MeasureHighlight[];
+    hover: MeasureHighlight | null;
     preview: MeasureInfo | null;
   } | null;
   /** Sketch-constraint badges to draw (draw mode only; positions resolved by main). */
@@ -367,6 +370,26 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.stroke();
     ctx.setLineDash([]);
     for (const p of pts) dot(ctx, p, px(3), theme.ink);
+  }
+
+  // Round hole being dragged out: dashed circle, its centre, and the radius to the cursor.
+  if (input.draftCircle) {
+    const { c, r } = input.draftCircle;
+    ctx.strokeStyle = theme.ink;
+    ctx.lineWidth = px(1.5);
+    ctx.setLineDash([px(5), px(4)]);
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    if (input.cursor) {
+      ctx.lineWidth = px(1);
+      ctx.beginPath();
+      ctx.moveTo(c.x, c.y);
+      ctx.lineTo(input.cursor.x, input.cursor.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    dot(ctx, c, px(3), theme.ink);
   }
 
   // Body-from-joints: dashed outline through the picked joints, and the expanded preview.
@@ -750,7 +773,7 @@ const SKETCH_SYMBOL: Record<SketchConstraintKind, string> = {
  */
 function measureText(info: MeasureInfo, paren: boolean, unit: string): string {
   const v = Math.round(info.value * 10) / 10;
-  const t = info.kind === "angle" ? `${v}°` : `${v} ${unit}`;
+  const t = info.kind === "angle" ? `${v}°` : info.circle ? `⌀${v} ${unit}` : `${v} ${unit}`;
   return paren ? `(${t})` : t;
 }
 
@@ -792,16 +815,25 @@ function drawSketchGlyph(
   }
 }
 
-/** Highlight a measure reference: a ring around a point, a soft thick stroke over a line. */
+/** Highlight a measure reference: a ring around a point, a soft thick stroke over a line
+ *  (or around a whole disk rim, for a diameter pick). */
 function drawMeasureRefHighlight(
   ctx: CanvasRenderingContext2D,
-  ref: ResolvedMeasureRef,
+  ref: MeasureHighlight,
   px: (n: number) => number,
   isHover: boolean,
   color: string = MEASURE_COLOR
 ): void {
   ctx.strokeStyle = color;
-  if (ref.kind === "point") {
+  if (ref.kind === "circle") {
+    ctx.save();
+    ctx.globalAlpha = isHover ? 0.4 : 0.7;
+    ctx.lineWidth = px(5);
+    ctx.beginPath();
+    ctx.arc(ref.c.x, ref.c.y, ref.r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  } else if (ref.kind === "point") {
     ctx.lineWidth = px(2);
     if (isHover) ctx.setLineDash([px(3), px(3)]);
     ctx.beginPath();

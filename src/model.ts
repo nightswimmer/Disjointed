@@ -292,8 +292,11 @@ export type MeasureMode = "draw" | "sim";
 /**
  * For a point–point measurement, which distance the label placement selected:
  * `"h"` horizontal (|Δx|), `"v"` vertical (|Δy|), `"direct"` straight-line.
+ * `"diameter"` is the special case of a dimension whose two refs are the *same*
+ * control vertex of a **disk outline** (a one-point offset-mode outer outline or hole):
+ * it measures — and, when driving, sets — that disk's diameter.
  */
-export type MeasureAxis = "direct" | "h" | "v";
+export type MeasureAxis = "direct" | "h" | "v" | "diameter";
 
 /**
  * A measurement reference — a point or a line, anchored to scene *elements* (never to
@@ -381,6 +384,23 @@ export type ResolvedMeasureRef =
   | { kind: "point"; p: Vec2 }
   | { kind: "line"; a: Vec2; b: Vec2 };
 
+/**
+ * A measure-tool highlight: a resolved reference, or a whole disk outline (the rim of
+ * a circular hole / disk body picked for a diameter dimension).
+ */
+export type MeasureHighlight = ResolvedMeasureRef | { kind: "circle"; c: Vec2; r: number };
+
+/** A disk outline (one-point offset-mode outer outline or hole) found from a vertex ref. */
+export interface DiskRef {
+  bodyId: number;
+  /** The hole index, or null for the body's outer outline. */
+  hole: number | null;
+  /** World centre (the outline's single control point). */
+  c: Vec2;
+  /** Current radius. */
+  r: number;
+}
+
 /** Everything needed to display a measurement this frame (value + drawing geometry). */
 export interface MeasureInfo {
   id: number;
@@ -394,6 +414,8 @@ export interface MeasureInfo {
    *  — rendered in an error style until re-applied. */
   violated?: boolean;
   labelPos: Vec2;
+  /** The disk a diameter dimension measures (its value is 2·r; drawn with a ⌀ prefix). */
+  circle?: { c: Vec2; r: number };
   /** Arrowed dimension segment (distance only). */
   dim?: { a: Vec2; b: Vec2 };
   /** Dashed extension / leader segments. */
@@ -1448,6 +1470,53 @@ export class Scene {
     return h.controlLocal.map((p) => add(body.pos, rotate(p, body.angle)));
   }
 
+  /**
+   * The disk outline a vertex ref names, if that outline is a one-point offset-mode
+   * outline (a circular hole, or a disk body): its centre is the ref's vertex and its
+   * radius the outline's effective corner radius. Null for any other ref.
+   */
+  diskOfRef(ref: MeasureRef): DiskRef | null {
+    if (ref.kind !== "vertex" || ref.index !== 0) return null;
+    const body = this.getBody(ref.bodyId);
+    if (!body) return null;
+    const hole = ref.hole ?? null;
+    const shape = hole === null ? body : body.holes?.[hole];
+    const ctrl = this.controlListOf(body, hole);
+    if (!shape || !ctrl || ctrl.length !== 1 || shape.round !== "offset") return null;
+    return {
+      bodyId: body.id,
+      hole,
+      c: add(body.pos, rotate(ctrl[0], body.angle)),
+      r: this.bodyCornerRadii(body, hole)[0] ?? shape.radius,
+    };
+  }
+
+  /**
+   * The largest radius a disk centred at world point `c` can have while staying inside
+   * `body`'s material: the distance from `c` to the nearest point of the body's sampled
+   * outer outline and of every hole loop (`excludeHole` leaves one hole out — e.g. the
+   * disk being resized). 0 when `c` is outside the body or inside a hole.
+   */
+  bodyInscribedRadius(body: Body, c: Vec2, excludeHole: number | null = null): number {
+    const outer = this.bodyWorldVerts(body);
+    if (!pointInPolygon(c, outer)) return 0;
+    const holes = this.bodyHolesWorld(body);
+    for (let hi = 0; hi < holes.length; hi++) {
+      if (hi !== excludeHole && pointInPolygon(c, holes[hi])) return 0;
+    }
+    let best = Infinity;
+    const scan = (loop: Vec2[]): void => {
+      for (let i = 0; i < loop.length; i++) {
+        best = Math.min(best, distToSegment(c, loop[i], loop[(i + 1) % loop.length]));
+      }
+    };
+    scan(outer);
+    holes.forEach((loop, hi) => {
+      if (hi !== excludeHole) scan(loop);
+    });
+    return best === Infinity ? 0 : best;
+  }
+
   addJoint(bodyId: number, worldPos: Vec2): Joint {
     const body = this.getBody(bodyId)!;
     const offset = sub(worldPos, body.pos);
@@ -1690,20 +1759,31 @@ export class Scene {
     const b = this.resolveMeasureRef(refB);
     if (!a || !b) return null;
     const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
-    const axis =
-      a.kind === "point" && b.kind === "point"
-        ? measureAxisForPlacement(a.p, b.p, labelPos)
-        : "direct";
     const m: Measurement = {
       id: this.id(),
       mode,
       refA: cloneMeasureRef(refA),
       refB: cloneMeasureRef(refB),
       labelOffset: sub(labelPos, anchor),
-      axis,
+      axis: this.measureAxisFor(refA, refB, a, b, labelPos),
     };
     this.measurements.push(m);
     return m;
+  }
+
+  /**
+   * The axis a new dimension between two refs gets: the same disk vertex twice → a
+   * diameter dimension; a point pair → picked from the label placement; else direct.
+   */
+  private measureAxisFor(
+    refA: MeasureRef,
+    refB: MeasureRef,
+    a: ResolvedMeasureRef,
+    b: ResolvedMeasureRef,
+    labelPos: Vec2
+  ): MeasureAxis {
+    if (sameMeasureRef(refA, refB) && this.diskOfRef(refA)) return "diameter";
+    return a.kind === "point" && b.kind === "point" ? measureAxisForPlacement(a.p, b.p, labelPos) : "direct";
   }
 
   getMeasurement(id: number): Measurement | undefined {
@@ -1782,7 +1862,9 @@ export class Scene {
     if (!a || !b) return;
     const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
     m.labelOffset = sub(labelPos, anchor);
-    if (a.kind === "point" && b.kind === "point") {
+    // A diameter dimension keeps its axis wherever the label goes (the label's direction
+    // only picks where the diameter line is drawn through the disk).
+    if (m.axis !== "diameter" && a.kind === "point" && b.kind === "point") {
       const before = m.axis;
       m.axis = measureAxisForPlacement(a.p, b.p, labelPos);
       // A driving dimension that changed axis measures a different quantity — its held
@@ -1802,7 +1884,11 @@ export class Scene {
     if (!a || !b) return null;
     const labelPos = add(scale(add(refCenter(a), refCenter(b)), 0.5), m.labelOffset);
     let info: MeasureInfo | null;
-    if (a.kind === "point" && b.kind === "point") {
+    if (m.axis === "diameter") {
+      // The disk may have stopped being one (a node added to the hole): then no display.
+      const disk = this.diskOfRef(m.refA);
+      info = disk ? diameterInfo(m.id, disk.c, disk.r, labelPos) : null;
+    } else if (a.kind === "point" && b.kind === "point") {
       info = pointPointInfo(m.id, a.p, b.p, m.axis, labelPos);
     } else if (a.kind === "line" && b.kind === "line") {
       info = lineLineInfo(m.id, a, b, labelPos);
@@ -1832,17 +1918,13 @@ export class Scene {
     const b = this.resolveMeasureRef(refB);
     if (!a || !b) return null;
     const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
-    const axis =
-      a.kind === "point" && b.kind === "point"
-        ? measureAxisForPlacement(a.p, b.p, labelPos)
-        : "direct";
     return this.measureInfo({
       id: -1,
       mode: "draw",
       refA,
       refB,
       labelOffset: sub(labelPos, anchor),
-      axis,
+      axis: this.measureAxisFor(refA, refB, a, b, labelPos),
     });
   }
 
@@ -4196,6 +4278,22 @@ function pointPointInfo(
   pushExt(ext, p, d1);
   pushExt(ext, q, d2);
   return { id, kind: "distance", value: l, labelPos, dim: { a: d1, b: d2 }, ext };
+}
+
+/**
+ * Diameter of a disk: the dimension line runs through the centre towards the label
+ * (rim to rim, arrowed at both ends), with a dashed leader from the rim out to a label
+ * placed outside the circle. Value = 2·r.
+ */
+function diameterInfo(id: number, c: Vec2, r: number, labelPos: Vec2): MeasureInfo {
+  const w = sub(labelPos, c);
+  const l = len(w);
+  const u = l > 1e-9 ? scale(w, 1 / l) : vec(1, 0);
+  const near = add(c, scale(u, r));
+  const far = sub(c, scale(u, r));
+  const ext: { a: Vec2; b: Vec2 }[] = [];
+  if (l > r) pushExt(ext, near, labelPos);
+  return { id, kind: "distance", value: 2 * r, labelPos, circle: { c, r }, dim: { a: far, b: near }, ext };
 }
 
 function pointLineInfo(

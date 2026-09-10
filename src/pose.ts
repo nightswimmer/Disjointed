@@ -60,6 +60,7 @@ import { Vec2, vec, add, sub, scale, len, dot, perp, rotate } from "./geometry";
 export function isPoseDim(scene: Scene, m: Measurement): boolean {
   return (
     m.mode === "draw" &&
+    m.axis !== "diameter" && // a disk's diameter is shape material, never a pose
     scene.instanceOfRef(m.refA) !== undefined &&
     scene.instanceOfRef(m.refB) !== undefined
   );
