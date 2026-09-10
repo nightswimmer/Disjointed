@@ -171,13 +171,17 @@ set of measurements. What gets measured follows from the two references you pick
 
 - **Two points** — where you place the value picks the dimension, CAD-style: above/below the
   pair → **horizontal** distance, beside it → **vertical**, in the diagonal zones → **direct**.
-- **A point and a line** — the perpendicular distance to the (infinite) line.
+- **A point and a line** — the perpendicular distance to the (infinite) line. The dimension
+  line sits wherever you drag the label along the line, with dashed extensions back to the
+  point (and to the line's end when you're beyond it).
 - **Two lines** — the **distance** while they're parallel, the **angle** otherwise. This is
   re-evaluated live, so a line pair can flip between distance and angle mid-simulation, and
   the side you place the label on picks θ vs 180°−θ.
 - **A disk** — click the rim of a round hole (or a disk body) and place the label: a
   **diameter** dimension (`⌀`), drawn through the centre towards the label. In draw mode you
-  can type a value into it (double-click the label) and it **drives** the hole's diameter.
+  can type a value into it (double-click the label) and it **drives** the hole's diameter;
+  resizing the disk directly afterwards (rim handle, `[` / `]`) turns it back into a
+  reference dimension.
 
 References anchor to the elements themselves, so in **Simulate mode the values update live**
 as the mechanism moves — measure a stroke length by dimensioning two joints, or a transmission
@@ -240,12 +244,18 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   remove it (its constraints and measurements go with it).
 - **Constraints on guidelines** (H / V / parallel / perpendicular / coincident — a guide
   point onto another point, or a point held **on** the guide's infinite line — and
-  measurements, including driving dimensions) follow one strict rule: they are satisfied
-  by moving **only free guide points — never joints or body nodes**. A constraint that
-  would need geometry to move is rejected with a red flash (e.g. Horizontal on a guide
-  whose both points are bound to joints at different heights). Constraints hold **during**
-  drags too: dragging the free point of a joint-bound vertical guide slides it vertically —
-  it can't be pulled off-axis even momentarily.
+  measurements, including driving dimensions): a guide with a **single** demand on it yields
+  — it is satisfied by moving **only its free points, never joints or body nodes**. A guide
+  that is **attached to geometry** (coincident with a corner or joint) or carries **several**
+  demands (two driving dimensions, an attachment plus a dimension…) acts as a **reference**
+  instead: the geometry moves to satisfy the dimension while the guide stays. So you can
+  dimension any number of bodies to one guide, and dragging one of them pulls the guide and
+  the others along. Genuinely over-constrained edits are still rejected with a red flash
+  (e.g. Horizontal on a guide whose both points are bound to joints at different heights).
+  Constraints hold **during** drags too: dragging the free point of a joint-bound vertical
+  guide slides it vertically — it can't be pulled off-axis even momentarily.
+- **Picking a guideline** (Measure / constraint tools, object snap) highlights the **whole
+  infinite line** and rings its two defining points.
 - Guidelines are drawing aids only: they're invisible (and unpickable) in Simulate mode,
   never affect the simulation, and don't travel with copy/paste.
 

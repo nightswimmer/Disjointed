@@ -214,6 +214,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   const top = -view.ty / s;
   const right = (w - view.tx) / s;
   const bottom = (h - view.ty) / s;
+  const viewRect = { left, top, right, bottom };
 
   if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
 
@@ -682,8 +683,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   }
   if (input.sketchDraft) {
     const { refs, hover } = input.sketchDraft;
-    if (hover) drawMeasureRefHighlight(ctx, hover, px, true, SKETCH_COLOR);
-    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false, SKETCH_COLOR);
+    if (hover) drawMeasureRefHighlight(ctx, hover, px, true, viewRect, SKETCH_COLOR);
+    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false, viewRect, SKETCH_COLOR);
   }
   // Object snap: the target it snapped onto (dashed, a line target extended when it acts
   // as an infinite line), then the dragged reference itself on top.
@@ -693,9 +694,9 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       if (hit.kind === "line" && hitInfinite) {
         drawGuideLine(ctx, hit.a, hit.b, left, top, right, bottom, px, OSNAP_COLOR, false);
       }
-      drawMeasureRefHighlight(ctx, hit, px, true, OSNAP_COLOR);
+      drawMeasureRefHighlight(ctx, hit, px, true, viewRect, OSNAP_COLOR);
     }
-    drawMeasureRefHighlight(ctx, ref, px, false, OSNAP_COLOR);
+    drawMeasureRefHighlight(ctx, ref, px, false, viewRect, OSNAP_COLOR);
   }
 
   // Measurements (drawn last: dimension annotations sit on top of everything).
@@ -711,8 +712,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   }
   if (input.measureDraft) {
     const { refs, hover, preview } = input.measureDraft;
-    if (hover) drawMeasureRefHighlight(ctx, hover, px, true);
-    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false);
+    if (hover) drawMeasureRefHighlight(ctx, hover, px, true, viewRect);
+    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false, viewRect);
     if (preview) drawMeasurement(ctx, preview, view, dpr, theme, false, true, false, false, input.scene.unit);
   }
 
@@ -822,9 +823,37 @@ function drawMeasureRefHighlight(
   ref: MeasureHighlight,
   px: (n: number) => number,
   isHover: boolean,
+  viewRect: { left: number; top: number; right: number; bottom: number },
   color: string = MEASURE_COLOR
 ): void {
   ctx.strokeStyle = color;
+  if (ref.kind === "line" && ref.infinite) {
+    // A guide is an infinite construction line: highlight it right across the view,
+    // and ring its two defining points so they stay easy to find along it.
+    const d = normalize(sub(ref.b, ref.a));
+    if (d.x !== 0 || d.y !== 0) {
+      const { left, top, right, bottom } = viewRect;
+      const tc = ((left + right) / 2 - ref.a.x) * d.x + ((bottom + top) / 2 - ref.a.y) * d.y;
+      const half = Math.hypot(right - left, bottom - top);
+      ctx.save();
+      ctx.globalAlpha = isHover ? 0.4 : 0.7;
+      ctx.lineWidth = px(5);
+      ctx.beginPath();
+      ctx.moveTo(ref.a.x + d.x * (tc - half), ref.a.y + d.y * (tc - half));
+      ctx.lineTo(ref.a.x + d.x * (tc + half), ref.a.y + d.y * (tc + half));
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.lineWidth = px(2);
+    if (isHover) ctx.setLineDash([px(3), px(3)]);
+    for (const p of [ref.a, ref.b]) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, px(7), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    return;
+  }
   if (ref.kind === "circle") {
     ctx.save();
     ctx.globalAlpha = isHover ? 0.4 : 0.7;

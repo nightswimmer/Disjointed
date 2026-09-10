@@ -71,7 +71,8 @@ references, then place the value label. References anchor to **elements** (joint
 control vertices, slider rails, body control-polygon edges, or a point fixed in a body's
 frame), never to bare coordinates — so in sim the values update live every frame as the
 mechanism moves. Point+point measures h / v / direct distance (picked CAD-style from where
-the label is placed); point+line measures perpendicular distance to the **infinite** line;
+the label is placed); point+line measures perpendicular distance to the **infinite** line
+(the dimension line is dropped at the label's position along the line and slides with it);
 line+line measures the distance while (near-)parallel (< 0.5°) and the **angle** otherwise —
 resolved dynamically per frame, so a line pair can flip between the two mid-simulation, with
 the label's sector picking θ vs 180−θ. Labels are constant-size pills (cyan accent),
@@ -147,10 +148,12 @@ projects onto it, near two it lands on their **intersection**. Guides are first-
 `MeasureRef`s (`guidePoint` / `guideLine`), so **measurements** and **sketch constraints**
 work on them — coincident on defining points; H/V, parallel, perpendicular on the lines
 (`equal` is rejected: an infinite line has no length). The sketch solver ranks mobility
-**construction < geometry < dragged** — guide constraints are satisfied by moving **only
-free guide points, never joints or body nodes** (a guide fully bound to joints rejects an
-unsatisfiable H/V with a red flash), while drags pin the dragged geometry so guides follow
-it exactly; when a drag would break a constraint the solver falls back to a symmetric
+**construction < geometry < dragged** — a guide with a **single** demand on it is satisfied
+by moving **only its free points, never joints or body nodes**; but a guide **tied** to
+geometry (coincident with a corner / joint) or carrying **several** demands (two driving
+dimensions, a tie + a dimension) is a *reference*: the geometry moves to it instead (see the
+*Dimension & guide fixes* entry — tied-guide rank + the guides-as-reference fallback pass),
+while drags pin the dragged geometry so guides follow it exactly; when a drag would break a constraint the solver falls back to a symmetric
 re-solve **that same frame**, so dragging can only move things along the directions the
 constraints leave free (a bound vertical guide's free point slides only vertically).
 **Working units + DXF import + bodies with holes** (serialization v12 + v13): a **unit
@@ -291,7 +294,8 @@ out (they move with it and would stick), as are same-body joints stuck to the no
 body centre is excluded, but onto a corner / another hole's centre works). `hoverObjSnapRef`
 previews a hovered node as the reference. **Placement snap** (`placeSnap`) also applies to the
 Joint tool (a joint lands exactly on a hole centre / corner / centroid when osnap is on).
-Tests: `scripts/measurements.ts` (diameter section + `bodyInscribedRadius`).
+Tests: `scripts/measurements.ts` (diameter section + `bodyInscribedRadius`; driving after a
+rim-handle override, `setDiskRadius` no-op on polygons).
 **Fork a component instance / "make unique"** (no format change): pressing **⊞** with exactly
 one component instance selected no longer alerts — it **forks**: `Scene.makeInstanceUnique`
 deep-copies the instance's definition into a new component (named `"<source> copy"`, deduped
@@ -544,6 +548,43 @@ carries the expanded elements), and deletes the definition; returns the instance
 `markDirty` (one undo step) and a toast reports the count. The only remaining refusal is a
 def that is itself on `editPath`. `removeComponent` keeps the strict refusing behaviour for
 callers that want it. New test block in `scripts/components.ts`.
+
+**Dimension & guide fixes (no format change)** — a batch of dimensioning corrections:
+- **Point–line dimension follows its label**: `pointLineInfo` drops the dimension line
+  perpendicular to the reference line **at the label's position along it** (like the
+  parallel-lines case) with a dashed extension from the point to the far end (and from the
+  line's nearer end when the label is beyond the segment); it used to be pinned at the
+  point's foot with the label floating unconnected. Value unchanged (perpendicular distance
+  to the infinite line).
+- **Disk radius has one source of truth**: `Scene.setDiskRadius(bodyId, r, hole?)` drops a
+  one-point offset outline's per-corner override and sets the default. Both diameter driving
+  paths (`applyDrivingDimension`, `enforceDiameterDims`), the rim-handle drag and the
+  `[` / `]` keys on a disk body go through it. Before, a rim drag wrote a `radii[0]` override
+  that shadowed `setBodyRadius`, so typing a diameter after ever dragging the rim did nothing
+  and the dimension went red. A **direct resize (rim drag / `[` `]`) demotes any driving
+  diameter dimension on that disk back to driven** (`demoteDiameterDims` in main) instead of
+  leaving it violated.
+- **Guide-line highlight**: a `guideLine` ref resolves with `infinite: true` on the line
+  variant of `ResolvedMeasureRef`; `drawMeasureRefHighlight` draws such a line **across the
+  whole viewport** plus small rings on its two defining points (measure tool, constraint
+  tools, object-snap targets alike). It used to highlight only the defining segment.
+- **Guides as dimension references** (`sketch.ts`): the strict "construction always yields"
+  rank made every guide with more than one demand on it unusable — a tie (coincident to a
+  corner / joint) plus a dimension, or two driving dimensions to the same free guide, both
+  pushed the guide and the geometry never moved, so the second item was rejected. Two
+  changes: (a) **tied guides** (`tiedGuideVars`: guide vars in a coincident constraint with
+  geometry, transitively through guide–guide coincidences) are weighed by every item *except
+  the tie itself* at `TIED_GUIDE_RANK` = 1.5 (`itemRank`) — above geometry, below drag
+  anchors and instance geometry — so a dimension to a tied guide moves the body corner while
+  placing the tie still moves the guide onto the geometry; (b) `solveAndApply` runs a
+  **fallback pass** when the construction-first pass doesn't converge and the scene has
+  guides: `buildSystem(…, guidesAsReference = true)` treats *every* guide as tied, so
+  geometry absorbs whatever the guides alone couldn't satisfy (the verify re-solve uses the
+  same mode). A guide with a single demand still yields as before. Result: any number of
+  driving dimensions can reference one guide; dragging one dimensioned body pulls the guide,
+  which pulls the others. Tests: `scripts/measurements.ts` (point-line label follow,
+  rim-override + drive), `scripts/sketch.ts` (tied guides ×5 scenarios, two dims on one free
+  guide + drag chaining).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -974,8 +1015,8 @@ callers that want it. New test block in `scripts/components.ts`.
   equal → scale both lines to the mean length; distance dims → symmetric point/line
   moves along the axis/normal — a driving line–line distance also keeps the pair
   parallel). **Diameter dims** (`axis: "diameter"`) are not items at all: they set a disk
-  outline's radius directly (`applyDrivingDimension` → `setBodyRadius`) and
-  `enforceDiameterDims` re-applies them after every `solveSketch` / body scale. Sweeps run until every residual < `sketchConfig.tol` (mirrors
+  outline's radius directly (`applyDrivingDimension` → `setDiskRadius`, which also drops a
+  rim-drag per-corner override) and `enforceDiameterDims` re-applies them after every `solveSketch` / body scale. Sweeps run until every residual < `sketchConfig.tol` (mirrors
   `solverConfig`), then the solved positions are applied through `moveBodyVertex` /
   `moveJoint` (bodies rebuild, containment clamps apply) and **verified** against the
   actual scene; a failed verify reverts via a serialize snapshot. **Reject semantics
@@ -1001,8 +1042,16 @@ callers that want it. New test block in `scripts/components.ts`.
   it outranks even the drag — dragging against it yields) — with each
   pairwise projection weighted so corrections flow entirely to the **lowest** rank (equal
   ranks split evenly, the old symmetric behaviour): guide constraints move only free guide
-  points, never geometry, and a drag is never tugged back by its constraints.
-  `solveSketch(scene, anchors?)` takes the drag-pinned variable keys, built in main via
+  points, never geometry, and a drag is never tugged back by its constraints. Two
+  refinements keep guides usable as *references*: **tied guides** — guide variables in a
+  coincident constraint with geometry (`tiedGuideVars`, transitive through guide–guide
+  coincidences) are weighed by every item except the tie itself at `TIED_GUIDE_RANK` (1.5,
+  via `itemRank`), so a dimension to a tied guide moves the geometry while the tie still
+  pulls the guide onto it; and a **guides-as-reference fallback**: when the construction-first
+  pass of `solveAndApply` fails to converge and the scene has guides, it rebuilds with
+  `guidesAsReference = true` (every guide tied) and retries, so several demands on one free
+  guide (two driving dims, etc.) resolve by moving geometry instead of fighting over the
+  guide. `solveSketch(scene, anchors?)` takes the drag-pinned variable keys, built in main via
   the exported `anchorVarsForBody` / `anchorVarsForJoint` / `anchorVarsForGuide` /
   `anchorVarForGuidePoint` / `anchorVarForVertex` helpers; main falls back to a
   symmetric re-solve whenever the anchored solve is infeasible, so live drags can never
@@ -1902,11 +1951,17 @@ Persistence:
   joint, a guide's own point — rejected); a joint beyond the segment lands on the
   *infinite* edge line with a purely perpendicular correction split evenly with the edge;
   save/load round-trip + re-solve; a free joint solved onto a rail line; a joint onto a
-  guideline moving only the guide (mobility ranks).
+  guideline moving only the guide (mobility ranks). **Tied guides**: a dimension to a free
+  guide moves the guide; to a guide coincident with another corner it moves the dimensioned
+  corner (guide + tied corner stay, re-solve holds); placing the tie itself still moves the
+  guide; a guide on two grounded joints; a chained (guide-to-guide) tie. **Several dims on
+  one free guide**: the first moves the guide, the second is accepted and moves the second
+  body, dragging the first body chains through the guide to the second.
 - **measurements.ts** — axis selection from label placement (h / v / direct zones);
   point-point values + dimension-line geometry + preview parity; label move re-deriving the
   axis; values and label positions tracking moving geometry; point-line using the infinite
-  line (foot beyond the rail end + extension line); line-line parallel distance, the dynamic
+  line (foot beyond the rail end + extension line; the dimension line follows a moved label
+  with an extension from the point); line-line parallel distance, the dynamic
   flip to angle when a rail tilts, and the label sector picking the obtuse angle; vertex/edge
   index remapping across `insertBodyVertex`/`removeBodyVertex`; a bodyPoint ref riding its
   body's frame; cascade removal (joint / slider / body); serialize/load round-trip (modes,

@@ -382,7 +382,9 @@ export interface SketchConstraint {
 /** A reference resolved to current world geometry. */
 export type ResolvedMeasureRef =
   | { kind: "point"; p: Vec2 }
-  | { kind: "line"; a: Vec2; b: Vec2 };
+  /** `infinite` marks a construction line (a guide): `a`–`b` are its defining points, but
+   *  the element itself extends without end (highlights draw it across the view). */
+  | { kind: "line"; a: Vec2; b: Vec2; infinite?: boolean };
 
 /**
  * A measure-tool highlight: a resolved reference, or a whole disk outline (the rim of
@@ -1431,6 +1433,25 @@ export class Scene {
     this.rebuildBody(body);
   }
 
+  /**
+   * Set a **disk** outline's radius (a one-point offset-mode outer outline or hole — see
+   * `diskOfRef`). A disk has a single corner, so a per-corner override on it is
+   * redundant and would shadow the default: this drops the override and sets the
+   * default, so the effective radius is exactly `radius` however the disk was sized
+   * before (rim-handle drag, diameter dimension, `[` / `]` keys). No-op for non-disks.
+   */
+  setDiskRadius(bodyId: number, radius: number, hole?: number | null): void {
+    const body = this.getBody(bodyId);
+    if (!body) return;
+    const h = hole ?? null;
+    const shape = h === null ? body : body.holes?.[h];
+    const ctrl = this.controlListOf(body, h);
+    if (!shape || !ctrl || ctrl.length !== 1 || shape.round !== "offset") return;
+    delete shape.radii;
+    shape.radius = Math.max(0, radius);
+    this.rebuildBody(body);
+  }
+
   /** Effective radius of every corner (its override, or the outline default), parallel
    *  to the outline's control polygon. `hole` selects a hole; null/absent = the outer. */
   bodyCornerRadii(body: Body, hole?: number | null): number[] {
@@ -1837,7 +1858,7 @@ export class Scene {
         // Resolved as the defining segment; consumers that need the infinite line
         // (point+line measurements, the renderer) already extend line refs themselves.
         const g = this.getGuide(ref.guideId);
-        return g ? { kind: "line", a: clone(g.a), b: clone(g.b) } : null;
+        return g ? { kind: "line", a: clone(g.a), b: clone(g.b), infinite: true } : null;
       }
     }
   }
@@ -4306,12 +4327,19 @@ function pointLineInfo(
   const l = len(d);
   if (l < 1e-9) return null; // degenerate line (e.g. a collapsed rail) — nothing to measure
   const u = scale(d, 1 / l);
-  const t = dot(sub(p, line.a), u);
-  const foot = add(line.a, scale(u, t)); // perpendicular foot on the *infinite* line
+  const tp = dot(sub(p, line.a), u);
+  const footP = add(line.a, scale(u, tp)); // perpendicular foot of the point on the *infinite* line
+  const across = sub(p, footP); // the measured offset, perpendicular to the line
+  // The dimension line is dropped perpendicular to the reference line *where the label
+  // sits* (like the parallel-lines case), so it follows the label as it slides along.
+  const t = dot(sub(labelPos, line.a), u);
+  const d1 = add(line.a, scale(u, t));
+  const d2 = add(d1, across);
   const ext: { a: Vec2; b: Vec2 }[] = [];
-  if (t < 0) pushExt(ext, line.a, foot);
-  else if (t > l) pushExt(ext, line.b, foot);
-  return { id, kind: "distance", value: dist(p, foot), labelPos, dim: { a: p, b: foot }, ext };
+  pushExt(ext, p, d2); // from the point along to the dimension line's far end
+  if (t < 0) pushExt(ext, line.a, d1);
+  else if (t > l) pushExt(ext, line.b, d1);
+  return { id, kind: "distance", value: len(across), labelPos, dim: { a: d2, b: d1 }, ext };
 }
 
 function lineLineInfo(

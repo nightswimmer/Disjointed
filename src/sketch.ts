@@ -59,6 +59,66 @@ interface System {
    */
   rank: number[];
   anchorSet?: ReadonlySet<string>;
+  /**
+   * Guide variables **tied to geometry**: they appear in a coincident constraint with a
+   * body node / joint / edge / rail (directly, or through a chain of guide–guide
+   * coincidences). Such a guide is a *reference fixed to the geometry*, not free
+   * construction: the tie itself still moves the guide onto the geometry (rank 0), but
+   * every other item — a driving dimension to the guide, a parallel to it — sees it at
+   * `TIED_GUIDE_RANK`, so the correction flows into the geometry instead. Without this
+   * a tie and a dimension on the same guide fight over it and never converge (the
+   * body, the only thing that could move, never does).
+   */
+  tied: Pick<ReadonlySet<string>, "has">;
+}
+
+/**
+ * Effective rank of a tied guide for items other than its ties: above geometry (1),
+ * so geometry moves instead of the guide; below a drag anchor (2) and instance
+ * geometry (3), so those still win and the guide yields (its tie then reports the break).
+ */
+const TIED_GUIDE_RANK = 1.5;
+
+/** The rank an item should weigh variable `i` at (`tie`: the item is a guide–geometry tie). */
+function itemRank(sys: System, i: number, tie: boolean): number {
+  const r = sys.rank[i];
+  return !tie && r === 0 && sys.tied.has(sys.keys[i]) ? TIED_GUIDE_RANK : r;
+}
+
+const isGuideRef = (r: MeasureRef) => r.kind === "guidePoint" || r.kind === "guideLine";
+
+/** Guide variable keys a ref names (a guideline names both its points). */
+function guideVarKeys(ref: MeasureRef): string[] {
+  if (ref.kind === "guidePoint") return [`g:${ref.guideId}:${ref.which}`];
+  if (ref.kind === "guideLine") return [`g:${ref.guideId}:a`, `g:${ref.guideId}:b`];
+  return [];
+}
+
+/** Guide variables tied to geometry through coincident constraints (see System.tied). */
+function tiedGuideVars(scene: Scene): Set<string> {
+  const tied = new Set<string>();
+  const links: [string[], string[]][] = []; // guide–guide coincidences, for the chain
+  for (const c of scene.sketch) {
+    if (c.kind !== "coincident" || !c.refB) continue;
+    const ga = isGuideRef(c.refA);
+    const gb = isGuideRef(c.refB);
+    if (ga && gb) links.push([guideVarKeys(c.refA), guideVarKeys(c.refB)]);
+    else if (ga) for (const k of guideVarKeys(c.refA)) tied.add(k);
+    else if (gb) for (const k of guideVarKeys(c.refB)) tied.add(k);
+  }
+  // A guide tied to a tied guide is tied too (a whole guide is tied when either point is).
+  const wholeGuide = (k: string) => { const g = k.split(":")[1]; return [`g:${g}:a`, `g:${g}:b`]; };
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const k of [...tied]) for (const w of wholeGuide(k)) if (!tied.has(w)) { tied.add(w); grew = true; }
+    for (const [ka, kb] of links) {
+      const a = ka.some((k) => tied.has(k));
+      const b = kb.some((k) => tied.has(k));
+      if (a !== b) { for (const k of a ? kb : ka) tied.add(k); grew = true; }
+    }
+  }
+  return tied;
 }
 
 /** Mobility rank of a variable (see System.rank). */
@@ -262,6 +322,9 @@ function buildConstraintItem(
 ): SolveItem | null | "invalid" {
   const kind = c.kind;
   const isLineRef = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
+  // A guide–geometry coincidence is a *tie*: it always brings the guide to the geometry.
+  const tie = kind === "coincident" && !!c.refB && isGuideRef(c.refA) !== isGuideRef(c.refB);
+  const rank = (i: number) => itemRank(sys, i, tie);
   if (kind === "coincident" && c.refB && (isLineRef(c.refA) || isLineRef(c.refB))) {
     // Point on an infinite line: zero the signed perpendicular distance. The model
     // normalizes the point into refA, but handle either order (robust to hand-edited
@@ -275,7 +338,7 @@ function buildConstraintItem(
     const l1 = acquire(scene, sys, kl[1]);
     if (p === null || l0 === null || l1 === null) return "invalid";
     if (p === l0 || p === l1) return null; // the point ends the line: on it by construction
-    const wp = shareOf(sys.rank[p], Math.min(sys.rank[l0], sys.rank[l1])); // fraction the point absorbs
+    const wp = shareOf(rank(p), Math.min(rank(l0), rank(l1))); // fraction the point absorbs
     return {
       id: c.id,
       kind: "constraint",
@@ -303,7 +366,7 @@ function buildConstraintItem(
     const j = acquire(scene, sys, kb);
     if (i === null || j === null) return "invalid";
     if (i === j) return null; // same variable: trivially satisfied
-    const wp = shareOf(sys.rank[i], sys.rank[j]); // fraction i absorbs
+    const wp = shareOf(rank(i), rank(j)); // fraction i absorbs
     if (kind === "coincident") {
       return {
         id: c.id,
@@ -342,7 +405,7 @@ function buildConstraintItem(
     const j = acquire(scene, sys, keys[1]);
     if (i === null || j === null) return "invalid";
     if (i === j) return null;
-    const wl = shareOf(sys.rank[i], sys.rank[j]);
+    const wl = shareOf(rank(i), rank(j));
     const axis: "x" | "y" = kind === "horizontal" ? "y" : "x";
     return {
       id: c.id,
@@ -369,8 +432,8 @@ function buildConstraintItem(
   if (a0 === null || a1 === null || b0 === null || b1 === null) return "invalid";
   // A line is as mobile as its most mobile endpoint (it can rotate/shift through it).
   const wLine = shareOf(
-    Math.min(sys.rank[a0], sys.rank[a1]),
-    Math.min(sys.rank[b0], sys.rank[b1])
+    Math.min(rank(a0), rank(a1)),
+    Math.min(rank(b0), rank(b1))
   );
   if (kind === "equal") {
     return {
@@ -409,6 +472,7 @@ function buildDimensionItem(
   spec: DimSpec
 ): SolveItem | "invalid" {
   const { m, target } = spec;
+  const rank = (i: number) => itemRank(sys, i, false); // a dimension to a tied guide moves geometry
   const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
   const aLine = isLine(m.refA);
   const bLine = isLine(m.refB);
@@ -419,7 +483,7 @@ function buildDimensionItem(
     const i = acquire(scene, sys, ka);
     const j = acquire(scene, sys, kb);
     if (i === null || j === null || i === j) return "invalid";
-    const wi = shareOf(sys.rank[i], sys.rank[j]); // fraction i absorbs
+    const wi = shareOf(rank(i), rank(j)); // fraction i absorbs
     if (m.axis === "h" || m.axis === "v") {
       const axis: "x" | "y" = m.axis === "h" ? "x" : "y";
       // The held side (Measurement.side, captured when the dim started driving) makes
@@ -467,8 +531,8 @@ function buildDimensionItem(
     const b1 = acquire(scene, sys, kb[1]);
     if (a0 === null || a1 === null || b0 === null || b1 === null) return "invalid";
     const wA = shareOf(
-      Math.min(sys.rank[a0], sys.rank[a1]),
-      Math.min(sys.rank[b0], sys.rank[b1])
+      Math.min(rank(a0), rank(a1)),
+      Math.min(rank(b0), rank(b1))
     ); // fraction line A absorbs
     // A driving line–line distance implies the pair is parallel (CAD convention):
     // align the directions, then set the gap along the common normal. The held side
@@ -510,7 +574,7 @@ function buildDimensionItem(
   const l0 = acquire(scene, sys, kl[0]);
   const l1 = acquire(scene, sys, kl[1]);
   if (p === null || l0 === null || l1 === null || p === l0 || p === l1) return "invalid";
-  const wp = shareOf(sys.rank[p], Math.min(sys.rank[l0], sys.rank[l1])); // fraction the point absorbs
+  const wp = shareOf(rank(p), Math.min(rank(l0), rank(l1))); // fraction the point absorbs
   const side = m.side ?? null; // held side — the point can't flip across the line
   return {
     id: m.id,
@@ -539,8 +603,18 @@ function buildDimensionItem(
  * system. `override` replaces (or adds) one dimension's target — the candidate edit.
  * `anchors` marks the variables pinned by an active drag (see System.anchored).
  */
-function buildSystem(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<string>): BuildResult {
-  const sys: System = { keys: [], pos: [], index: new Map(), rank: [], anchorSet: anchors };
+function buildSystem(
+  scene: Scene,
+  override?: DimSpec,
+  anchors?: ReadonlySet<string>,
+  guidesAsReference = false
+): BuildResult {
+  // `guidesAsReference`: the fallback pass — *every* guide counts as tied (see
+  // System.tied), so geometry absorbs whatever the guides alone couldn't satisfy.
+  const sys: System = {
+    keys: [], pos: [], index: new Map(), rank: [], anchorSet: anchors,
+    tied: guidesAsReference ? { has: () => true } : tiedGuideVars(scene),
+  };
   const items: SolveItem[] = [];
   const invalid: SketchBreak[] = [];
   for (const c of scene.sketch) {
@@ -634,17 +708,26 @@ function restore(scene: Scene, snap: string): void {
  * after applying — e.g. joint containment clamped a solved position away — reverts).
  */
 function solveAndApply(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<string>): SketchBreak[] {
-  const build = buildSystem(scene, override, anchors);
+  let build = buildSystem(scene, override, anchors);
   if (build.invalid.length) return build.invalid;
   if (!build.items.length) return [];
+  let guidesAsReference = false;
   if (!iterate(build.sys, build.items)) {
-    return residualBreaks(build.sys, build.items);
+    // Construction-first didn't settle. With guides in play the usual cause is several
+    // demands on one guide (two driving dimensions to it, a tie plus a dimension…):
+    // each pushes the guide its own way and the geometry — the only thing that could
+    // give — never moves. Retry with every guide as a fixed reference, so geometry
+    // absorbs the corrections. A guide with a single demand still yields (first pass).
+    if (scene.guides.length === 0) return residualBreaks(build.sys, build.items);
+    guidesAsReference = true;
+    build = buildSystem(scene, override, anchors, true);
+    if (!iterate(build.sys, build.items)) return residualBreaks(build.sys, build.items);
   }
   const snap = snapshot(scene);
   applySystem(scene, build.sys);
   // Re-measure from the actual scene: the edit paths may have adjusted positions
   // (containment clamps), so verify the applied state truly satisfies everything.
-  const after = buildSystem(scene, override, anchors);
+  const after = buildSystem(scene, override, anchors, guidesAsReference);
   const bad = residualBreaks(after.sys, after.items).concat(after.invalid);
   if (bad.length) {
     restore(scene, snap);
@@ -681,7 +764,7 @@ export function enforceDiameterDims(scene: Scene): void {
     if (m.mode !== "draw" || !m.driving || m.target === undefined || m.axis !== "diameter") continue;
     const disk = scene.diskOfRef(m.refA);
     if (!disk || Math.abs(disk.r * 2 - m.target) <= sketchConfig.tol) continue;
-    scene.setBodyRadius(disk.bodyId, m.target / 2, disk.hole);
+    scene.setDiskRadius(disk.bodyId, m.target / 2, disk.hole);
   }
 }
 
@@ -822,7 +905,7 @@ export function applyDrivingDimension(
     // joint moves, so nothing else in the sketch can be disturbed.
     const disk = scene.diskOfRef(m.refA);
     if (!disk) return reject;
-    scene.setBodyRadius(disk.bodyId, target / 2, disk.hole);
+    scene.setDiskRadius(disk.bodyId, target / 2, disk.hole);
     scene.setMeasurementDriving(m.id, target);
     return [];
   }

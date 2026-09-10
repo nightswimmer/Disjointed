@@ -3184,6 +3184,23 @@ function selectedBodyFilletHandleAt(p: Vec2): FilletHandle | null {
  * onto the corner's bisector and inverts the arc-midpoint distance d = r·(1−sin h)/sin h.
  * Dropping the cursor (nearly) onto the vertex snaps the corner sharp (radius 0).
  */
+/**
+ * A direct resize of a disk (rim-handle drag, `[` / `]` keys) overrides any driving
+ * diameter dimension on it: those go back to driven (reference) dimensions, so the
+ * new size stands instead of reading as a violation. Returns true when one was cleared.
+ */
+function demoteDiameterDims(bodyId: number, hole: number | null): boolean {
+  let any = false;
+  for (const m of scene.measurements) {
+    if (m.mode !== "draw" || !m.driving || m.axis !== "diameter") continue;
+    const disk = scene.diskOfRef(m.refA);
+    if (!disk || disk.bodyId !== bodyId || disk.hole !== hole) continue;
+    scene.clearMeasurementDriving(m.id);
+    any = true;
+  }
+  return any;
+}
+
 function filletDragRadius(body: Body, index: number, cursor: Vec2, hole: number | null): number | null {
   const verts = outlineControlWorld(body, hole);
   const v = verts[index];
@@ -4036,7 +4053,12 @@ canvas.addEventListener("mousemove", (e) => {
       const body = scene.getBody(leftDrag.bodyId);
       const r = body ? filletDragRadius(body, leftDrag.index, world, leftDrag.hole) : null;
       if (r !== null) {
-        scene.setBodyCornerRadius(leftDrag.bodyId, leftDrag.index, r, leftDrag.hole);
+        // A disk (one-point offset outline) has one radius: set it as the outline default
+        // so a diameter dimension / `[` `]` keys and the rim handle all move the same value.
+        if (body && scene.diskOfRef({ kind: "vertex", bodyId: body.id, index: 0, hole: leftDrag.hole ?? undefined })) {
+          scene.setDiskRadius(leftDrag.bodyId, r, leftDrag.hole);
+          demoteDiameterDims(leftDrag.bodyId, leftDrag.hole); // the handle now sets the size
+        } else scene.setBodyCornerRadius(leftDrag.bodyId, leftDrag.index, r, leftDrag.hole);
         leftDrag.moved = true;
       }
       return;
@@ -4379,7 +4401,12 @@ window.addEventListener("keydown", (e) => {
   if ((e.key === "[" || e.key === "]") && mode === "draw" && tool === null && selection?.kind === "body") {
     const body = scene.getBody(selection.id);
     if (body) {
-      scene.setBodyRadius(body.id, body.radius + (e.key === "]" ? RADIUS_STEP : -RADIUS_STEP));
+      const step = e.key === "]" ? RADIUS_STEP : -RADIUS_STEP;
+      const disk = scene.diskOfRef({ kind: "vertex", bodyId: body.id, index: 0 });
+      if (disk) {
+        scene.setDiskRadius(body.id, disk.r + step); // from the *effective* radius
+        demoteDiameterDims(body.id, null); // a direct resize overrides a driving diameter
+      } else scene.setBodyRadius(body.id, body.radius + step);
       markDirty();
     }
     e.preventDefault();

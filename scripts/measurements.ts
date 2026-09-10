@@ -84,6 +84,19 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   check("point-line uses the infinite line", info.kind === "distance" && near(info.value, 40), `${info.value}`);
   check("foot beyond the rail end gets an extension line", info.ext.length === 1);
   check("dimension line runs point → foot", near(info.dim!.b.x, 150) && near(info.dim!.b.y, 0));
+  // Sliding the label along the rail carries the dimension line with it: dropped
+  // perpendicular at the label's position, with a dashed extension from the point.
+  s.setMeasurementLabel(m.id, { x: 50, y: 20 });
+  const moved = s.measureInfo(m)!;
+  check("point-line value is unchanged by label position", near(moved.value, 40));
+  check(
+    "dimension line follows the label along the line",
+    near(moved.dim!.a.x, 50) && near(moved.dim!.a.y, 40) && near(moved.dim!.b.x, 50) && near(moved.dim!.b.y, 0)
+  );
+  check(
+    "extension runs from the point to the dimension line",
+    moved.ext.length === 1 && near(moved.ext[0].a.x, 150) && near(moved.ext[0].b.x, 50) && near(moved.ext[0].b.y, 40)
+  );
 
   s.removeConstraint(slider.id);
   check("cascade: slider removal prunes rail measurements", s.measurements.length === 0);
@@ -285,6 +298,21 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   const md = s.addMeasurement("draw", refD, refD, { x: 300, y: 250 })!;
   check("disk body diameter dimension", md.axis === "diameter" && near(s.measureInfo(md)!.value, 50));
   check("driving a disk body's diameter", applyDrivingDimension(s, md.id, 80).length === 0 && near(diskBody.radius, 40));
+
+  // A rim-handle drag stores a per-corner override; driving the diameter afterwards
+  // must still change the *effective* radius (the override used to shadow the default).
+  s.setBodyCornerRadius(diskBody.id, 0, 30);
+  check("rim override shows in the driven value", near(s.measureInfo(md)!.value, 60) && s.measureInfo(md)!.violated === true);
+  check("driving after a rim drag succeeds", applyDrivingDimension(s, md.id, 100).length === 0);
+  check(
+    "effective radius follows the target despite the override",
+    near(s.diskOfRef(refD)!.r, 50) && !s.measureInfo(md)!.violated && diskBody.radii === undefined,
+    `${s.diskOfRef(refD)!.r}`
+  );
+  // setDiskRadius is a no-op on a non-disk outline.
+  const tri = s.addBody([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }], 2);
+  s.setDiskRadius(tri.id, 7);
+  check("setDiskRadius ignores a polygon outline", near(tri.radius, 2));
 }
 
 // --- bodyInscribedRadius (largest disk that fits around a centre) --------------
