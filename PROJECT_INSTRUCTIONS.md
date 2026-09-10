@@ -637,6 +637,81 @@ tool + measurements toggle) and then Fit; the grid-size number field + preset `<
 merged into one **combo with user-addable presets** (details in the interaction model's
 *Grid / snapping* entry).
 
+**Patterns (v19 — live linear / circular arrays of a hole or a joint)**: a `Pattern` record
+(`Scene.patterns`, `SceneData.patterns`; format bumped 18 → 19, older files simply have none)
+owns a **seed** (one hole of a body — by index — or one attached joint) plus a **layout** in the
+body's local frame and its **members**: real holes / joints of the same body that are
+**re-derived from the seed** on every change (`syncPattern`, hooked into `rebuildBody` and
+`shiftJoint` behind a re-entrancy guard). Layouts: `linear` with one or **two axes**
+(`{ count, step }` each — two axes = a grid, members in row-major order, axis 0 fastest) or
+`circular` (`centre` as an offset from the seed anchor — origin-independent, so the centroid
+re-centring in `rebuildBody` can't skew it — `count`, optional `angleStep` in radians (absent =
+even 2π/count), `rotate` = instances turn with the arc vs keep the seed's orientation).
+Members copy the seed's whole shape (control polygon carried by the motion, radius, per-corner
+radii, rounding); the member list grows / trims to the layout's count (holes appended /
+dropped via `dropHoles`, which renumbers measurement + sketch + pattern hole refs in one pass;
+joints minted / removed). Editing API (world-coordinate inputs): `createLinearPattern(seed,
+target, count)` (target = where the 2nd instance lands), `addPatternAxis` (refused when
+parallel to axis 0 or already two axes), `createCircularPattern(seed, centre, count)`,
+`setPatternAxisCount / Step / End` (end = where the *last* instance lands: re-aims + re-spaces),
+`setPatternAxisVector` (world step vector — the sketch solver's writeback), `setPatternCount /
+Angle (screen degrees CCW, null = even) / Rotate / Centre`, `removePattern` (members go, seed
+stays), `dissolvePattern` (record goes, everything stays — the "make independent" primitive,
+UI placement still undecided), `patternOfHole / patternOfJoint / patternOfRef` (role seed |
+member), `patternSeedHole` (a member's index → its seed's, for UI redirects), `patternInfo`
+(world anchor, axis ends, circular centre / radius / angle, per-member **fit** flag: inside the
+outer outline and clear of every other hole / joint, bbox-prefiltered) and `patternPreview`
+(the tool's hover: instances + fit for a would-be layout, existing members not counted as
+obstacles). Caps: `PATTERN_MAX_COUNT` 200 per axis, `PATTERN_MAX_MEMBERS` 400 per grid.
+**Semantics**: members are derived geometry — the sketch solver ranks member variables 3
+(immovable, like instance geometry — `varRank` asks `patternOfHole / patternOfJoint`), a
+driving dimension with both ends inside one pattern is rejected (`applyDrivingDimension`,
+via `patternOfRef`), a drag on a member is redirected to the seed (joint drag → seed joint;
+node / radius handle / double-click node edits on a member hole → the seed hole via
+`patternSeedHole`), deleting a **member** deletes every member (the seed stays; `removeBodyHole`
+/ `removeJoint` route to `removePattern`), deleting the **seed** dissolves the pattern
+(`dropHoles` drops the record; `removeJoint` dissolves). Body ops: `mirrorBody` reflects the
+layout vectors (a fixed circular step flips sign), `scaleBody` scales them, `splitBody` /
+`combineBodies` dissolve the patterns of the bodies involved (hole indices are rebuilt),
+`removeBody` drops them; copy/paste carries patterns (`SelectionClip.patterns`: tmp id, seed,
+layout with **world-oriented** vectors since a pasted body is re-baked at angle 0, members;
+pattern ids remapped for axis refs) — and the paste ref remap now keeps `hole` on vertex /
+edge refs (it used to drop it). Load sanitizes records (body + seed must exist, layouts
+well-formed, members filtered) **before** measurements / sketch load (their refs may name an
+axis) and re-syncs every pattern after the id counter is set (a sync may mint joints).
+**Pattern axis as a reference**: `MeasureRef` gained `patternAxis { patternId, axis }` — a
+**line** ref resolving to the dotted axis (seed anchor → last instance). Constraint tools
+(H / V / parallel / perpendicular / point-on-line) and the Measure tool pick it (main's
+`patternAxisRefAt` on the cached overlay, after body edges, before guides); the solver maps it
+to two variables, `pa:<id>` (the seed anchor, rank 3 — the direction pivots about the seed)
+and `pb:<id>:<axis>` (the first instance, ordinary rank 1; anchored while its body is dragged
+via `anchorVarsForBody`), written back as `setPatternAxisVector(pos[pb] − pos[pa])` (both in
+the solver's frame, so a body that moved in the same solve doesn't skew the step). Axis refs
+travel with copy/paste (pattern id map), survive save/load, and are pruned when the pattern
+dissolves (`prunePatternRefs`). **Auto H/V**: a direction created within `AUTO_HV_TOL` (5°) of
+an axis gets a horizontal / vertical constraint at creation (`autoConstrainPatternAxis` in
+main, same rule as body edges). **UI** (main.ts / renderer.ts): two tools, **Linear pattern**
+(`I`) and **Circular pattern** (`Q`) — seed pick (joint under the cursor wins, else
+`Scene.holeAt`: the hole whose cut-out contains the point; selection-first works for a
+selected joint), then one click creates the pattern (linear: where the next instance goes,
+default count 3; circular: the centre, default 6, rotating) and the **count label opens for
+typing** (`openPatternEditorSoon` — deferred past the mousedown, whose focus change would blur
+the input at once). A linear pattern stays armed for an optional **second direction** (a grid;
+Enter / Esc keep the row, `finishPatternTool` keeps it selected). No toolbar panel: every
+parameter lives on the canvas as `PatternView` overlays computed per frame (`patternViewOf`,
+cached in `patternViewCache` for picking): per axis a **dotted line** seed → last instance, an
+arrowed **spacing dimension beside the first step only** (offset `PATTERN_DIM_OFFSET_PX` on the
+side away from the other axis / above a lone row; constraint badges go on the other side) with
+the spacing label, a `×count` label past the last instance and a **handle** at the last
+instance (drag = re-aim + re-space, `LeftDrag.patternHandle`); circular = crosshair at the
+centre (also a handle), dashed orbit, `×count` / `even | 45°` / `↻ turn | ↑ fixed` pills to
+the right (the rotation pill is a click toggle). Labels double-click into the shared
+dimension editor (`patternEdit`; count = whole number ≥ 2, spacing > 0, angle = degrees or
+"even"), clicking a label or the dotted line (between instances — a member hole still selects
+the body) selects the pattern (`Selection.kind "pattern"`; Delete = `removePattern`). Members
+that don't fit get a red dashed ring. Pattern overlays draw in `PATTERN_COLOR` (pink), ink when
+selected. Tests: `scripts/patterns.ts`.
+
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
 - Constraint solver: **iterative position-based** (Gauss-Seidel projection).
@@ -1767,6 +1842,32 @@ Select mode (default, no tool armed):
   the bottom / top of the drawing order — clicks pick the topmost body, so a big imported
   reference body sent to the back stops covering the mechanism and stealing its clicks.
 
+Pattern tools (`I` linear, `Q` circular — draw mode):
+- **Seed**: click a hole (inside its cut-out — the hovered hole outlines faintly) or a joint on
+  a body; a selected joint seeds when the tool is armed. Refused: free joints, instance-owned
+  material, a hole / joint already in a pattern (toasts say why).
+- **Linear**: click where the **next instance** goes → the row is created (3 instances) and
+  its `×count` label opens — type a number, Enter. The tool stays armed: another click adds a
+  **second direction** (a grid; parallel directions are ignored), Enter / Esc keeps a single
+  row. A direction within ~5° of horizontal / vertical gets an **H / V constraint** automatically.
+- **Circular**: click the **centre** → 6 instances evenly around it, rotating with the arc;
+  the count label opens.
+- **Editing on the canvas** (select mode): double-click a label — `×count`, the spacing (the
+  arrowed dimension beside the first step), `even` / `45°` (angle between instances, degrees,
+  counter-clockwise on screen; "even" or empty = spread over the full circle); click `↻ turn` /
+  `↑ fixed` to toggle instance rotation; with the pattern selected, drag the **square handle
+  at the last instance** to re-aim / re-space a direction, or the **centre crosshair** to move
+  the centre (both placement-snap). Clicking a label or the dotted axis line selects the
+  pattern; **Delete** removes every instance and keeps the seed.
+- **Members follow the seed**: drag the seed (or any instance — the drag goes to the seed) and
+  the whole array moves; reshape / re-round the seed hole (or a member's handles) and every
+  instance copies it. Instances that would leave the body or overlap another hole / joint are
+  ringed red (not auto-fixed, like stranded joints). Deleting the seed hole / joint dissolves
+  the pattern, leaving the instances as plain holes / joints.
+- **Constraints on a direction**: the dotted axis line is a line reference — H / V / parallel /
+  perpendicular (and point-on-line, measurements) pick it like a body edge; the direction
+  pivots about the seed to satisfy them.
+
 Rotate tool (`R`, draw mode — a mode, not one-shot):
 - Drag a body to rotate it about its **centroid**; drag a **control node** of the already-selected
   body to rotate about that node. A body in the **multi-selection** (or a **permanent group**,
@@ -2148,6 +2249,23 @@ Persistence:
   solved by the free point); and the **drag fallback** (an infeasible anchored drag step
   followed by the symmetric solve restores V, keeps the drag's feasible component, joint
   untouched).
+- **patterns.ts** — live patterns (v19). Local motions (linear, grid row-major, circular even /
+  fixed / rotating vs orbiting); linear hole pattern creation, member shapes, `patternInfo`,
+  count up (out-of-body members flagged) / down (trim + renumber), spacing and re-aim edits,
+  seed drag and resize carrying members, body rotation carrying the layout; grids (parallel /
+  third axis refused, axis-1 count edit); fit flags (outside, overlapping, clear) and the
+  no-create preview; circular slots rotating vs orbiting, fixed 90° (screen CCW), even /
+  count / centre edits; remove vs dissolve semantics and hole renumbering (unrelated hole
+  removed, member removed → all members gone, seed removed → dissolve, member can't seed);
+  joint patterns (free joint refused, members follow the seed, a member's ground follows, no
+  constraint replication, member delete → all gone, seed delete → dissolve, circular joints);
+  sketch solver (width pre-dimensioned so the solver path runs: the seed shares a correction
+  and members follow, seed↔member driving dimension rejected); mirror / scale carrying the
+  layout, copy-paste of a rotated body (world-oriented vectors), save/load v19 (stale member
+  list re-derived, missing seed dropped, pre-v19 → none), split dissolves; the pattern-axis
+  reference (resolves to the dotted line, H accepted and held through a seed drag, parallel
+  needs two lines, perpendicular axis ↔ edge, rigid unit = body, load keeps axis constraints,
+  paste remaps them to the new pattern, dissolve prunes them).
 - **split-combine.ts** — Split + Combine (69 checks). Union primitive: overlapping squares
   → one 8-gon of the right area, shared edge → 4-vertex rectangle, corner touch → pinched,
   disjoint → two regions, two C shapes → a new hole, partially covered hole shrinks, input
@@ -2198,6 +2316,10 @@ Persistence:
   cm code 5; a rotated body exports rotated.
 
 ## Bugs found & fixed so far
+- **Copy/paste dropped the hole index on vertex / edge refs** (`insertSelection`'s ref remap
+  rebuilt `{ kind, bodyId, index }` without `hole`), so a constraint / dimension on a hole
+  corner pasted onto the outer outline's corner of the same index. Fixed while adding
+  pattern-axis refs to the remap.
 - **Slider correction sign was flipped** (`-c/w` → `c/w`); sliders pushed joints away from
   their rail and the solver diverged. Under-relaxation only masked it.
 - **Driver could drag a ground point away** when the target was unreachable. Fixed with
@@ -2405,6 +2527,18 @@ Persistence:
   a definition with nothing grounded has no chassis — its instance placement is derived
   from the first body (fine, by design decision); the component browser has no thumbnails
   or drag-to-place yet (it does have drag-to-reorder and two-way hover/selection highlighting).
+- **Pattern follow-ups**: the **"make independent" UI is undecided** (item pinned by the
+  user — `dissolvePattern` exists in the model; Delete on a pattern removes the instances, and
+  deleting the seed dissolves; candidates: an edit-group button next to Combine, or a
+  shortcut); pattern labels are placed automatically and can't be dragged (unlike measurement
+  labels); a pattern of **whole bodies** (tier 3 of the original plan — copy/paste plus a
+  rotate-clip step) isn't built; patterns inside a component definition don't expand as
+  patterns into instances (instances carry the baked holes / joints, which is fine since
+  instance material isn't editable in the parent); a body-frame rotation during a sketch solve
+  (rare — `applyRigidParts`) isn't compensated in the axis writeback; a Vertical / Horizontal on
+  a slanted axis projects the second instance (the spacing shortens) — retype the spacing
+  label if the original length matters; count / angle edits have no red flash on rejection
+  (a toast explains instead).
 - **Hole follow-ups**: ~~editable hole vertices, measurements / sketch constraints on hole
   geometry, corner radius on holes~~ (all done in v16), ~~a UI to create holes~~ (done —
   the hole tool). Remaining: a hole-aware picking option (today clicking a cut-out

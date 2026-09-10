@@ -66,6 +66,11 @@ you can then drag and watch move.
   never takes part in simulation). Placement, dragging and drawing snap onto guidelines in
   preference to the grid, and guidelines participate in sketch constraints and measurements
   like any other line — see *Construction guidelines* below.
+- **Pattern** — a **live array** of one hole or one joint on a body: a linear row, a two-direction
+  **grid**, or a circular arrangement around a centre. The instances are real holes / joints, but
+  they are **derived from the seed** — move or reshape the seed and every instance follows; edit
+  the count, spacing or angle on the canvas labels and the array re-lays itself. Delete the seed
+  to make the instances independent — see *Patterns* below.
 
 ## Usage
 
@@ -84,6 +89,8 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | --- | --- | --- |
 | **Body** | `B` | **Empty space:** click to add vertices, then close (first vertex / double-click / Enter). **On a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
 | **Hole** | `U` | Cut a hole in a body. **Round hole:** press inside a body and **drag** — the press point is the centre (grid- / object-snapped, so it can sit exactly on a joint or a corner) and the drag sets the radius (clamped so the disk stays inside the body's material); release to cut a parametric disk hole. **Polygon hole:** the **first click picks the body** (topmost under the cursor) and starts the cut-out polygon; further clicks add vertices — each kept **inside** that body (a grid snap that would land outside falls back to the exact click point). Close it by clicking the **first vertex**, **double-clicking**, or pressing **Enter** — the loop becomes an editable hole (sharp corners; round them with its radius handles afterwards), and the body is selected so the hole's handles show right away. Esc aborts. |
+| **Linear pattern** | `I` | Repeat a **hole** (click inside its cut-out) or a **joint** along a line: click where the **next instance** should go — the row appears (3 instances) and its **×count** label opens, so type the count and press Enter. The tool stays armed for an optional **second direction** (click where the first instance of the other direction goes — a grid), or press Enter / Esc to keep a single row. A direction within ~5° of horizontal / vertical gets an **H / V constraint** automatically, like a body edge. |
+| **Circular pattern** | `Q` | Repeat a hole or a joint around a **centre**: click the seed, then the centre (snaps to joints, hole centres, corners and the grid) — 6 instances spread evenly, each turned with the arc; the count label opens for typing. |
 | **Split** | `X` | Cut a body in two. Click a point on a body's **outline** (a corner, or anywhere on an edge) to start the cut, click inside the body to route it (as many vertices as you like — each kept inside), then click the outline again to finish: the body splits along that path into two bodies (same colour, grounded flag and group; the new one sits right above the original in the stacking order). Existing corners keep their rounding, the cut corners start sharp. Holes stay whole on their side (a cut through a hole is refused); joints stay where they are and belong to the side they're on; a rail or motor whose two joints end up on different sides is dropped. Bodies built from joints are converted to an editable sharp outline first. Esc aborts. |
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. With **Object snap** on, the joint lands on the nearest corner / edge midpoint / centroid / **hole centre** / joint / guide point in range (else the grid). Drop a joint on a **rail (or rail node)** and it's automatically attached to that rail as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
 | **Weld** | `W` | Click where **bodies overlap** to weld them rigidly together at that point — a joint in each, sharing the position **and** locked at the drawn relative angle (no relative rotation; the angle re-captures from the drawn pose on every sim entry, like a slider's lock). Click an **existing pinned joint** to toggle its pin(s) **weld ↔ revolute**. |
@@ -165,6 +172,30 @@ unit — and in **Simulate mode it moves as a single rigid body**.
   body, so this also decides what a click lands on: send a big imported reference body to the
   back and it stops covering — and stealing clicks from — the mechanism drawn over it. The
   order is saved with the file.
+
+**Patterns.** A pattern is edited **on the canvas**, like a dimension — there is no settings panel:
+
+- **Labels**: a linear direction shows a **dotted line** from the seed through every instance,
+  an arrowed **spacing** dimension beside the first step, and a **×count** label past the last
+  instance; a circular pattern shows a crosshair at the centre with **×count**, the **angle**
+  between instances (`even`, or a value in degrees — counter-clockwise on screen) and a
+  **↻ turn / ↑ fixed** badge (click it: instances turn with the arc, or keep the seed's
+  orientation). **Double-click** any label to type a new value (Enter commits, Esc cancels;
+  type `even` or clear the angle to spread over the full circle).
+- **Handles**: click a label or the dotted line to select the pattern, then drag the **square at
+  the last instance** to re-aim and re-space that direction, or the **centre crosshair** to move
+  the circle's centre.
+- **Instances follow the seed**: drag the seed (dragging any instance does the same), reshape it,
+  round its corners or resize a round hole — every instance copies it. Instances that would fall
+  **outside the body** or **overlap** another hole / joint are ringed **red** so you can adjust
+  the count or spacing (they are never moved for you).
+- **Constraints on a direction**: the dotted line is a line reference — apply **Horizontal /
+  Vertical / Parallel / Perpendicular** to it (or measure against it) like a body edge; the
+  direction pivots about the seed to satisfy them, and stays constrained as the seed moves.
+- **Delete** with the pattern selected removes every instance and keeps the seed. Delete the
+  **seed** hole / joint instead and the pattern dissolves: the instances stay as ordinary,
+  independent holes / joints. Deleting one instance removes them all (the seed stays). Patterns
+  are saved with the file (format v19) and travel with copy / paste, mirror and scale.
 
 **Measurements.** The Measure tool (`D`) works in **both modes**, and each mode keeps its own
 set of measurements. What gets measured follows from the two references you pick:

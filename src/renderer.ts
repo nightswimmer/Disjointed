@@ -10,7 +10,7 @@ import {
   ResolvedMeasureRef,
   SketchConstraintKind,
 } from "./model";
-import { Vec2, sub, distToSegment, normalize, scale, convexHull } from "./geometry";
+import { Vec2, sub, dist, distToSegment, normalize, scale, convexHull } from "./geometry";
 import { View } from "./view";
 import { ConstraintBreak } from "./solver";
 
@@ -21,6 +21,18 @@ export interface RenderInput {
   draftBody: Vec2[] | null;
   /** Hole tool: the round hole being dragged out (centre + current radius), or null. */
   draftCircle: { c: Vec2; r: number } | null;
+  /**
+   * Pattern tool: the seed hole's outline (or, with no seed yet, the hole under the
+   * cursor — `anchor` null), the seed anchor, the linear target / circular centre being
+   * picked or picked, and every instance after the seed with whether it fits.
+   */
+  patternPreview: {
+    kind: "linear" | "circular";
+    anchor: Vec2 | null;
+    seedLoop: Vec2[] | null;
+    target: Vec2 | null;
+    instances: { point: Vec2; loop: Vec2[] | null; ok: boolean }[];
+  } | null;
   cursor: Vec2 | null;
   hoverJoint: number | null;
   /** Body hovered in normal/select mode (for pre-selection feedback). */
@@ -32,7 +44,9 @@ export interface RenderInput {
   /** Joints highlighted as in-progress tool picks (connect's first pick, rail picks). */
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
-  selection: { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "guide"; id: number } | null;
+  selection: { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "guide" | "pattern"; id: number } | null;
+  /** Live patterns' on-canvas layout labels / handles (draw mode; computed by main). */
+  patterns: PatternView[];
   /** Draw-mode multi-selection (Ctrl+click / box select): bodies + free joints, highlighted. */
   multiSelected: { bodies: number[]; joints: number[] } | null;
   /** In-progress box selection: the rectangle's two world corners, or null. */
@@ -126,6 +140,42 @@ export const LIGHT_THEME: Theme = {
   grid: "#d9dce2",
   jointFill: "#3a3d46",
 };
+
+/**
+ * A pattern's canvas overlay (world positions, computed by main): per linear axis a
+ * dimension-style line beside the axis with its count and spacing labels and the
+ * re-aim handle at the last instance; for a circular layout the centre (also the handle),
+ * the orbit radius and the count / angle / rotation labels. `bad` marks members that
+ * don't fit (outside the body, overlapping another hole or joint).
+ */
+export interface PatternView {
+  id: number;
+  selected: boolean;
+  anchor: Vec2;
+  axes: {
+    /** The dotted axis line: seed anchor → last instance (also the constraint reference). */
+    line: { a: Vec2; b: Vec2 };
+    /** The arrowed spacing dimension beside the first step (seed → 2nd instance). */
+    dim: { a: Vec2; b: Vec2 };
+    ext: { a: Vec2; b: Vec2 }[];
+    stepLabel: Vec2;
+    stepText: string;
+    countLabel: Vec2;
+    countText: string;
+    handle: Vec2;
+  }[];
+  circular: {
+    centre: Vec2;
+    radius: number;
+    countLabel: Vec2;
+    countText: string;
+    angleLabel: Vec2;
+    angleText: string;
+    rotateLabel: Vec2;
+    rotateText: string;
+  } | null;
+  bad: Vec2[];
+}
 
 /** One sketch constraint's on-canvas badges (world positions, computed by main). */
 export interface SketchGlyphView {
@@ -391,6 +441,87 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     }
     ctx.setLineDash([]);
     dot(ctx, c, px(3), theme.ink);
+  }
+
+  // Pattern tool: seed highlight, the direction line / rotation centre, and every instance
+  // (dashed; red where it would leave the body or overlap another hole / joint).
+  if (input.patternPreview) {
+    const pv = input.patternPreview;
+    const loopPath = (loop: Vec2[]): void => {
+      ctx.beginPath();
+      loop.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+    };
+    if (pv.anchor === null) {
+      // Hovering a candidate hole: a faint dashed outline says "this one is pickable".
+      if (pv.seedLoop) {
+        ctx.strokeStyle = theme.ink;
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = px(1.5);
+        ctx.setLineDash([px(4), px(3)]);
+        loopPath(pv.seedLoop);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      }
+    } else {
+      // The seed: solid outline (hole) or a ring (joint).
+      ctx.strokeStyle = theme.ink;
+      ctx.lineWidth = px(2);
+      if (pv.seedLoop) {
+        loopPath(pv.seedLoop);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.arc(pv.anchor.x, pv.anchor.y, px(JOINT_R + 3), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (pv.target) {
+        ctx.lineWidth = px(1);
+        ctx.setLineDash([px(4), px(4)]);
+        if (pv.kind === "linear") {
+          // Direction line from the seed to the picked point.
+          ctx.strokeStyle = theme.ink;
+          ctx.beginPath();
+          ctx.moveTo(pv.anchor.x, pv.anchor.y);
+          ctx.lineTo(pv.target.x, pv.target.y);
+          ctx.stroke();
+        } else {
+          // The orbit through the seed, and the centre as a crosshair (same look as the
+          // rotate pivot — it is a rotation centre).
+          const c = pv.target;
+          ctx.strokeStyle = theme.ink;
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, dist(c, pv.anchor), 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          const r = px(8);
+          ctx.strokeStyle = "#ffd166";
+          ctx.lineWidth = px(1.5);
+          ctx.beginPath();
+          ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+          ctx.moveTo(c.x - r * 1.6, c.y);
+          ctx.lineTo(c.x + r * 1.6, c.y);
+          ctx.moveTo(c.x, c.y - r * 1.6);
+          ctx.lineTo(c.x, c.y + r * 1.6);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+      }
+      // The instances.
+      ctx.lineWidth = px(1.5);
+      ctx.setLineDash([px(5), px(4)]);
+      for (const inst of pv.instances) {
+        ctx.strokeStyle = inst.ok ? theme.ink : "#ff5c5c";
+        if (inst.loop) loopPath(inst.loop);
+        else {
+          ctx.beginPath();
+          ctx.arc(inst.point.x, inst.point.y, px(JOINT_R), 0, Math.PI * 2);
+        }
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
   }
 
   // Body-from-joints: dashed outline through the picked joints, and the expanded preview.
@@ -710,6 +841,10 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       info.id === selectedMeasure, false, paren, !!input.flash?.has(info.id), input.scene.unit
     );
   }
+  // Live patterns: axis dimension lines with count / spacing labels, or the centre with
+  // its labels; handles when selected; members that don't fit ringed in red.
+  for (const pv of input.patterns) drawPattern(ctx, pv, view, dpr, theme);
+
   if (input.measureDraft) {
     const { refs, hover, preview } = input.measureDraft;
     if (hover) drawMeasureRefHighlight(ctx, hover, px, true, viewRect);
@@ -745,6 +880,133 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
 /** Focus pass veil: how far everything outside the highlighted instances fades
  *  towards the background (0.8 leaves ~20% of the original strength). */
 const FOCUS_VEIL_ALPHA = 0.8;
+
+/** Accent colour for pattern overlays (fixed across themes, like the other semantic accents). */
+const PATTERN_COLOR = "#f28cb1";
+
+/** A pattern's overlay: see `PatternView`. */
+function drawPattern(
+  ctx: CanvasRenderingContext2D,
+  pv: PatternView,
+  view: View,
+  dpr: number,
+  theme: Theme
+): void {
+  const s = view.scale;
+  const px = (n: number) => n / s;
+  const color = pv.selected ? theme.ink : PATTERN_COLOR;
+  ctx.strokeStyle = color;
+  for (const ax of pv.axes) {
+    // The axis itself: a dotted line from the seed through every instance.
+    ctx.lineWidth = px(1.2);
+    ctx.setLineDash([px(2), px(4)]);
+    ctx.beginPath();
+    ctx.moveTo(ax.line.a.x, ax.line.a.y);
+    ctx.lineTo(ax.line.b.x, ax.line.b.y);
+    ctx.stroke();
+    // The spacing dimension beside the first step: extension lines + arrowed segment.
+    ctx.lineWidth = px(1);
+    ctx.setLineDash([px(4), px(3)]);
+    for (const e of ax.ext) {
+      ctx.beginPath();
+      ctx.moveTo(e.a.x, e.a.y);
+      ctx.lineTo(e.b.x, e.b.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.lineWidth = px(1.5);
+    ctx.beginPath();
+    ctx.moveTo(ax.dim.a.x, ax.dim.a.y);
+    ctx.lineTo(ax.dim.b.x, ax.dim.b.y);
+    ctx.stroke();
+    const u = normalize(sub(ax.dim.a, ax.dim.b));
+    if ((u.x !== 0 || u.y !== 0) && Math.hypot(ax.dim.b.x - ax.dim.a.x, ax.dim.b.y - ax.dim.a.y) > px(4)) {
+      drawArrowHead(ctx, ax.dim.a, u, px(7));
+      drawArrowHead(ctx, ax.dim.b, scale(u, -1), px(7));
+    }
+    drawLabelPill(ctx, ax.stepText, ax.stepLabel, view, dpr, theme, color, pv.selected);
+    drawLabelPill(ctx, ax.countText, ax.countLabel, view, dpr, theme, color, pv.selected);
+  }
+  if (pv.circular) {
+    const c = pv.circular;
+    // The orbit through the seed (dashed) and the centre as a crosshair.
+    ctx.lineWidth = px(1);
+    ctx.setLineDash([px(4), px(3)]);
+    ctx.beginPath();
+    ctx.arc(c.centre.x, c.centre.y, c.radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const r = px(7);
+    ctx.lineWidth = px(1.5);
+    ctx.beginPath();
+    ctx.arc(c.centre.x, c.centre.y, r, 0, Math.PI * 2);
+    ctx.moveTo(c.centre.x - r * 1.6, c.centre.y);
+    ctx.lineTo(c.centre.x + r * 1.6, c.centre.y);
+    ctx.moveTo(c.centre.x, c.centre.y - r * 1.6);
+    ctx.lineTo(c.centre.x, c.centre.y + r * 1.6);
+    ctx.stroke();
+    drawLabelPill(ctx, c.countText, c.countLabel, view, dpr, theme, color, pv.selected);
+    drawLabelPill(ctx, c.angleText, c.angleLabel, view, dpr, theme, color, pv.selected);
+    drawLabelPill(ctx, c.rotateText, c.rotateLabel, view, dpr, theme, color, pv.selected);
+  }
+  // Members that don't fit: a red dashed ring.
+  ctx.strokeStyle = FLASH_COLOR;
+  ctx.lineWidth = px(1.5);
+  ctx.setLineDash([px(3), px(3)]);
+  for (const b of pv.bad) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, px(JOINT_R + 4), 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // Handles (selected only): squares at each axis end and the centre, like vertex handles.
+  if (pv.selected) {
+    const h = px(5);
+    const handles = [...pv.axes.map((ax) => ax.handle), ...(pv.circular ? [pv.circular.centre] : [])];
+    ctx.lineWidth = px(2);
+    for (const p of handles) {
+      ctx.fillStyle = theme.ink;
+      ctx.strokeStyle = theme.surface;
+      ctx.beginPath();
+      ctx.rect(p.x - h, p.y - h, 2 * h, 2 * h);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+}
+
+/** A screen-space text pill at a world position (the dimension-label look). */
+function drawLabelPill(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  at: Vec2,
+  view: View,
+  dpr: number,
+  theme: Theme,
+  color: string,
+  bold: boolean
+): void {
+  const sx = at.x * view.scale + view.tx;
+  const sy = at.y * view.scale + view.ty;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+  const tw = ctx.measureText(text).width;
+  const pw = tw + 12;
+  const ph = 18;
+  ctx.beginPath();
+  ctx.roundRect(sx - pw / 2, sy - ph / 2, pw, ph, 5);
+  ctx.fillStyle = theme.surface + "e6";
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = bold ? 1.6 : 1;
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, sx, sy + 0.5);
+  ctx.restore();
+}
 
 /** Accent colour for measurements (fixed across themes, like the other semantic accents). */
 const MEASURE_COLOR = "#46c2cb";

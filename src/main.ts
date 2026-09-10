@@ -23,26 +23,27 @@ import {
   UNIT_TO_MM,
   cascadeComponentChange,
   reexpandData,
+  PatternSeed,
 } from "./model";
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
 import { collectCutSheet, toDxf, toSvg } from "./export";
 import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig, resetPoseBaselines } from "./solver";
 import {
-  solveSketch, tryAddConstraint, autoConstrainBody, SketchBreak,
+  solveSketch, tryAddConstraint, autoConstrainBody, SketchBreak, AUTO_HV_TOL,
   anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
 } from "./sketch";
 import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolated } from "./pose";
-import { render, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
+import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from "./view";
 
 type Mode = "draw" | "sim";
 type Tool =
   | "body" | "hole" | "split" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate" | "guide"
-  | "linearActuator" | "motor" | "measure"
+  | "linearActuator" | "motor" | "measure" | "patternLinear" | "patternCircular"
   | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
 /** An existing element picked in normal/select mode. */
-type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "guide"; id: number };
+type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "guide" | "pattern"; id: number };
 
 /** The tools that place a sketch constraint (tool name = constraint kind). */
 const CONSTRAINT_TOOLS = new Set<Tool>([
@@ -200,6 +201,11 @@ let holeDraftBodyId: number | null = null;
  * A press released without dragging falls back to the polygon path (first vertex).
  */
 let holePress: { bodyId: number; centre: Vec2; screen: Vec2; maxR: number } | null = null;
+// --- pattern tools ------------------------------------------------------------
+/** What the armed pattern tool is replicating (a hole or an attached joint), or null before the pick. */
+let patternSeed: PatternSeed | null = null;
+/** Linear tool: the row just created, still armed for an optional second direction (a grid). */
+let patternDraft: number | null = null;
 let holeCircle: { c: Vec2; r: number } | null = null;
 /** Screen-pixel travel before a hole-tool press counts as a circle drag. */
 const HOLE_DRAG_PX = 4;
@@ -425,6 +431,8 @@ type LeftDrag =
   // Per-corner radius handle: the cursor's position maps straight to that corner's radius.
   | { kind: "fillet"; bodyId: number; index: number; hole: number | null; moved: boolean }
   | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean }
+  // A pattern's handle: an axis end (re-aims + re-spaces that direction) or the circular centre.
+  | { kind: "patternHandle"; id: number; axis: number | "centre"; moved: boolean }
   // Whole-guideline move (angle preserved; anchored on its point `a`)…
   | { kind: "guide"; id: number; grabOffset: Vec2; moved: boolean }
   // …or one of its two defining points (re-aims the line).
@@ -458,6 +466,11 @@ function dragAnchorWorld(d: LeftDrag): Vec2 {
   if (d.kind === "body") return add(scene.getBody(d.id)!.pos, d.anchorOffset);
   if (d.kind === "measureLabel") {
     return scene.measurementLabelPos(scene.getMeasurement(d.id)!) ?? vec(0, 0);
+  }
+  if (d.kind === "patternHandle") {
+    const info = scene.patternInfo(d.id);
+    if (!info) return vec(0, 0);
+    return d.axis === "centre" ? info.circular?.centre ?? info.anchor : info.axes[d.axis]?.end ?? info.anchor;
   }
   if (d.kind === "multi") {
     return "jointId" in d.anchor
@@ -1220,6 +1233,8 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   hole: "Round hole: press inside a body and drag out the radius. Polygon hole: click inside a body to start a cut-out, then click more vertices (all inside that body); click the first vertex (or press Enter) to close it.",
   split: "Click a point on a body's outline (edge or corner) to start the cut, click inside to route it, then click the outline again to split the body in two along the path.",
+  patternLinear: "Click a hole or a joint on a body to repeat it along a line.", // live stage hint: patternHint()
+  patternCircular: "Click a hole or a joint on a body to repeat it around a centre.",
   joint: "Click inside a body to attach a joint, or empty space to place a free joint.",
   weld: "Click where bodies overlap to weld them rigidly together at that point (no relative rotation) — or click an existing pinned joint to toggle it weld ↔ pin.",
   connect: "Click a joint, then another joint to pin them — or a rail to attach the joint to it as a rider.",
@@ -1261,6 +1276,7 @@ function updateHint(): void {
     tool === "measure" ? HINTS.measure
     : mode === "sim" ? HINTS.sim
     : tool === null ? HINTS.select
+    : isPatternTool(tool) ? patternHint()
     : HINTS[tool];
   hintEl.textContent = containmentWarning() + base;
 }
@@ -1534,10 +1550,13 @@ function setTool(next: Tool): void {
   // group (so R then drag rotates the whole set) — when arming it.
   const keepSel = next === "rotate" && selection?.kind === "body" ? selection : null;
   const keepMulti = next === "rotate" ? multiSel : null;
+  // Pattern works selection-first too: an already selected joint becomes the seed.
+  const seedJoint = isPatternTool(next) && selection?.kind === "joint" ? selection.id : null;
   tool = next;
   resetTransient();
   selection = keepSel;
   multiSel = keepMulti;
+  if (seedJoint !== null) seedPatternJoint(seedJoint);
   document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((b) =>
     b.classList.toggle("active", b.dataset.tool === tool)
   );
@@ -1562,6 +1581,8 @@ function resetTransient(): void {
   holeDraftBodyId = null;
   holePress = null;
   holeCircle = null;
+  patternSeed = null;
+  patternDraft = null;
   splitDraft = [];
   splitBodyId = null;
   constraintPicks = [];
@@ -2701,6 +2722,8 @@ function constraintLineRefAt(p: Vec2): MeasureRef | null {
   if (s) return { kind: "rail", sliderId: s.id };
   const edge = bodyEdgeRefAt(p);
   if (edge) return edge;
+  const pax = patternAxisRefAt(p);
+  if (pax) return pax;
   const gl = scene.guideAt(p, pickRadius());
   if (gl) return { kind: "guideLine", guideId: gl.id };
   return null;
@@ -2748,7 +2771,8 @@ function constraintRefAt(p: Vec2): MeasureRef | null {
     const firstIsLine =
       constraintPicks[0].kind === "rail" ||
       constraintPicks[0].kind === "edge" ||
-      constraintPicks[0].kind === "guideLine";
+      constraintPicks[0].kind === "guideLine" ||
+      constraintPicks[0].kind === "patternAxis";
     if (firstIsLine) return constraintPointRefAt(p);
     return constraintPointRefAt(p) ?? constraintLineRefAt(p);
   }
@@ -2768,7 +2792,7 @@ function handleConstraintClick(p: Vec2): void {
   const kind = tool as SketchConstraintKind;
   const ref = constraintRefAt(p);
   if (!ref) return; // empty space — keep waiting for a reference
-  const isLine = ref.kind === "rail" || ref.kind === "edge" || ref.kind === "guideLine";
+  const isLine = ref.kind === "rail" || ref.kind === "edge" || ref.kind === "guideLine" || ref.kind === "patternAxis";
   if (constraintPicks.length === 0) {
     if ((kind === "horizontal" || kind === "vertical") && isLine) {
       commitConstraint(kind, ref);
@@ -2935,11 +2959,16 @@ function openDimEditor(m: Measurement): void {
 
 function closeDimEditor(): void {
   dimEditId = null;
+  patternEdit = null;
   dimEditInput.classList.add("hidden");
   dimEditInput.blur();
 }
 
 function commitDimEditor(): void {
+  if (patternEdit) {
+    commitPatternEditor();
+    return;
+  }
   const id = dimEditId;
   const raw = dimEditInput.value.trim();
   closeDimEditor(); // nulls dimEditId first, so the blur listener doesn't re-commit
@@ -2970,7 +2999,7 @@ dimEditInput.addEventListener("keydown", (e) => {
   else if (e.key === "Escape") closeDimEditor();
 });
 dimEditInput.addEventListener("blur", () => {
-  if (dimEditId !== null) commitDimEditor();
+  if (dimEditId !== null || patternEdit) commitDimEditor();
 });
 
 // --- measure tool ----------------------------------------------------------
@@ -3020,6 +3049,8 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   const edge = bodyEdgeRefAt(p);
   if (edge) return edge;
   if (mode === "draw") {
+    const pax = patternAxisRefAt(p);
+    if (pax) return pax;
     const gl = scene.guideAt(p, pickRadius());
     if (gl) return { kind: "guideLine", guideId: gl.id };
   }
@@ -3091,6 +3122,16 @@ function handleSelectClick(p: Vec2): void {
     selection = { kind: "measure", id: ml.id };
     return;
   }
+  const pl = patternLabelAt(p);
+  if (pl) {
+    // The rotation badge is a toggle; the other labels select (double-click edits).
+    if (pl.field === "rotate") {
+      const info = scene.patternInfo(pl.id);
+      if (info?.circular && scene.setPatternRotate(pl.id, !info.circular.rotate)) markDirty();
+    }
+    selection = { kind: "pattern", id: pl.id };
+    return;
+  }
   const sg = sketchGlyphAt(p);
   if (sg !== null) {
     selection = { kind: "sketch", id: sg };
@@ -3134,6 +3175,13 @@ function handleSelectClick(p: Vec2): void {
   // the boundary, so a click there can land just outside the filled shape). This lets a
   // double-click on an edge reach the vertex-edit handler without deselecting first.
   if (selection?.kind === "body" && (selectedBodyNodeAt(p) || selectedBodyEdgeAt(p))) {
+    return;
+  }
+  // A pattern's dotted axis line selects the pattern — between its instances only, so a
+  // click on a member hole still reaches the body underneath.
+  const pax = scene.holeAt(p) ? null : patternAxisRefAt(p);
+  if (pax) {
+    selection = { kind: "pattern", id: pax.patternId };
     return;
   }
   const body = scene.bodyAt(p);
@@ -3403,6 +3451,7 @@ function deleteSelection(): void {
   else if (selection.kind === "measure") scene.removeMeasurement(selection.id);
   else if (selection.kind === "sketch") scene.removeSketchConstraint(selection.id);
   else if (selection.kind === "guide") scene.removeGuide(selection.id);
+  else if (selection.kind === "pattern") scene.removePattern(selection.id); // members go, the seed stays
   else scene.removeConstraint(selection.id); // rail: remove it, keep the joints
   selection = null;
   markDirty();
@@ -3814,6 +3863,367 @@ function finishHole(): void {
   holeDraftBodyId = null;
 }
 
+// --- pattern tools ---------------------------------------------------------------
+const PATTERN_DEFAULT_LINEAR_COUNT = 3;
+const PATTERN_DEFAULT_CIRCULAR_COUNT = 6;
+/** Perpendicular offset of a linear pattern's dimension line from its axis (screen px). */
+const PATTERN_DIM_OFFSET_PX = 28;
+
+const isPatternTool = (t: Tool | null): t is "patternLinear" | "patternCircular" =>
+  t === "patternLinear" || t === "patternCircular";
+
+/** Short number for pattern labels (two decimals, trailing zeros trimmed). */
+function fmtNum(v: number): string {
+  return String(Math.round(v * 100) / 100);
+}
+
+/** Stage-aware hint for the pattern tools. */
+function patternHint(): string {
+  const circular = tool === "patternCircular";
+  if (!patternSeed) {
+    return `${circular ? "Circular" : "Linear"} pattern: click a hole (inside the cut-out) or a joint on a body to repeat it. The count / spacing labels are edited on the canvas afterwards (double-click a label; drag the end handle or centre to re-aim).`;
+  }
+  const what = patternSeed.kind === "hole" ? "hole" : "joint";
+  if (circular) {
+    return `Circular pattern of the ${what}: click the centre of rotation (snaps to joints, hole centres, corners and the grid).`;
+  }
+  if (patternDraft !== null) {
+    return "Row created — click where the first instance of a second direction should go to make a grid, or press Enter / Esc to keep a single row. Type the count in the label, or double-click the ×count / spacing labels later.";
+  }
+  return `Linear pattern of the ${what}: click where the next instance should go (snaps to the grid / objects).`;
+}
+
+/** Arm a pattern tool on an attached joint (refused: free joints, instance-owned, already patterned). */
+function seedPatternJoint(jointId: number): void {
+  const j = scene.getJoint(jointId);
+  if (!j) return;
+  if (j.bodyId === null) {
+    notify("A pattern repeats a joint across its body — free joints have no body to pattern on.");
+    return;
+  }
+  if (scene.instanceOfBody(j.bodyId)) {
+    notify("This joint belongs to a component instance — edit the definition to pattern it.");
+    disarmTool();
+    return;
+  }
+  if (scene.patternOfJoint(jointId)) {
+    notify("This joint is already part of a pattern — edit that pattern's labels, or delete it first.");
+    return;
+  }
+  patternSeed = { kind: "joint", jointId };
+  updateHint();
+}
+
+/**
+ * Pattern-tool click. No seed yet: pick one — a joint under the cursor wins (as
+ * everywhere), else the hole whose cut-out contains the point. With a seed: create the
+ * pattern at the clicked layout point (linear: where the next instance goes; circular:
+ * the centre) and open its count label for typing. A linear pattern stays armed for an
+ * optional second direction (a grid); Enter / Esc keep the single row.
+ */
+function handlePatternClick(p: Vec2): void {
+  if (!patternSeed) {
+    const j = scene.jointAt(p, pickRadius());
+    if (j) {
+      seedPatternJoint(j.id);
+      return;
+    }
+    const hit = scene.holeAt(p);
+    if (hit) {
+      if (scene.instanceOfBody(hit.body.id)) {
+        notify("This body belongs to a component instance — edit the definition to pattern its holes.");
+        disarmTool();
+        return;
+      }
+      if (scene.patternOfHole(hit.body.id, hit.hole)) {
+        notify("This hole is already part of a pattern — edit that pattern's labels, or delete it first.");
+        return;
+      }
+      patternSeed = { kind: "hole", bodyId: hit.body.id, hole: hit.hole };
+      updateHint();
+    } else if (scene.bodyAt(p)) {
+      notify("Click inside a hole (the cut-out itself) or on a joint to pattern it.", "info");
+    }
+    return; // empty space: keep the tool armed
+  }
+  const target = patternTarget(p);
+  if (!target) return;
+  const seed = patternSeed;
+  if (tool === "patternCircular") {
+    const created = scene.createCircularPattern(seed, target, PATTERN_DEFAULT_CIRCULAR_COUNT);
+    if (!created) return;
+    markDirty();
+    disarmTool();
+    selection = { kind: "pattern", id: created.id };
+    openPatternEditorSoon(created.id, "count", 0);
+    return;
+  }
+  if (patternDraft === null) {
+    const created = scene.createLinearPattern(seed, target, PATTERN_DEFAULT_LINEAR_COUNT);
+    if (!created) return;
+    patternDraft = created.id;
+    autoConstrainPatternAxis(created.id, 0);
+    markDirty();
+    selection = { kind: "pattern", id: created.id };
+    updateHint();
+    openPatternEditorSoon(created.id, "count", 0);
+    return;
+  }
+  // Second direction: a grid. (A direction parallel to the first is silently ignored.)
+  if (!scene.addPatternAxis(patternDraft, target, PATTERN_DEFAULT_LINEAR_COUNT)) return;
+  const id = patternDraft;
+  autoConstrainPatternAxis(id, 1);
+  markDirty();
+  disarmTool();
+  selection = { kind: "pattern", id };
+  openPatternEditorSoon(id, "count", 1);
+}
+
+/**
+ * Body-style auto-constraint for a pattern direction: drawn within `AUTO_HV_TOL` of an
+ * axis, it gets a horizontal / vertical constraint (the solve snaps it exactly).
+ */
+function autoConstrainPatternAxis(id: number, axis: number): void {
+  const info = scene.patternInfo(id);
+  const ax = info?.axes[axis];
+  if (!info || !ax) return;
+  const d = sub(ax.end, info.anchor);
+  const ang = Math.abs(Math.atan2(d.y, d.x)); // 0..π
+  const kind =
+    ang < AUTO_HV_TOL || Math.PI - ang < AUTO_HV_TOL ? ("horizontal" as const)
+    : Math.abs(ang - Math.PI / 2) < AUTO_HV_TOL ? ("vertical" as const)
+    : null;
+  if (kind) tryAddConstraint(scene, kind, { kind: "patternAxis", patternId: id, axis });
+}
+
+/** The pattern axis (dotted seed → last-instance line) within pick range of `p`, or null. */
+function patternAxisRefAt(p: Vec2): Extract<MeasureRef, { kind: "patternAxis" }> | null {
+  const r = pickRadius();
+  for (let i = patternViewCache.length - 1; i >= 0; i--) {
+    const v = patternViewCache[i];
+    for (let a = 0; a < v.axes.length; a++) {
+      if (distToSegment(p, v.axes[a].line.a, v.axes[a].line.b) <= r) return { kind: "patternAxis", patternId: v.id, axis: a };
+    }
+  }
+  return null;
+}
+
+/** End the pattern tool keeping the pattern it made selected (Enter). */
+function finishPatternTool(): void {
+  const keep = patternDraft;
+  disarmTool();
+  if (keep !== null && scene.getPattern(keep)) selection = { kind: "pattern", id: keep };
+}
+
+/**
+ * The layout point a click / the cursor means: placement-snapped (objects, guides, grid).
+ * Null when it coincides with the seed's anchor (no direction / a degenerate centre).
+ */
+function patternTarget(p: Vec2): Vec2 | null {
+  if (!patternSeed) return null;
+  const anchor = scene.patternSeedAnchor(patternSeed);
+  if (!anchor) return null;
+  const at = placeSnap(p);
+  return dist(at, anchor) < 1e-6 ? null : at;
+}
+
+/** Pattern-tool overlay for the renderer: hover candidate, seed, layout point, instances. */
+function patternPreviewView(): RenderInput["patternPreview"] {
+  if (mode !== "draw" || !isPatternTool(tool)) return null;
+  const kind = tool === "patternCircular" ? "circular" : "linear";
+  if (!patternSeed) {
+    // Hover feedback while picking: the hole under the cursor (joints highlight anyway).
+    const hit = cursor && hoverJoint === null ? scene.holeAt(cursor) : undefined;
+    if (!hit) return null;
+    return { kind, anchor: null, seedLoop: scene.bodyHolesWorld(hit.body)[hit.hole], target: null, instances: [] };
+  }
+  const anchor = scene.patternSeedAnchor(patternSeed);
+  if (!anchor) return null;
+  const seedLoop =
+    patternSeed.kind === "hole" ? scene.bodyHolesWorld(scene.getBody(patternSeed.bodyId)!)[patternSeed.hole] ?? null : null;
+  const target = cursor ? patternTarget(cursor) : null;
+  const pv = !target
+    ? null
+    : kind === "circular"
+    ? scene.patternPreview(patternSeed, { kind: "circular", centre: target, count: PATTERN_DEFAULT_CIRCULAR_COUNT })
+    : scene.patternPreview(patternSeed, {
+        kind: "linear",
+        target,
+        count: PATTERN_DEFAULT_LINEAR_COUNT,
+        ...(patternDraft !== null ? { axis: patternDraft } : {}),
+      });
+  return { kind, anchor, seedLoop, target, instances: pv?.instances ?? [] };
+}
+
+// --- pattern labels / handles (draw mode) ----------------------------------------
+/** Last frame's pattern overlays, for hit-testing labels and handles. */
+let patternViewCache: PatternView[] = [];
+
+/** One pattern's canvas overlay: dimension-style axis lines with count + spacing labels, or
+ *  the centre with count / angle / rotation labels; members that don't fit are flagged. */
+function patternViewOf(id: number): PatternView | null {
+  const info = scene.patternInfo(id);
+  if (!info) return null;
+  const px = (n: number) => n / view.scale;
+  const selected = selection?.kind === "pattern" && selection.id === id;
+  const axes: PatternView["axes"] = info.axes.map((ax, i) => {
+    const dir = normalize(sub(ax.end, info.anchor));
+    let n = perp(dir);
+    const other = info.axes[1 - i];
+    // The dimension line sits outside the grid (away from the other axis), or above a lone row.
+    if (other) {
+      if (dot(n, sub(other.end, info.anchor)) > 0) n = scale(n, -1);
+    } else if (n.y > 0) n = scale(n, -1);
+    const off = scale(n, px(PATTERN_DIM_OFFSET_PX));
+    // The spacing dimension spans the first step only (seed → 2nd instance); the dotted
+    // axis line runs on to the last instance, where the count label and handle sit.
+    const first = add(info.anchor, scale(dir, ax.step));
+    const a = add(info.anchor, off);
+    const b = add(first, off);
+    return {
+      line: { a: info.anchor, b: ax.end },
+      dim: { a, b },
+      ext: [{ a: info.anchor, b: a }, { a: first, b }],
+      stepLabel: add(a, scale(dir, ax.step / 2)),
+      stepText: fmtNum(ax.step),
+      countLabel: add(add(ax.end, off), scale(dir, px(22))),
+      countText: `×${ax.count}`,
+      handle: ax.end,
+    };
+  });
+  let circular: PatternView["circular"] = null;
+  if (info.circular) {
+    const c = info.circular;
+    const col = px(34);
+    circular = {
+      centre: c.centre,
+      radius: c.radius,
+      countLabel: add(c.centre, vec(col, -px(20))),
+      countText: `×${c.count}`,
+      angleLabel: add(c.centre, vec(col, 0)),
+      angleText: c.angleDeg === null ? "even" : `${fmtNum(c.angleDeg)}°`,
+      rotateLabel: add(c.centre, vec(col, px(20))),
+      rotateText: c.rotate ? "↻ turn" : "↑ fixed",
+    };
+  }
+  return { id, selected, anchor: info.anchor, axes, circular, bad: info.members.filter((m) => !m.ok).map((m) => m.point) };
+}
+
+/** Every pattern's overlay for this frame (draw mode only); refreshes the pick cache. */
+function patternViews(): PatternView[] {
+  if (mode !== "draw") {
+    patternViewCache = [];
+    return [];
+  }
+  patternViewCache = scene.patterns
+    .map((p) => patternViewOf(p.id))
+    .filter((v): v is PatternView => v !== null);
+  return patternViewCache;
+}
+
+type PatternLabelHit = { id: number; field: "count" | "step" | "angle" | "rotate"; axis: number };
+
+/** The pattern label under `p` (last frame's layout), or null. */
+function patternLabelAt(p: Vec2): PatternLabelHit | null {
+  const r = LABEL_PICK_RADIUS / view.scale;
+  for (let i = patternViewCache.length - 1; i >= 0; i--) {
+    const v = patternViewCache[i];
+    for (let a = 0; a < v.axes.length; a++) {
+      if (dist(v.axes[a].countLabel, p) <= r) return { id: v.id, field: "count", axis: a };
+      if (dist(v.axes[a].stepLabel, p) <= r) return { id: v.id, field: "step", axis: a };
+    }
+    if (v.circular) {
+      if (dist(v.circular.countLabel, p) <= r) return { id: v.id, field: "count", axis: 0 };
+      if (dist(v.circular.angleLabel, p) <= r) return { id: v.id, field: "angle", axis: 0 };
+      if (dist(v.circular.rotateLabel, p) <= r) return { id: v.id, field: "rotate", axis: 0 };
+    }
+  }
+  return null;
+}
+
+/** A handle of the *selected* pattern under `p`: an axis end (re-aim / re-space) or the centre. */
+function patternHandleAt(p: Vec2): { id: number; axis: number | "centre" } | null {
+  if (selection?.kind !== "pattern") return null;
+  const id = selection.id;
+  const v = patternViewCache.find((x) => x.id === id) ?? patternViewOf(id);
+  if (!v) return null;
+  const r = pickRadius();
+  for (let a = 0; a < v.axes.length; a++) if (dist(v.axes[a].handle, p) <= r) return { id, axis: a };
+  if (v.circular && dist(v.circular.centre, p) <= r) return { id, axis: "centre" };
+  return null;
+}
+
+// --- inline pattern-label editing (shares the dimension editor's input) ----------------
+let patternEdit: { id: number; field: "count" | "step" | "angle"; axis: number } | null = null;
+
+/** Open the floating input over a pattern label (double-click, or right after creation). */
+function openPatternEditor(id: number, field: "count" | "step" | "angle", axis: number): void {
+  const v = patternViewOf(id);
+  const info = scene.patternInfo(id);
+  if (!v || !info) return;
+  let pos: Vec2;
+  let text: string;
+  if (info.kind === "linear") {
+    const ax = info.axes[axis];
+    if (!ax || field === "angle") return;
+    pos = field === "count" ? v.axes[axis].countLabel : v.axes[axis].stepLabel;
+    text = field === "count" ? String(ax.count) : fmtNum(ax.step);
+  } else {
+    const c = info.circular!;
+    if (field === "step") return;
+    pos = field === "count" ? v.circular!.countLabel : v.circular!.angleLabel;
+    text = field === "count" ? String(c.count) : c.angleDeg === null ? "even" : fmtNum(c.angleDeg);
+  }
+  closeDimEditor();
+  patternEdit = { id, field, axis };
+  const sp = worldToScreen(view, pos);
+  dimEditInput.style.left = `${sp.x}px`;
+  dimEditInput.style.top = `${sp.y}px`;
+  dimEditInput.value = text;
+  dimEditInput.classList.remove("hidden");
+  dimEditInput.focus();
+  dimEditInput.select();
+}
+
+/**
+ * Open the pattern editor once the current mouse event has finished: opening it inside a
+ * mousedown handler would be undone at once (the browser moves focus on mousedown, and
+ * the input's blur commits + closes it).
+ */
+function openPatternEditorSoon(id: number, field: "count" | "step" | "angle", axis: number): void {
+  window.setTimeout(() => {
+    if (mode === "draw" && scene.getPattern(id)) openPatternEditor(id, field, axis);
+  }, 0);
+}
+
+/** Commit the pattern-label editor: count (whole number ≥ 2), spacing (> 0) or angle (degrees / "even"). */
+function commitPatternEditor(): void {
+  const edit = patternEdit;
+  const raw = dimEditInput.value.trim();
+  closeDimEditor(); // clears patternEdit first, so the blur listener doesn't re-commit
+  if (!edit || !scene.getPattern(edit.id)) return;
+  const info = scene.patternInfo(edit.id);
+  if (!info || raw === "" && edit.field !== "angle") return;
+  let ok = false;
+  if (edit.field === "count") {
+    const n = Number(raw);
+    ok = Number.isInteger(n) && n >= 2 &&
+      (info.kind === "linear" ? scene.setPatternAxisCount(edit.id, edit.axis, n) : scene.setPatternCount(edit.id, n));
+    if (!ok) notify("The count must be a whole number of 2 or more.");
+  } else if (edit.field === "step") {
+    const v = Number(raw);
+    ok = Number.isFinite(v) && v > 0 && scene.setPatternAxisStep(edit.id, edit.axis, v);
+    if (!ok) notify("The spacing must be a positive length.");
+  } else if (raw === "" || raw.toLowerCase().startsWith("e")) {
+    ok = scene.setPatternAngle(edit.id, null);
+  } else {
+    const d = Number(raw.replace("°", ""));
+    ok = Number.isFinite(d) && scene.setPatternAngle(edit.id, d);
+    if (!ok) notify('The angle must be a non-zero number of degrees (counter-clockwise), or "even".');
+  }
+  if (ok) markDirty();
+}
+
 /**
  * The outline the Split tool cuts: the editable control polygon of a fillet-mode body,
  * or the sampled shape of an offset-mode one (its control polygon is smaller than the
@@ -3936,6 +4346,8 @@ canvas.addEventListener("mousedown", (e) => {
     if (placePendingInsert(world)) return; // pending component-instance placement
     if (tool === "rotate") {
       startRotate(world);
+    } else if (isPatternTool(tool)) {
+      handlePatternClick(world);
     } else if (tool === null) {
       // Ctrl/Cmd+click: toggle what's under the cursor in the multi-selection; on empty
       // space, start an additive box select instead.
@@ -3951,24 +4363,33 @@ canvas.addEventListener("mousedown", (e) => {
       const node = selectedBodyNodeAt(world);
       const fh = selectedBodyFilletHandleAt(world);
       if (fh && selection?.kind === "body" && (!node || dist(world, fh.at) < dist(world, node.at))) {
-        leftDrag = { kind: "fillet", bodyId: selection.id, index: fh.index, hole: fh.hole, moved: false };
+        // A pattern member's handle edits the seed (members are derived from it).
+        const hole = fh.hole === null ? null : scene.patternSeedHole(selection.id, fh.hole);
+        leftDrag = { kind: "fillet", bodyId: selection.id, index: fh.index, hole, moved: false };
         canvas.style.cursor = "move";
       } else if (node && selection?.kind === "body") {
+        // A pattern member's node drags the seed's matching node: the whole array follows.
+        const hole = node.hole === null ? null : scene.patternSeedHole(selection.id, node.hole);
+        const at = hole === node.hole ? node.at : scene.bodyHoleControlWorld(scene.getBody(selection.id)!, hole!)[node.index];
         // With object snap on, the vertex itself is the snapping reference: a hole
         // centre or a corner lands on other objects' corners / centres / edges.
         const vref: MeasureRef =
-          node.hole === null
+          hole === null
             ? { kind: "vertex", bodyId: selection.id, index: node.index }
-            : { kind: "vertex", bodyId: selection.id, index: node.index, hole: node.hole };
+            : { kind: "vertex", bodyId: selection.id, index: node.index, hole };
         leftDrag = {
           kind: "vertex",
           bodyId: selection.id,
           index: node.index,
-          hole: node.hole,
-          grabOffset: sub(world, node.at),
+          hole,
+          grabOffset: sub(world, at),
           moved: false,
           osnap: objSnapEnabled ? { ref: vref, hit: null, hitInfinite: false } : undefined,
         };
+        canvas.style.cursor = "move";
+      } else if (selection?.kind === "pattern" && patternHandleAt(world)) {
+        const h = patternHandleAt(world)!;
+        leftDrag = { kind: "patternHandle", id: h.id, axis: h.axis, moved: false };
         canvas.style.cursor = "move";
       } else if (e.shiftKey) {
         // Shift+drag: rigid drag — what's grabbed moves like in simulation (grounds
@@ -4002,14 +4423,17 @@ canvas.addEventListener("mousedown", (e) => {
           };
           canvas.style.cursor = "move";
         } else if (selection?.kind === "joint") {
-          const anchor = scene.jointWorld(scene.getJoint(selection.id)!);
+          // A pattern member drags as its seed: the whole array moves together.
+          const pj = scene.patternOfJoint(selection.id);
+          const dragId = pj?.role === "member" && pj.pattern.seed.kind === "joint" ? pj.pattern.seed.jointId : selection.id;
+          const anchor = scene.jointWorld(scene.getJoint(dragId)!);
           leftDrag = {
             kind: "joint",
-            id: selection.id,
+            id: dragId,
             grabOffset: sub(world, anchor),
             moved: false,
             // A joint is its own object-snap reference.
-            osnap: objSnapEnabled ? { ref: { kind: "joint", jointId: selection.id }, hit: null, hitInfinite: false } : undefined,
+            osnap: objSnapEnabled ? { ref: { kind: "joint", jointId: dragId }, hit: null, hitInfinite: false } : undefined,
           };
           canvas.style.cursor = "move";
         } else if (selection?.kind === "guide") {
@@ -4136,6 +4560,16 @@ canvas.addEventListener("mousemove", (e) => {
       leftDrag.moved = true;
       return;
     }
+    // Pattern handle: the axis end / centre lands on the placement snap (objects, guides, grid).
+    if (leftDrag.kind === "patternHandle") {
+      const to = placeSnap(world);
+      const ok =
+        leftDrag.axis === "centre"
+          ? scene.setPatternCentre(leftDrag.id, to)
+          : scene.setPatternAxisEnd(leftDrag.id, leftDrag.axis, to);
+      if (ok) leftDrag.moved = true;
+      return;
+    }
     // Rigid drag: just aim the driver at the cursor — the frame loop runs the scoped
     // solve (sim-style, so sketch constraints don't apply; a grabbed joint's target
     // snaps to the grid, a grabbed body point follows the cursor exactly).
@@ -4212,6 +4646,8 @@ canvas.addEventListener("mousemove", (e) => {
       hoverJoint !== null ||
       hoverBody !== null ||
       measurementLabelAt(world) !== null ||
+      patternLabelAt(world) !== null ||
+      patternHandleAt(world) !== null ||
       scene.guidePointAt(world, pickRadius()) !== null ||
       scene.guideAt(world, pickRadius()) !== undefined;
     // With Shift held a drag would be rigid (sim-style), so hint with the sim grab cursor.
@@ -4255,7 +4691,7 @@ window.addEventListener("mouseup", (e) => {
       // released at is exactly the pose that gets persisted.
       if (finished.kind === "rigid") {
         timedSolve("rigidDrag", finished.driver, 100, undefined, finished.freeze);
-      } else if (finished.kind !== "measureLabel" && finished.kind !== "fillet") {
+      } else if (finished.kind !== "measureLabel" && finished.kind !== "fillet" && finished.kind !== "patternHandle") {
         // Settle: one symmetric sketch solve at rest, repairing anything the anchored
         // live solves couldn't satisfy without moving the dragged geometry. (A fillet
         // drag needs none: a radius change moves no control vertices or joints.)
@@ -4311,6 +4747,12 @@ canvas.addEventListener("dblclick", (e) => {
   // Select mode: double-click a draw-mode dimension label to edit its value inline
   // (typing a number makes it a driving dimension; clearing it makes it driven again).
   if (mode === "draw" && tool === null) {
+    const pl = patternLabelAt(eventWorld(e));
+    if (pl && pl.field !== "rotate") {
+      leftDrag = null;
+      openPatternEditor(pl.id, pl.field, pl.axis);
+      return;
+    }
     const ml = measurementLabelAt(eventWorld(e));
     if (ml) {
       leftDrag = null; // the double-click's mousedowns started a label drag — cancel it
@@ -4336,27 +4778,37 @@ canvas.addEventListener("dblclick", (e) => {
     const fh = selectedBodyFilletHandleAt(world);
     if (fh && (!node || dist(world, fh.at) < dist(world, node.at))) {
       leftDrag = null; // cancel the fillet drag the double-click's mousedowns started
-      scene.setBodyCornerRadius(selection.id, fh.index, null, fh.hole);
+      // (A pattern member's handle edits the seed — members copy its corner radii.)
+      scene.setBodyCornerRadius(selection.id, fh.index, null, fh.hole === null ? null : scene.patternSeedHole(selection.id, fh.hole));
       markDirty();
       return;
     }
     if (node) {
       // Removing the last removable node of a hole deletes the hole itself (a fillet
       // hole keeps ≥ 3 vertices, a disk keeps its 1 — so a no-op removal means "the
-      // user wants the hole gone").
+      // user wants the hole gone"). On a pattern member the node edit goes to the seed
+      // (every member follows); deleting a member deletes the whole array, seed kept.
       const body = scene.getBody(selection.id)!;
-      const before = node.hole === null ? null : body.holes?.[node.hole]?.controlLocal.length;
-      scene.removeBodyVertex(selection.id, node.index, node.hole);
-      const after = node.hole === null ? null : body.holes?.[node.hole]?.controlLocal.length;
-      if (node.hole !== null && before !== undefined && before === after) {
-        scene.removeBodyHole(selection.id, node.hole);
+      const ph = node.hole === null ? undefined : scene.patternOfHole(selection.id, node.hole);
+      const hole = node.hole === null ? null : scene.patternSeedHole(selection.id, node.hole);
+      const before = hole === null ? null : body.holes?.[hole]?.controlLocal.length;
+      scene.removeBodyVertex(selection.id, node.index, hole);
+      const after = hole === null ? null : body.holes?.[hole]?.controlLocal.length;
+      if (hole !== null && before !== undefined && before === after) {
+        if (ph?.role === "member") scene.removePattern(ph.pattern.id);
+        else scene.removeBodyHole(selection.id, hole);
       }
       markDirty();
       return;
     }
     const edge = selectedBodyEdgeAt(world);
     if (edge) {
-      scene.insertBodyVertex(selection.id, edge.index, snap(edge.point), edge.hole);
+      const hole = edge.hole === null ? null : scene.patternSeedHole(selection.id, edge.hole);
+      // A node added on a member's edge is added on the seed's matching edge (members follow).
+      const point = hole === edge.hole
+        ? edge.point
+        : scene.bodyHoleControlWorld(scene.getBody(selection.id)!, hole!)[edge.index] ?? edge.point;
+      scene.insertBodyVertex(selection.id, edge.index, hole === edge.hole ? snap(edge.point) : point, hole);
       markDirty();
     }
   }
@@ -4367,6 +4819,8 @@ canvas.addEventListener("dblclick", (e) => {
 const TOOL_KEYS: Record<string, Tool> = {
   b: "body",
   u: "hole", // cUt-out (H is the horizontal constraint)
+  i: "patternLinear", // repeat a hole / joint along one or two directions (Instances)
+  q: "patternCircular", // ...or around a centre
   x: "split", // cut a body in two along a drawn path
   j: "joint",
   w: "weld",
@@ -4469,6 +4923,10 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && mode === "draw" && tool === "hole") {
     finishHole();
+    return;
+  }
+  if (e.key === "Enter" && mode === "draw" && isPatternTool(tool)) {
+    finishPatternTool();
     return;
   }
   // A selected measurement is deletable in either mode (sim keeps its own set).
@@ -4878,6 +5336,7 @@ function sketchRefKey(ref: MeasureRef): string {
     case "rail": return `r:${ref.sliderId}`;
     case "guidePoint": return `gp:${ref.guideId}:${ref.which}`;
     case "guideLine": return `gl:${ref.guideId}`;
+    case "patternAxis": return `px:${ref.patternId}:${ref.axis}`;
     default: return "?";
   }
 }
@@ -4938,7 +5397,15 @@ function sketchGlyphsView(): SketchGlyphView[] {
       } else {
         const mid = scale(add(r.a, r.b), 0.5);
         const d = normalize(sub(r.b, r.a));
-        const n = vec(-d.y, d.x);
+        let n = vec(-d.y, d.x);
+        // A pattern axis carries its spacing dimension on one side: badge on the other.
+        if (ref.kind === "patternAxis") {
+          const ax = patternViewCache.find((v) => v.id === ref.patternId)?.axes[ref.axis];
+          if (ax) {
+            const side = sub(ax.dim.a, ax.line.a);
+            if (dot(side, n) > 0) n = scale(n, -1);
+          }
+        }
         badges.push(add(add(mid, scale(n, px(14))), scale(d, px(i * 20))));
       }
     }
@@ -5020,6 +5487,8 @@ function frame(now?: number): void {
     // The hole tool's cut-out draft previews through the same dashed-polyline channel;
     // its round-hole drag previews as a dashed circle.
     draftCircle: mode === "draw" && tool === "hole" ? holeCircle : null,
+    patternPreview: patternPreviewView(),
+    patterns: patternViews(),
     draftBody:
       mode !== "draw" ? null
       : tool === "body" ? draftBody

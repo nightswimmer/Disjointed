@@ -124,6 +124,10 @@ function tiedGuideVars(scene: Scene): Set<string> {
 
 /** Mobility rank of a variable (see System.rank). */
 function varRank(scene: Scene, key: string, anchored: boolean): number {
+  // A pattern axis: the seed anchor never moves for the axis's sake (the direction pivots
+  // about the seed), the first-instance point is ordinary geometry.
+  if (key.startsWith("pa:")) return 3;
+  if (key.startsWith("pb:")) return anchored ? 2 : 1;
   if (!key.startsWith("g:")) {
     // v:bodyId:… or j:jointId — instance-owned geometry never moves in a sketch solve.
     const id = Number(key.split(":")[1]);
@@ -131,6 +135,13 @@ function varRank(scene: Scene, key: string, anchored: boolean): number {
       ? scene.instanceOfBody(id) !== undefined
       : scene.instanceOfJoint(id) !== undefined;
     if (owned) return 3;
+    // Pattern members are derived from their seed: the solve never moves them either
+    // (a constraint on one moves the other side; the seed itself stays free geometry).
+    const parts = key.split(":");
+    const member = key.startsWith("v:")
+      ? parts.length > 3 && scene.patternOfHole(id, Number(parts[3]))?.role === "member"
+      : key.startsWith("j:") && scene.patternOfJoint(id)?.role === "member";
+    if (member) return 3;
   }
   if (anchored) return 2;
   return key.startsWith("g:") ? 0 : 1;
@@ -212,6 +223,14 @@ function lineVarKeys(scene: Scene, ref: MeasureRef): [string, string] | null {
       ? [`g:${ref.guideId}:a`, `g:${ref.guideId}:b`]
       : null;
   }
+  if (ref.kind === "patternAxis") {
+    // A pattern axis: its seed anchor (`pa`, immovable — the axis pivots about the seed)
+    // and the first instance along it (`pb`, movable — writes back the axis step).
+    const p = scene.getPattern(ref.patternId);
+    return p && p.layout.kind === "linear" && p.layout.axes[ref.axis]
+      ? [`pa:${ref.patternId}`, `pb:${ref.patternId}:${ref.axis}`]
+      : null;
+  }
   return null;
 }
 
@@ -232,6 +251,15 @@ function varWorld(scene: Scene, key: string): Vec2 | null {
   if (parts[0] === "g") {
     const g = scene.getGuide(Number(parts[1]));
     return g ? vec(g[parts[2] as "a" | "b"].x, g[parts[2] as "a" | "b"].y) : null;
+  }
+  if (parts[0] === "pa" || parts[0] === "pb") {
+    const info = scene.patternInfo(Number(parts[1]));
+    if (!info) return null;
+    if (parts[0] === "pa") return vec(info.anchor.x, info.anchor.y);
+    const ax = info.axes[Number(parts[2])];
+    if (!ax) return null;
+    // The first instance along the axis: anchor + (end − anchor) / (count − 1).
+    return add(info.anchor, scale(sub(ax.end, info.anchor), 1 / Math.max(1, ax.count - 1)));
   }
   const j = scene.getJoint(Number(parts[1]));
   return j ? scene.jointWorld(j) : null;
@@ -346,7 +374,7 @@ function buildConstraintItem(
   c: SketchConstraint
 ): SolveItem | null | "invalid" {
   const kind = c.kind;
-  const isLineRef = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
+  const isLineRef = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
   // A guide–geometry coincidence is a *tie*: it always brings the guide to the geometry.
   const tie = kind === "coincident" && !!c.refB && isGuideRef(c.refA) !== isGuideRef(c.refB);
   const rank = (i: number) => itemRank(sys, i, tie);
@@ -498,7 +526,7 @@ function buildDimensionItem(
 ): SolveItem | "invalid" {
   const { m, target } = spec;
   const rank = (i: number) => itemRank(sys, i, false); // a dimension to a tied guide moves geometry
-  const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
+  const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
   const aLine = isLine(m.refA);
   const bLine = isLine(m.refB);
   if (!aLine && !bLine) {
@@ -710,6 +738,15 @@ function applySystem(scene: Scene, sys: System): void {
     const delta = sub(sys.pos[i], cur);
     if (len(delta) < EPS) continue;
     const parts = key.split(":");
+    if (parts[0] === "pa") continue; // derived from the seed: never written back
+    if (parts[0] === "pb") {
+      // The axis step is the solved first instance relative to the solved anchor (both
+      // in the solver's frame, so a body that moved in the same solve doesn't skew it).
+      const ia = sys.index.get(`pa:${parts[1]}`);
+      const anchor = ia === undefined ? varWorld(scene, `pa:${parts[1]}`) : sys.pos[ia];
+      if (anchor) scene.setPatternAxisVector(Number(parts[1]), Number(parts[2]), sub(sys.pos[i], anchor));
+      continue;
+    }
     if (parts[0] === "v") {
       scene.moveBodyVertex(
         Number(parts[1]),
@@ -899,6 +936,10 @@ export function anchorVarsForBody(scene: Scene, bodyId: number): string[] {
     const k = pointVarKey(scene, { kind: "joint", jointId: j.id });
     if (k) keys.push(k);
   }
+  // The body's pattern axes ride with it: a drag never re-aims them.
+  for (const p of scene.patterns) {
+    if (p.bodyId === bodyId && p.layout.kind === "linear") p.layout.axes.forEach((_, i) => keys.push(`pb:${p.id}:${i}`));
+  }
   return keys;
 }
 
@@ -1013,6 +1054,10 @@ export function applyDrivingDimension(
   const reject = [{ id: measurementId, kind: "dimension" as const, error: Infinity }];
   if (!m || m.mode !== "draw" || !(target > 0)) return reject;
   if (scene.refInstanceOwned(m.refA) && scene.refInstanceOwned(m.refB)) return reject;
+  // Both ends inside one pattern (seed ↔ member, member ↔ member): the spacing is the
+  // pattern's own parameter — edit it on the pattern, not through a dimension.
+  const pa = scene.patternOfRef(m.refA);
+  if (pa && pa === scene.patternOfRef(m.refB)) return reject;
   const info = scene.measureInfo(m);
   if (!info || info.kind !== "distance") return reject; // angle dimensions can't drive (v1)
   if (m.axis === "diameter") {
@@ -1063,6 +1108,8 @@ function refOwnerBody(scene: Scene, ref: MeasureRef): number | null {
       const b = scene.getJoint(c.railB);
       return a && b && a.bodyId !== null && a.bodyId === b.bodyId ? a.bodyId : null;
     }
+    case "patternAxis":
+      return scene.getPattern(ref.patternId)?.bodyId ?? null;
     case "guidePoint":
     case "guideLine":
       return null; // guides are world construction — no body owns them

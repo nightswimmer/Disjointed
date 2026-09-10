@@ -50,6 +50,12 @@
           <button data-tool="hole" class="tool-btn icon-btn" title="Cut a hole in a body — click inside a body, then more vertices; click the first vertex or press Enter to close (U)" aria-label="Hole tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" fill="currentColor" fill-opacity="0.18"/><circle cx="9.5" cy="9" r="2.6" stroke-dasharray="2.5 1.8"/></svg>
           </button>
+          <button data-tool="patternLinear" class="tool-btn icon-btn" title="Linear pattern — repeat a hole or a joint along one or two directions: click the hole / joint, then where the next instance goes; a second click adds a second direction (a grid). Count and spacing are edited on the canvas labels (I)" aria-label="Linear pattern tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="5" r="2.2" fill="currentColor" fill-opacity="0.35"/><circle cx="11" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="17" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="11" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="17" r="2.2" stroke-dasharray="2 1.6"/></svg>
+          </button>
+          <button data-tool="patternCircular" class="tool-btn icon-btn" title="Circular pattern — repeat a hole or a joint around a centre: click the hole / joint, then the centre of rotation. Count, angle and rotation are edited on the canvas labels (Q)" aria-label="Circular pattern tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="4" r="2" fill="currentColor" fill-opacity="0.35"/><circle cx="15.2" cy="13" r="2" stroke-dasharray="2 1.6"/><circle cx="4.8" cy="13" r="2" stroke-dasharray="2 1.6"/><path d="M6.2 5.9a6 6 0 0 0-1.6 3.6" stroke-dasharray="1.5 1.5"/></svg>
+          </button>
           <button data-tool="split" class="tool-btn icon-btn" title="Split a body — click a point on its outline, route the cut inside, click the outline again to cut it in two (X)" aria-label="Split tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" fill="currentColor" fill-opacity="0.18"/><path d="M8 3.5l3 4-2.5 3.5 3 4" stroke-dasharray="2.2 1.6"/></svg>
           </button>

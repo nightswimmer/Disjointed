@@ -73,6 +73,143 @@ export type HoleSpec =
   | Vec2[]
   | { control: Vec2[]; radius?: number; radii?: (number | null)[]; round?: RoundMode };
 
+/** What a pattern replicates, as the UI picks it: one hole of a body, or one attached joint. */
+export type PatternSeed =
+  | { kind: "hole"; bodyId: number; hole: number }
+  | { kind: "joint"; jointId: number };
+
+/** One direction of a linear pattern: `count` instances (the seed included) every `step` (body-local). */
+export interface PatternAxis {
+  count: number;
+  step: Vec2;
+}
+
+/**
+ * A pattern's layout, in its body's local frame (so the pattern rides with the body).
+ * Linear: one or two axes (two = a grid). Circular: `count` instances around `centre`
+ * (an offset from the seed's anchor), `angleStep` radians apart — absent = spread evenly
+ * over the full circle; `rotate` turns each instance's shape with the arc, otherwise
+ * shapes keep the seed's orientation and only their anchors orbit.
+ */
+export type PatternLayout =
+  | { kind: "linear"; axes: PatternAxis[] }
+  | { kind: "circular"; centre: Vec2; count: number; angleStep?: number; rotate: boolean };
+
+/**
+ * A live pattern (v19): the seed (a hole or joint of `bodyId`) plus the layout, and the
+ * **members** it owns — real holes (indices into `Body.holes`) or joints (ids) of the same
+ * body, re-derived from the seed whenever the seed or its body changes (`syncPattern`).
+ * Members are derived geometry: the sketch solver never moves them (rank-immovable, like
+ * instance material), a drag on one moves the whole pattern, and the layout is edited
+ * through its on-canvas labels. Deleting the seed dissolves the pattern (members stay as
+ * plain holes / joints); deleting a member deletes every member (the seed stays).
+ */
+export interface Pattern {
+  id: number;
+  bodyId: number;
+  seed: { kind: "hole"; hole: number } | { kind: "joint"; jointId: number };
+  layout: PatternLayout;
+  /** Instances after the seed, in layout order (see `patternLocalMotions`). */
+  members: number[];
+}
+
+/** A pattern resolved to world geometry for rendering / picking (see `Scene.patternInfo`). */
+export interface PatternInfo {
+  id: number;
+  bodyId: number;
+  kind: "linear" | "circular";
+  /** The seed's anchor: a hole's control-polygon centroid (a disk's centre) or the joint. */
+  anchor: Vec2;
+  /** Linear axes: where the last instance along each axis sits, the count and the spacing. */
+  axes: { end: Vec2; count: number; step: number }[];
+  /** Circular layout: the centre, the orbit radius, count, angle in degrees (null = even), rotation. */
+  circular: { centre: Vec2; radius: number; count: number; angleDeg: number | null; rotate: boolean } | null;
+  /** Every member's anchor and whether it fits (inside the body, clear of other holes / joints). */
+  members: { point: Vec2; ok: boolean }[];
+}
+
+/** Preview geometry of a layout that isn't (yet) a pattern (see `Scene.patternPreview`). */
+export interface PatternPreview {
+  anchor: Vec2;
+  seedLoop: Vec2[] | null;
+  instances: { point: Vec2; loop: Vec2[] | null; ok: boolean }[];
+}
+
+/** Largest instance count along one axis / around a circle (guards runaway inputs). */
+export const PATTERN_MAX_COUNT = 200;
+/** Largest total member count of a two-axis grid. */
+export const PATTERN_MAX_MEMBERS = 400;
+/** Two joints on one body closer than this are the same point — a member never stacks on one. */
+const PATTERN_JOINT_EPS = 1e-6;
+
+/**
+ * The rigid motions (local frame) taking the seed to every member, in member order:
+ * linear = row-major over the axes (axis 0 fastest), the seed's own cell skipped;
+ * circular = increasing angle. `anchor` is the seed's local anchor (the orbit point).
+ */
+export function patternLocalMotions(layout: PatternLayout, anchor: Vec2): ((p: Vec2) => Vec2)[] {
+  const out: ((p: Vec2) => Vec2)[] = [];
+  if (layout.kind === "linear") {
+    const a = layout.axes[0];
+    const b = layout.axes[1];
+    if (!a) return out;
+    const nA = Math.max(1, Math.floor(a.count));
+    const nB = b ? Math.max(1, Math.floor(b.count)) : 1;
+    for (let j = 0; j < nB; j++) {
+      for (let i = 0; i < nA; i++) {
+        if (i === 0 && j === 0) continue;
+        const d = add(scale(a.step, i), b ? scale(b.step, j) : vec(0, 0));
+        out.push((p) => add(p, d));
+      }
+    }
+    return out;
+  }
+  const n = Math.max(1, Math.floor(layout.count));
+  const step = layout.angleStep ?? (2 * Math.PI) / n;
+  const c = add(anchor, layout.centre);
+  for (let k = 1; k < n; k++) {
+    const ang = step * k;
+    if (layout.rotate) out.push((p) => add(c, rotate(sub(p, c), ang)));
+    else {
+      const d = sub(add(c, rotate(sub(anchor, c), ang)), anchor);
+      out.push((p) => add(p, d));
+    }
+  }
+  return out;
+}
+
+/** Plain average of a point set (a 1- or 2-point "polygon" has no area centroid). */
+function centroidOfPoints(pts: Vec2[]): Vec2 {
+  let x = 0;
+  let y = 0;
+  for (const p of pts) { x += p.x; y += p.y; }
+  return vec(x / pts.length, y / pts.length);
+}
+
+/** Deep copy of a pattern layout. */
+function cloneLayout(l: PatternLayout): PatternLayout {
+  return l.kind === "linear"
+    ? { kind: "linear", axes: l.axes.map((a) => ({ count: a.count, step: vec(a.step.x, a.step.y) })) }
+    : { kind: "circular", centre: vec(l.centre.x, l.centre.y), count: l.count, rotate: l.rotate, ...(l.angleStep !== undefined ? { angleStep: l.angleStep } : {}) };
+}
+
+/** Axis-aligned bounds of a point set. */
+function boundsOf(pts: Vec2[]): { min: Vec2; max: Vec2 } {
+  const min = vec(Infinity, Infinity);
+  const max = vec(-Infinity, -Infinity);
+  for (const p of pts) {
+    min.x = Math.min(min.x, p.x); min.y = Math.min(min.y, p.y);
+    max.x = Math.max(max.x, p.x); max.y = Math.max(max.y, p.y);
+  }
+  return { min, max };
+}
+
+/** A layout with its vectors turned by `ang` (into / out of a body frame). */
+function rotateLayout(l: PatternLayout, ang: number): PatternLayout {
+  if (l.kind === "linear") return { kind: "linear", axes: l.axes.map((a) => ({ count: a.count, step: rotate(a.step, ang) })) };
+  return { ...l, centre: rotate(l.centre, ang) };
+}
+
 /** Outcome of `Scene.splitBody`: the two sides (A keeps the original id), or why it was refused. */
 export type SplitResult = { ok: true; a: Body; b: Body } | { ok: false; reason: string };
 
@@ -310,7 +447,8 @@ export type MeasureRef =
   | { kind: "rail"; sliderId: number } // line: a slider rail
   | { kind: "edge"; bodyId: number; index: number; hole?: number } // line: control edge index → index+1 (of hole `hole`, or the outer)
   | { kind: "guidePoint"; guideId: number; which: "a" | "b" } // point: a guideline defining point
-  | { kind: "guideLine"; guideId: number }; // line: a construction guideline (infinite)
+  | { kind: "guideLine"; guideId: number } // line: a construction guideline (infinite)
+  | { kind: "patternAxis"; patternId: number; axis: number }; // line: a linear pattern's direction (seed anchor → last instance)
 
 /**
  * A dimension between two references. What it measures follows from the reference kinds:
@@ -526,6 +664,8 @@ export interface SceneData {
   components?: ComponentDef[];
   /** Component instances expanded into *this* context (v14). */
   instances?: ComponentInstance[];
+  /** Live patterns of this context (v19). */
+  patterns?: Pattern[];
 }
 
 /**
@@ -570,9 +710,21 @@ export interface SelectionClip {
   /** Fully-internal draw-mode dimensions; refs carry the original ids. Driving ones carry
    *  a `target`; driven (reference) ones travel only when the clip asks for them. */
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
+  /**
+   * Patterns of the copied bodies (v19): the seed (hole index / joint tmp id), the layout
+   * with its vectors in **world** orientation (a pasted body is re-baked at angle 0),
+   * and the members (hole indices / joint tmp ids).
+   */
+  patterns: {
+    tmp: number;
+    body: number;
+    seed: { kind: "hole"; hole: number } | { kind: "joint"; joint: number };
+    layout: PatternLayout;
+    members: number[];
+  }[];
 }
 
-const FORMAT_VERSION = 18;
+const FORMAT_VERSION = 19;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -607,6 +759,10 @@ export class Scene {
   components: ComponentDef[] = [];
   /** Component instances expanded into this context. */
   instances: ComponentInstance[] = [];
+  /** Live patterns of this context (v19). */
+  patterns: Pattern[] = [];
+  /** Re-entrancy guard: a pattern sync's own rebuilds / removals must not re-sync. */
+  private syncingPatterns = false;
   /** Working unit: 1 world unit = 1 of these (display + import conversion only). */
   unit: Unit = DEFAULT_UNIT;
   private nextId = 1;
@@ -735,6 +891,8 @@ export class Scene {
     attached.forEach((j, i) => {
       j.local = rotate(sub(jointWorlds[i], centroid), -body.angle);
     });
+    // Any pattern on this body re-derives its members from the (possibly changed) seed.
+    this.syncPatternsOfBody(body.id);
   }
 
   /**
@@ -835,21 +993,553 @@ export class Scene {
   removeBodyHole(bodyId: number, hole: number): void {
     const body = this.getBody(bodyId);
     if (!body || !body.holes || hole < 0 || hole >= body.holes.length) return;
-    body.holes.splice(hole, 1);
-    body.holesLocal?.splice(hole, 1);
-    // Drop refs on the removed hole; shift refs on later holes down by one.
-    const gone = (ref: MeasureRef | null): boolean =>
-      !!ref && (ref.kind === "vertex" || ref.kind === "edge") && ref.bodyId === bodyId && ref.hole === hole;
-    const shift = (ref: MeasureRef | null): void => {
-      if (ref && (ref.kind === "vertex" || ref.kind === "edge") && ref.bodyId === bodyId && ref.hole !== undefined && ref.hole > hole) ref.hole--;
+    // A pattern member is derived geometry: deleting one deletes the whole array (the
+    // seed stays). Removing a seed dissolves its pattern inside dropHoles (members stay).
+    const ph = this.patternOfHole(bodyId, hole);
+    if (ph?.role === "member") {
+      this.removePattern(ph.pattern.id);
+      return;
+    }
+    this.dropHoles(body, [hole]);
+  }
+
+  // --- patterns (live linear / circular arrays of a hole or an attached joint) --------
+
+  getPattern(id: number): Pattern | undefined {
+    return this.patterns.find((p) => p.id === id);
+  }
+
+  /** The pattern a hole of `bodyId` belongs to, and whether it is the seed or a member. */
+  patternOfHole(bodyId: number, hole: number): { pattern: Pattern; role: "seed" | "member" } | undefined {
+    for (const p of this.patterns) {
+      if (p.bodyId !== bodyId || p.seed.kind !== "hole") continue;
+      if (p.seed.hole === hole) return { pattern: p, role: "seed" };
+      if (p.members.includes(hole)) return { pattern: p, role: "member" };
+    }
+    return undefined;
+  }
+
+  /** The pattern a joint belongs to, and whether it is the seed or a member. */
+  patternOfJoint(jointId: number): { pattern: Pattern; role: "seed" | "member" } | undefined {
+    for (const p of this.patterns) {
+      if (p.seed.kind !== "joint") continue;
+      if (p.seed.jointId === jointId) return { pattern: p, role: "seed" };
+      if (p.members.includes(jointId)) return { pattern: p, role: "member" };
+    }
+    return undefined;
+  }
+
+  /** Whether a measurement reference names a pattern **member** (derived geometry). */
+  refPatternMember(ref: MeasureRef): boolean {
+    if (ref.kind === "joint") return this.patternOfJoint(ref.jointId)?.role === "member";
+    if ((ref.kind === "vertex" || ref.kind === "edge") && ref.hole !== undefined) {
+      return this.patternOfHole(ref.bodyId, ref.hole)?.role === "member";
+    }
+    return false;
+  }
+
+  /** The pattern a reference's element belongs to (as seed or member), or undefined. */
+  patternOfRef(ref: MeasureRef): Pattern | undefined {
+    if (ref.kind === "joint") return this.patternOfJoint(ref.jointId)?.pattern;
+    if ((ref.kind === "vertex" || ref.kind === "edge") && ref.hole !== undefined) {
+      return this.patternOfHole(ref.bodyId, ref.hole)?.pattern;
+    }
+    return undefined;
+  }
+
+  /** A hole's index redirected to its pattern's seed when it is a member (else itself). */
+  patternSeedHole(bodyId: number, hole: number): number {
+    const ph = this.patternOfHole(bodyId, hole);
+    return ph?.role === "member" && ph.pattern.seed.kind === "hole" ? ph.pattern.seed.hole : hole;
+  }
+
+  /** The seed's anchor in its body's local frame: a hole's control centroid, or the joint. */
+  private patternAnchorLocal(p: Pattern): Vec2 | null {
+    const body = this.getBody(p.bodyId);
+    if (!body) return null;
+    if (p.seed.kind === "joint") {
+      const j = this.getJoint(p.seed.jointId);
+      return j && j.bodyId === body.id ? j.local : null;
+    }
+    const hole = body.holes?.[p.seed.hole];
+    if (!hole) return null;
+    return hole.controlLocal.length < 3 ? centroidOfPoints(hole.controlLocal) : polygonCentroid(hole.controlLocal);
+  }
+
+  /** The world anchor of a pattern seed picked by the UI, or null (missing, free joint). */
+  patternSeedAnchor(seed: PatternSeed): Vec2 | null {
+    const body = this.patternSeedBody(seed);
+    if (!body) return null;
+    const p = this.seedRecord(seed);
+    const a = this.patternAnchorLocal({ id: 0, bodyId: body.id, seed: p, layout: { kind: "linear", axes: [] }, members: [] });
+    return a ? add(body.pos, rotate(a, body.angle)) : null;
+  }
+
+  /** The body a UI seed lives on (an attached joint's body, the hole's body), or undefined. */
+  patternSeedBody(seed: PatternSeed): Body | undefined {
+    if (seed.kind === "joint") {
+      const j = this.getJoint(seed.jointId);
+      return j && j.bodyId !== null ? this.getBody(j.bodyId) : undefined;
+    }
+    const body = this.getBody(seed.bodyId);
+    return body?.holes?.[seed.hole] ? body : undefined;
+  }
+
+  private seedRecord(seed: PatternSeed): Pattern["seed"] {
+    return seed.kind === "joint" ? { kind: "joint", jointId: seed.jointId } : { kind: "hole", hole: seed.hole };
+  }
+
+  /** A body-local vector from a world one. */
+  private toLocalVec(body: Body, worldVec: Vec2): Vec2 {
+    return rotate(worldVec, -body.angle);
+  }
+
+  /**
+   * Create a linear pattern: the seed is repeated `count` times towards `target` (the
+   * world point the 2nd instance lands on). Null when the seed is invalid, already in a
+   * pattern, or the target coincides with the seed.
+   */
+  createLinearPattern(seed: PatternSeed, target: Vec2, count = 3): Pattern | null {
+    const body = this.patternSeedBody(seed);
+    const anchor = body ? this.patternSeedAnchor(seed) : null;
+    if (!body || !anchor || this.seedTaken(seed)) return null;
+    const step = this.toLocalVec(body, sub(target, anchor));
+    if (len(step) < 1e-6) return null;
+    const p: Pattern = {
+      id: this.id(),
+      bodyId: body.id,
+      seed: this.seedRecord(seed),
+      layout: { kind: "linear", axes: [{ count: this.clampCount(count), step }] },
+      members: [],
     };
-    this.measurements = this.measurements.filter((m) => !gone(m.refA) && !gone(m.refB));
-    this.sketch = this.sketch.filter((c) => !gone(c.refA) && !gone(c.refB));
-    for (const m of this.measurements) { shift(m.refA); shift(m.refB); }
-    for (const c of this.sketch) { shift(c.refA); shift(c.refB); }
+    this.patterns.push(p);
+    this.syncPattern(p);
+    return p;
+  }
+
+  /**
+   * Add the second axis of a linear pattern (turning the row into a grid): `target` is
+   * where the first instance along the new axis lands. Refused for circular / already
+   * two-axis patterns and for a direction parallel to the first axis.
+   */
+  addPatternAxis(id: number, target: Vec2, count = 3): boolean {
+    const p = this.getPattern(id);
+    const body = p ? this.getBody(p.bodyId) : undefined;
+    const anchorL = p ? this.patternAnchorLocal(p) : null;
+    if (!p || !body || !anchorL || p.layout.kind !== "linear" || p.layout.axes.length !== 1) return false;
+    const anchor = add(body.pos, rotate(anchorL, body.angle));
+    const step = this.toLocalVec(body, sub(target, anchor));
+    const a0 = p.layout.axes[0].step;
+    if (len(step) < 1e-6 || Math.abs(cross(normalize(a0), normalize(step))) < 1e-3) return false;
+    p.layout.axes.push({ count: this.clampCount(count, p.layout.axes[0].count), step });
+    this.syncPattern(p);
+    return true;
+  }
+
+  /**
+   * Create a circular pattern of `count` instances evenly around `centre` (world), each
+   * rotated with the arc. Null when the seed is invalid / taken or the centre sits on it.
+   */
+  createCircularPattern(seed: PatternSeed, centre: Vec2, count = 6): Pattern | null {
+    const body = this.patternSeedBody(seed);
+    const anchor = body ? this.patternSeedAnchor(seed) : null;
+    if (!body || !anchor || this.seedTaken(seed)) return null;
+    const off = this.toLocalVec(body, sub(centre, anchor));
+    if (len(off) < 1e-6) return null;
+    const p: Pattern = {
+      id: this.id(),
+      bodyId: body.id,
+      seed: this.seedRecord(seed),
+      layout: { kind: "circular", centre: off, count: this.clampCount(count), rotate: true },
+      members: [],
+    };
+    this.patterns.push(p);
+    this.syncPattern(p);
+    return p;
+  }
+
+  /** Whether a UI seed already belongs to a pattern (as seed or member). */
+  private seedTaken(seed: PatternSeed): boolean {
+    return seed.kind === "joint"
+      ? this.patternOfJoint(seed.jointId) !== undefined
+      : this.patternOfHole(seed.bodyId, seed.hole) !== undefined;
+  }
+
+  /** Clamp an instance count (≥ 2, ≤ the axis cap, and the grid cap given the other axis). */
+  private clampCount(count: number, otherAxisCount = 1): number {
+    const n = Math.floor(Number.isFinite(count) ? count : 2);
+    const gridCap = Math.max(2, Math.floor(PATTERN_MAX_MEMBERS / Math.max(1, otherAxisCount)));
+    return Math.min(PATTERN_MAX_COUNT, gridCap, Math.max(2, n));
+  }
+
+  /** Set the instance count along a linear axis (≥ 2). */
+  setPatternAxisCount(id: number, axis: number, count: number): boolean {
+    const p = this.getPattern(id);
+    if (!p || p.layout.kind !== "linear" || !p.layout.axes[axis]) return false;
+    const other = p.layout.axes[1 - axis]?.count ?? 1;
+    p.layout.axes[axis].count = this.clampCount(count, other);
+    this.syncPattern(p);
+    return true;
+  }
+
+  /** Set the spacing along a linear axis (world units, > 0); the direction is kept. */
+  setPatternAxisStep(id: number, axis: number, length: number): boolean {
+    const p = this.getPattern(id);
+    if (!p || p.layout.kind !== "linear" || !p.layout.axes[axis] || !(length > 0)) return false;
+    const a = p.layout.axes[axis];
+    a.step = scale(normalize(a.step), length);
+    this.syncPattern(p);
+    return true;
+  }
+
+  /**
+   * Re-aim a linear axis so its **last** instance lands on `end` (world) — direction and
+   * spacing both follow. Refused when `end` is on the anchor or parallel to the other axis.
+   */
+  setPatternAxisEnd(id: number, axis: number, end: Vec2): boolean {
+    const p = this.getPattern(id);
+    const body = p ? this.getBody(p.bodyId) : undefined;
+    const anchorL = p ? this.patternAnchorLocal(p) : null;
+    if (!p || !body || !anchorL || p.layout.kind !== "linear" || !p.layout.axes[axis]) return false;
+    const a = p.layout.axes[axis];
+    const anchor = add(body.pos, rotate(anchorL, body.angle));
+    const step = scale(this.toLocalVec(body, sub(end, anchor)), 1 / (a.count - 1));
+    if (len(step) < 1e-6) return false;
+    const other = p.layout.axes[1 - axis];
+    if (other && Math.abs(cross(normalize(other.step), normalize(step))) < 1e-3) return false;
+    a.step = step;
+    this.syncPattern(p);
+    return true;
+  }
+
+  /**
+   * Set a linear axis's step from a **world** vector (the seed anchor → the next
+   * instance) — the sketch solver's writeback for an axis line it re-aimed.
+   */
+  setPatternAxisVector(id: number, axis: number, stepWorld: Vec2): boolean {
+    const p = this.getPattern(id);
+    const body = p ? this.getBody(p.bodyId) : undefined;
+    if (!p || !body || p.layout.kind !== "linear" || !p.layout.axes[axis] || len(stepWorld) < 1e-6) return false;
+    p.layout.axes[axis].step = this.toLocalVec(body, stepWorld);
+    this.syncPattern(p);
+    return true;
+  }
+
+  /** Set a circular pattern's instance count (≥ 2). */
+  setPatternCount(id: number, count: number): boolean {
+    const p = this.getPattern(id);
+    if (!p || p.layout.kind !== "circular") return false;
+    p.layout.count = this.clampCount(count);
+    this.syncPattern(p);
+    return true;
+  }
+
+  /**
+   * Set a circular pattern's angular step in **screen** degrees (counter-clockwise
+   * positive; world y points down, so the stored radians are negated), or `null` to
+   * spread the instances evenly over the full circle. A zero angle is refused.
+   */
+  setPatternAngle(id: number, degrees: number | null): boolean {
+    const p = this.getPattern(id);
+    if (!p || p.layout.kind !== "circular") return false;
+    if (degrees === null) delete p.layout.angleStep;
+    else {
+      if (!Number.isFinite(degrees) || Math.abs(degrees) < 1e-6) return false;
+      p.layout.angleStep = (-degrees * Math.PI) / 180;
+    }
+    this.syncPattern(p);
+    return true;
+  }
+
+  /** Whether a circular pattern's instances turn with the arc (else they keep the seed's orientation). */
+  setPatternRotate(id: number, rotateWithArc: boolean): boolean {
+    const p = this.getPattern(id);
+    if (!p || p.layout.kind !== "circular") return false;
+    p.layout.rotate = rotateWithArc;
+    this.syncPattern(p);
+    return true;
+  }
+
+  /** Move a circular pattern's centre to a world point (refused on the seed's anchor). */
+  setPatternCentre(id: number, centre: Vec2): boolean {
+    const p = this.getPattern(id);
+    const body = p ? this.getBody(p.bodyId) : undefined;
+    const anchorL = p ? this.patternAnchorLocal(p) : null;
+    if (!p || !body || !anchorL || p.layout.kind !== "circular") return false;
+    const anchor = add(body.pos, rotate(anchorL, body.angle));
+    const off = this.toLocalVec(body, sub(centre, anchor));
+    if (len(off) < 1e-6) return false;
+    p.layout.centre = off;
+    this.syncPattern(p);
+    return true;
+  }
+
+  /** Delete a pattern **and its members**; the seed stays as a plain hole / joint. */
+  removePattern(id: number): void {
+    const p = this.getPattern(id);
+    if (!p) return;
+    this.patterns = this.patterns.filter((x) => x.id !== id); // record first: no hooks re-enter
+    const body = this.getBody(p.bodyId);
+    if (p.seed.kind === "hole") {
+      if (body) this.dropHoles(body, p.members);
+    } else {
+      for (const jid of p.members) this.removeJoint(jid);
+    }
+    this.prunePatternRefs();
+  }
+
+  /** Make a pattern's members independent: the record goes, every hole / joint stays. */
+  dissolvePattern(id: number): void {
+    this.patterns = this.patterns.filter((x) => x.id !== id);
+    this.prunePatternRefs();
+  }
+
+  /** Dissolve every pattern on a body (the body's holes / joints become plain again). */
+  private dissolvePatternsOfBody(bodyId: number): void {
+    this.patterns = this.patterns.filter((p) => p.bodyId !== bodyId);
+    this.prunePatternRefs();
+  }
+
+  /** Drop sketch constraints / measurements whose pattern-axis reference is gone. */
+  private prunePatternRefs(): void {
+    const dead = (r: MeasureRef | null): boolean =>
+      !!r && r.kind === "patternAxis" && !this.resolveMeasureRef(r);
+    this.sketch = this.sketch.filter((c) => !dead(c.refA) && !dead(c.refB));
+    this.measurements = this.measurements.filter((mm) => !dead(mm.refA) && !dead(mm.refB));
+  }
+
+  /**
+   * Re-derive a pattern's members from its seed + layout: the member list grows or
+   * shrinks to the layout's count, and every member takes the seed's shape (holes:
+   * control polygon, radius, per-corner radii, rounding) carried by its motion.
+   * Called from the body / joint edit paths whenever the seed may have changed.
+   */
+  private syncPattern(p: Pattern): void {
+    if (this.syncingPatterns) return;
+    const body = this.getBody(p.bodyId);
+    const anchor = body ? this.patternAnchorLocal(p) : null;
+    if (!body || !anchor) return;
+    const motions = patternLocalMotions(p.layout, anchor);
+    this.syncingPatterns = true;
+    try {
+      if (p.seed.kind === "hole") {
+        const seed = body.holes![p.seed.hole];
+        if (p.members.length > motions.length) {
+          const extra = p.members.slice(motions.length);
+          p.members = p.members.slice(0, motions.length);
+          this.dropHoles(body, extra); // remaps this pattern's surviving member indices too
+        }
+        while (p.members.length < motions.length) {
+          body.holes!.push({ controlLocal: [], radius: seed.radius });
+          p.members.push(body.holes!.length - 1);
+        }
+        p.members.forEach((hi, k) => {
+          const h = body.holes![hi];
+          h.controlLocal = seed.controlLocal.map(motions[k]);
+          h.radius = seed.radius;
+          if (seed.radii) h.radii = [...seed.radii];
+          else delete h.radii;
+          if (seed.round) h.round = seed.round;
+          else delete h.round;
+        });
+        this.rebuildBody(body);
+      } else {
+        const seedJ = this.getJoint(p.seed.jointId)!;
+        if (p.members.length > motions.length) {
+          const extra = p.members.slice(motions.length);
+          p.members = p.members.slice(0, motions.length);
+          for (const jid of extra) this.removeJoint(jid);
+        }
+        while (p.members.length < motions.length) {
+          const j: Joint = { id: this.id(), bodyId: body.id, local: vec(anchor.x, anchor.y) };
+          this.joints.push(j);
+          p.members.push(j.id);
+        }
+        p.members.forEach((jid, k) => {
+          const j = this.getJoint(jid);
+          if (!j) return;
+          j.local = motions[k](seedJ.local);
+          const w = this.jointWorld(j);
+          for (const c of this.constraints) {
+            if (c.kind === "ground" && c.joint === j.id) c.anchor = vec(w.x, w.y);
+          }
+        });
+      }
+    } finally {
+      this.syncingPatterns = false;
+    }
+  }
+
+  /** Re-derive every pattern of a body (a shape / seed change) — the rebuild hook. */
+  private syncPatternsOfBody(bodyId: number): void {
+    if (this.syncingPatterns) return;
+    for (const p of this.patterns) if (p.bodyId === bodyId) this.syncPattern(p);
+  }
+
+  /**
+   * Remove several holes of a body at once. Measurement / sketch refs on a removed hole
+   * are dropped and refs on later holes shift down; patterns on the body follow the same
+   * renumbering — one whose **seed** is removed dissolves (its members stay as plain holes).
+   */
+  private dropHoles(body: Body, gone: number[]): void {
+    const set = new Set(gone.filter((h) => body.holes && h >= 0 && h < body.holes.length));
+    if (!body.holes || set.size === 0) return;
+    const map = new Map<number, number>();
+    let k = 0;
+    for (let i = 0; i < body.holes.length; i++) if (!set.has(i)) map.set(i, k++);
+    body.holes = body.holes.filter((_, i) => !set.has(i));
+    body.holesLocal = body.holesLocal?.filter((_, i) => !set.has(i));
+    if (body.holes.length === 0) {
+      delete body.holes;
+      delete body.holesLocal;
+    }
+    const onHole = (ref: MeasureRef | null): ref is MeasureRef & { hole: number } =>
+      !!ref && (ref.kind === "vertex" || ref.kind === "edge") && ref.bodyId === body.id && ref.hole !== undefined;
+    const refGone = (ref: MeasureRef | null): boolean => onHole(ref) && set.has(ref.hole);
+    const remap = (ref: MeasureRef | null): void => {
+      if (onHole(ref)) ref.hole = map.get(ref.hole)!;
+    };
+    this.measurements = this.measurements.filter((m) => !refGone(m.refA) && !refGone(m.refB));
+    this.sketch = this.sketch.filter((c) => !refGone(c.refA) && !refGone(c.refB));
+    for (const m of this.measurements) { remap(m.refA); remap(m.refB); }
+    for (const c of this.sketch) { remap(c.refA); remap(c.refB); }
+    this.patterns = this.patterns.filter((p) => {
+      if (p.bodyId !== body.id || p.seed.kind !== "hole") return true;
+      if (set.has(p.seed.hole)) return false; // seed gone → the pattern dissolves
+      p.seed.hole = map.get(p.seed.hole)!;
+      p.members = p.members.filter((h) => !set.has(h)).map((h) => map.get(h)!);
+      return true;
+    });
+    this.prunePatternRefs(); // a dissolved pattern's axis constraints go with it
     this.rebuildBody(body);
   }
 
+  /** Whether a hole loop of `body` fits: inside the outer outline and clear of every other hole. */
+  private holeLoopFits(outer: Vec2[], loop: Vec2[], others: Vec2[][]): boolean {
+    if (!loop.every((p) => pointInPolygon(p, outer))) return false;
+    const bb = boundsOf(loop);
+    return !others.some((o) => {
+      const ob = boundsOf(o);
+      if (bb.min.x > ob.max.x || bb.max.x < ob.min.x || bb.min.y > ob.max.y || bb.max.y < ob.min.y) return false;
+      return loop.some((p) => pointInPolygon(p, o)) || o.some((p) => pointInPolygon(p, loop));
+    });
+  }
+
+  /** A pattern resolved to world geometry (labels, handles, member fit), or null if broken. */
+  patternInfo(id: number): PatternInfo | null {
+    const p = this.getPattern(id);
+    const body = p ? this.getBody(p.bodyId) : undefined;
+    const anchorL = p ? this.patternAnchorLocal(p) : null;
+    if (!p || !body || !anchorL) return null;
+    const toWorld = (q: Vec2): Vec2 => add(body.pos, rotate(q, body.angle));
+    const anchor = toWorld(anchorL);
+    const outer = this.bodyWorldVerts(body);
+    let members: PatternInfo["members"];
+    if (p.seed.kind === "hole") {
+      const loops = this.bodyHolesWorld(body);
+      members = p.members.map((hi) => {
+        const loop = loops[hi];
+        const others = loops.filter((_, i) => i !== hi);
+        return { point: toWorld(centroidOfPoints(body.holes![hi].controlLocal)), ok: !!loop && this.holeLoopFits(outer, loop, others) };
+      });
+    } else {
+      const onBody = this.joints.filter((j) => j.bodyId === body.id);
+      members = p.members.map((jid) => {
+        const j = this.getJoint(jid);
+        const w = j ? this.jointWorld(j) : anchor;
+        const ok =
+          !!j && pointInPolygon(w, outer) &&
+          !onBody.some((o) => o.id !== jid && dist(this.jointWorld(o), w) <= PATTERN_JOINT_EPS);
+        return { point: w, ok };
+      });
+    }
+    if (p.layout.kind === "linear") {
+      return {
+        id: p.id, bodyId: body.id, kind: "linear", anchor, circular: null, members,
+        axes: p.layout.axes.map((a) => ({
+          end: add(anchor, rotate(scale(a.step, a.count - 1), body.angle)),
+          count: a.count,
+          step: len(a.step),
+        })),
+      };
+    }
+    const l = p.layout;
+    return {
+      id: p.id, bodyId: body.id, kind: "circular", anchor, axes: [], members,
+      circular: {
+        centre: add(anchor, rotate(l.centre, body.angle)),
+        radius: len(l.centre),
+        count: l.count,
+        angleDeg: l.angleStep === undefined ? null : (-l.angleStep * 180) / Math.PI,
+        rotate: l.rotate,
+      },
+    };
+  }
+
+  /**
+   * Preview a layout for a UI seed (world coordinates in, world geometry out) without
+   * creating anything: the seed's anchor / outline and every would-be instance with its
+   * fit. `axis` previews a **second** axis added to an existing linear pattern.
+   */
+  patternPreview(
+    seed: PatternSeed,
+    spec:
+      | { kind: "linear"; target: Vec2; count: number; axis?: number }
+      | { kind: "circular"; centre: Vec2; count: number }
+  ): PatternPreview | null {
+    const body = this.patternSeedBody(seed);
+    const anchor = body ? this.patternSeedAnchor(seed) : null;
+    if (!body || !anchor) return null;
+    const anchorL = rotate(sub(anchor, body.pos), -body.angle);
+    let layout: PatternLayout;
+    if (spec.kind === "linear") {
+      const step = this.toLocalVec(body, sub(spec.target, anchor));
+      if (len(step) < 1e-6) return null;
+      const axes: PatternAxis[] = [];
+      if (spec.axis !== undefined) {
+        const p = this.getPattern(spec.axis);
+        if (p?.layout.kind === "linear") axes.push(...p.layout.axes.map((a) => ({ count: a.count, step: a.step })));
+        // A second direction parallel to the first is refused by addPatternAxis: no preview.
+        if (axes[0] && Math.abs(cross(normalize(axes[0].step), normalize(step))) < 1e-3) return null;
+      }
+      axes.push({ count: this.clampCount(spec.count, axes[0]?.count ?? 1), step });
+      layout = { kind: "linear", axes };
+    } else {
+      const off = this.toLocalVec(body, sub(spec.centre, anchor));
+      if (len(off) < 1e-6) return null;
+      layout = { kind: "circular", centre: off, count: this.clampCount(spec.count), rotate: true };
+    }
+    const motions = patternLocalMotions(layout, anchorL);
+    const toWorld = (q: Vec2): Vec2 => add(body.pos, rotate(q, body.angle));
+    const outer = this.bodyWorldVerts(body);
+    if (seed.kind === "hole") {
+      const existing = this.patternOfHole(seed.bodyId, seed.hole)?.pattern;
+      const loops = this.bodyHolesWorld(body);
+      // An existing pattern's members are being re-laid — they don't count as obstacles.
+      const memberSet = new Set(existing?.members ?? []);
+      const obstacles = loops.filter((_, i) => i !== seed.hole && !memberSet.has(i));
+      const seedLocal = body.holesLocal![seed.hole];
+      const instances = motions.map((m) => {
+        const loop = seedLocal.map((q) => toWorld(m(q)));
+        const ok = this.holeLoopFits(outer, loop, obstacles);
+        if (ok) obstacles.push(loop);
+        return { point: toWorld(m(anchorL)), loop, ok };
+      });
+      return { anchor, seedLoop: loops[seed.hole], instances };
+    }
+    const existing = this.patternOfJoint(seed.jointId)?.pattern;
+    const memberSet = new Set(existing?.members ?? []);
+    const taken = this.joints
+      .filter((j) => j.bodyId === body.id && j.id !== seed.jointId && !memberSet.has(j.id))
+      .map((j) => this.jointWorld(j));
+    const instances = motions.map((m) => {
+      const point = toWorld(m(anchorL));
+      const ok = pointInPolygon(point, outer) && !taken.some((q) => dist(q, point) <= PATTERN_JOINT_EPS);
+      if (ok) taken.push(point);
+      return { point, loop: null, ok };
+    });
+    return { anchor, seedLoop: null, instances };
+  }
 
   // --- split / combine ------------------------------------------------------
 
@@ -1065,6 +1755,10 @@ export class Scene {
       }
     }
 
+    // Patterns are index-bound to this body's holes, which the split renumbers: their
+    // members become plain holes / joints on whichever side they land.
+    this.dissolvePatternsOfBody(bodyId);
+
     // --- side B: a new body right after A in the z-order ---
     const def = shape.radius;
     const bBody = this.addBody(
@@ -1219,6 +1913,7 @@ export class Scene {
     }
     const result = union.regions[0];
     const survivor = bodies[0];
+    for (const b of bodies) this.dissolvePatternsOfBody(b.id); // hole indices are rebuilt below
     const absorbed = bodies.slice(1);
 
     // --- radii: a result corner that is an unchanged input corner keeps that radius ---
@@ -1850,6 +2545,12 @@ export class Scene {
         const w = (i: number) => add(b.pos, rotate(ctrl[i], b.angle));
         return { kind: "line", a: w(ref.index), b: w((ref.index + 1) % ctrl.length) };
       }
+      case "patternAxis": {
+        // The dotted axis line: from the seed's anchor to the last instance along it.
+        const info = this.patternInfo(ref.patternId);
+        const ax = info?.axes[ref.axis];
+        return info && ax ? { kind: "line", a: clone(info.anchor), b: clone(ax.end) } : null;
+      }
       case "guidePoint": {
         const g = this.getGuide(ref.guideId);
         return g ? { kind: "point", p: clone(g[ref.which]) } : null;
@@ -2018,7 +2719,7 @@ export class Scene {
     refB?: MeasureRef
   ): SketchConstraint | null {
     const isPoint = (r: MeasureRef) => r.kind === "joint" || r.kind === "vertex" || r.kind === "guidePoint";
-    const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
+    const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
     let b = refB ?? null;
     if (kind === "coincident") {
       if (!b) return null;
@@ -2199,6 +2900,11 @@ export class Scene {
     });
     const attached = this.joints.filter((j) => j.bodyId === bodyId);
     for (const j of attached) j.local = scale(j.local, factor);
+    for (const p of this.patterns) {
+      if (p.bodyId !== bodyId) continue;
+      if (p.layout.kind === "linear") for (const a of p.layout.axes) a.step = scale(a.step, factor);
+      else p.layout.centre = scale(p.layout.centre, factor);
+    }
     this.rebuildBody(body); // re-anchors joints at their (already scaled) world positions
     const owned = new Set(attached.map((j) => j.id));
     for (const c of this.constraints) {
@@ -2284,6 +2990,21 @@ export class Scene {
   bodyAt(p: Vec2): Body | undefined {
     for (let i = this.bodies.length - 1; i >= 0; i--) {
       if (pointInPolygon(p, this.bodyWorldVerts(this.bodies[i]))) return this.bodies[i];
+    }
+    return undefined;
+  }
+
+  /**
+   * The hole under a world point: the topmost body one of whose cut-outs contains it,
+   * with that hole's index. (Picking elsewhere treats cut-outs as body material — this
+   * is for tools that address a hole itself, like Pattern.)
+   */
+  holeAt(p: Vec2): { body: Body; hole: number } | undefined {
+    for (let i = this.bodies.length - 1; i >= 0; i--) {
+      const body = this.bodies[i];
+      if (!body.holesLocal || !pointInPolygon(p, this.bodyWorldVerts(body))) continue;
+      const hole = this.bodyHolesWorld(body).findIndex((loop) => pointInPolygon(p, loop));
+      if (hole >= 0) return { body, hole };
     }
     return undefined;
   }
@@ -2403,6 +3124,8 @@ export class Scene {
     for (const c of this.constraints) {
       if (c.kind === "ground" && c.joint === j.id) c.anchor = vec(w.x, w.y);
     }
+    const pj = this.patternOfJoint(j.id);
+    if (pj?.role === "seed") this.syncPattern(pj.pattern); // the array follows its seed
   }
 
   /**
@@ -2462,6 +3185,20 @@ export class Scene {
     // Bake the reflected world geometry back in at angle 0 (a reflection isn't a rotation,
     // so the prior angle no longer applies), then let rebuildBody re-derive shape/mass and
     // re-anchor joints to their now-reflected world positions.
+    // Pattern layouts are body-local vectors: take them through the same reflection
+    // (world → reflect → re-baked at angle 0); a fixed circular step flips its sense.
+    const reflectVec = (v: Vec2): Vec2 => {
+      const w = rotate(v, body.angle);
+      return axis === "h" ? vec(-w.x, w.y) : vec(w.x, -w.y);
+    };
+    for (const p of this.patterns) {
+      if (p.bodyId !== bodyId) continue;
+      if (p.layout.kind === "linear") for (const a of p.layout.axes) a.step = reflectVec(a.step);
+      else {
+        p.layout.centre = reflectVec(p.layout.centre);
+        if (p.layout.angleStep !== undefined) p.layout.angleStep = -p.layout.angleStep;
+      }
+    }
     body.angle = 0;
     body.controlLocal = ctrlWorld.map((p) => sub(p, c));
     // The reversal renumbers the corners (vertex i → n−1−i), so per-corner radius
@@ -2828,6 +3565,10 @@ export class Scene {
           return bodyIdSet.has(r.bodyId);
         case "rail":
           return clippedSliders.has(r.sliderId);
+        case "patternAxis": {
+          const p = this.getPattern(r.patternId);
+          return !!p && bodyIdSet.has(p.bodyId);
+        }
         case "guidePoint":
         case "guideLine":
           return false; // guides don't travel with a selection clip
@@ -2885,6 +3626,15 @@ export class Scene {
       groups,
       sketch,
       dims,
+      patterns: this.patterns
+        .filter((p) => bodyIdSet.has(p.bodyId))
+        .map((p) => ({
+          tmp: p.id,
+          body: p.bodyId,
+          seed: p.seed.kind === "hole" ? { kind: "hole" as const, hole: p.seed.hole } : { kind: "joint" as const, joint: p.seed.jointId },
+          layout: rotateLayout(cloneLayout(p.layout), this.getBody(p.bodyId)!.angle),
+          members: [...p.members],
+        })),
     };
   }
 
@@ -2986,6 +3736,28 @@ export class Scene {
       const jids = g.joints.map((t) => idMap.get(t)).filter((x): x is number => x !== undefined);
       if (bids.length + jids.length >= 2) this.addGroup(bids, jids);
     }
+    // Patterns: the pasted bodies keep their hole order and sit at angle 0, so the
+    // world-oriented layout vectors apply as-is; joint members map through idMap.
+    const patternIdMap = new Map<number, number>(); // tmp pattern id → new pattern id
+    for (const pc of clip.patterns ?? []) {
+      const bid = bodyIdMap.get(pc.body);
+      if (bid === undefined) continue;
+      let seed: Pattern["seed"];
+      if (pc.seed.kind === "hole") seed = { kind: "hole", hole: pc.seed.hole };
+      else {
+        const jid = idMap.get(pc.seed.joint);
+        if (jid === undefined) continue;
+        seed = { kind: "joint", jointId: jid };
+      }
+      const members =
+        pc.seed.kind === "hole"
+          ? [...pc.members]
+          : pc.members.map((t) => idMap.get(t)).filter((x): x is number => x !== undefined);
+      const p: Pattern = { id: this.id(), bodyId: bid, seed, layout: cloneLayout(pc.layout), members };
+      this.patterns.push(p);
+      patternIdMap.set(pc.tmp, p.id);
+      this.syncPattern(p);
+    }
     // Recreate the clipped sketch constraints / driving dimensions on the new elements.
     // Everything they express is translation-invariant, so the pasted geometry already
     // satisfies them — no solve needed. Vertex/edge indices carry over unchanged
@@ -3001,13 +3773,18 @@ export class Scene {
         case "bodyPoint": {
           const bid = bodyIdMap.get(r.bodyId);
           if (bid === undefined) return null;
-          return r.kind === "bodyPoint"
-            ? { kind: "bodyPoint", bodyId: bid, local: clone(r.local) }
-            : { kind: r.kind, bodyId: bid, index: r.index };
+          if (r.kind === "bodyPoint") return { kind: "bodyPoint", bodyId: bid, local: clone(r.local) };
+          return r.hole === undefined
+            ? { kind: r.kind, bodyId: bid, index: r.index }
+            : { kind: r.kind, bodyId: bid, index: r.index, hole: r.hole }; // hole refs keep their hole
         }
         case "rail": {
           const id = sliderIdMap.get(r.sliderId);
           return id === undefined ? null : { kind: "rail", sliderId: id };
+        }
+        case "patternAxis": {
+          const id = patternIdMap.get(r.patternId);
+          return id === undefined ? null : { kind: "patternAxis", patternId: id, axis: r.axis };
         }
         case "guidePoint":
         case "guideLine":
@@ -3187,6 +3964,10 @@ export class Scene {
         const c = this.constraints.find((x) => x.kind === "slider" && x.id === ref.sliderId);
         if (!c || c.kind !== "slider") return null;
         return this.refRigidUnitKey({ kind: "joint", jointId: c.railA });
+      }
+      case "patternAxis": {
+        const p = this.getPattern(ref.patternId);
+        return p ? bodyKey(p.bodyId) : null;
       }
       default:
         return null; // guides aren't rigid material
@@ -3850,6 +4631,7 @@ export class Scene {
   /** Remove a body along with its joints, pruning the constraints that used them. */
   removeBody(id: number): void {
     const removed = new Set(this.joints.filter((j) => j.bodyId === id).map((j) => j.id));
+    this.patterns = this.patterns.filter((p) => p.bodyId !== id);
     this.bodies = this.bodies.filter((b) => b.id !== id);
     this.joints = this.joints.filter((j) => j.bodyId !== id);
     this.pruneConstraints(removed);
@@ -3859,6 +4641,14 @@ export class Scene {
 
   /** Remove a single joint, pruning the constraints (and group memberships) that used it. */
   removeJoint(id: number): void {
+    // A pattern member is derived geometry: deleting one deletes the whole array (the
+    // seed stays); deleting the seed dissolves the pattern (its members stay).
+    const pj = this.patternOfJoint(id);
+    if (pj?.role === "member") {
+      this.removePattern(pj.pattern.id);
+      return;
+    }
+    if (pj?.role === "seed") this.dissolvePattern(pj.pattern.id);
     this.joints = this.joints.filter((j) => j.id !== id);
     this.pruneConstraints(new Set([id]));
     this.pruneGroups();
@@ -3911,6 +4701,7 @@ export class Scene {
     this.groups = [];
     this.guides = [];
     this.instances = [];
+    this.patterns = [];
     if (dropComponents) this.components = [];
     this.nextId = 1;
   }
@@ -3938,6 +4729,7 @@ export class Scene {
       groups: this.groups,
       guides: this.guides,
       instances: this.instances,
+      patterns: this.patterns,
     };
   }
 
@@ -4022,6 +4814,10 @@ export class Scene {
       return out;
     });
     this.joints = data.joints.map((j) => ({ ...j, local: vec(j.local.x, j.local.y) }));
+    // Patterns arrived in v19; older files simply have none. Records are validated now
+    // (measurement / sketch refs below may name a pattern axis); members are re-derived
+    // at the end, once the id counter is set (a sync may mint new member joints).
+    this.patterns = Array.isArray(data.patterns) ? data.patterns.flatMap((p) => this.sanitizePattern(p)) : [];
     // Sliders: drop the legacy origin+dir form (no railA); migrate the earlier
     // single-`slider` rider field to the `riders` array; normalize riders to an array.
     // `locked` (orientation-locked riders) arrived in v17 — older files have none, and
@@ -4113,8 +4909,54 @@ export class Scene {
       ...this.groups.map((g) => g.id),
       ...this.guides.map((g) => g.id),
       ...this.instances.map((i) => i.id),
+      ...(Array.isArray(data.patterns) ? data.patterns.map((p) => (p && typeof p.id === "number" ? p.id : 0)) : []),
     ];
     this.nextId = (ids.length ? Math.max(...ids) : 0) + 1;
+    // Re-derive every pattern's members from its seed (repairs a hand-edited count or a
+    // stale member list); pattern records were validated above.
+    for (const p of this.patterns) this.syncPattern(p);
+  }
+
+  /** A loaded pattern record validated + deep-cloned, or nothing when it can't be trusted. */
+  private sanitizePattern(raw: unknown): Pattern[] {
+    const p = raw as Partial<Pattern> | null;
+    if (!p || typeof p.id !== "number" || typeof p.bodyId !== "number" || !p.seed || !p.layout) return [];
+    const body = this.getBody(p.bodyId);
+    if (!body) return [];
+    const isVec = (v: unknown): v is Vec2 =>
+      !!v && typeof (v as Vec2).x === "number" && typeof (v as Vec2).y === "number" &&
+      Number.isFinite((v as Vec2).x) && Number.isFinite((v as Vec2).y);
+    let seed: Pattern["seed"];
+    if (p.seed.kind === "hole") {
+      if (typeof p.seed.hole !== "number" || !body.holes?.[p.seed.hole]) return [];
+      seed = { kind: "hole", hole: p.seed.hole };
+    } else if (p.seed.kind === "joint") {
+      if (typeof p.seed.jointId !== "number" || this.getJoint(p.seed.jointId)?.bodyId !== body.id) return [];
+      seed = { kind: "joint", jointId: p.seed.jointId };
+    } else return [];
+    let layout: PatternLayout;
+    const l = p.layout as Partial<Extract<PatternLayout, { kind: "linear" }>> & Partial<Extract<PatternLayout, { kind: "circular" }>>;
+    if (l.kind === "linear") {
+      if (!Array.isArray(l.axes)) return [];
+      const axes = l.axes
+        .filter((a) => a && typeof a.count === "number" && isVec(a.step) && len(a.step) >= 1e-6)
+        .slice(0, 2)
+        .map((a) => ({ count: this.clampCount(a.count), step: vec(a.step.x, a.step.y) }));
+      if (axes.length === 0) return [];
+      layout = { kind: "linear", axes };
+    } else if (l.kind === "circular") {
+      if (!isVec(l.centre) || typeof l.count !== "number" || len(l.centre) < 1e-6) return [];
+      layout = { kind: "circular", centre: vec(l.centre.x, l.centre.y), count: this.clampCount(l.count), rotate: l.rotate !== false };
+      if (typeof l.angleStep === "number" && Number.isFinite(l.angleStep) && Math.abs(l.angleStep) >= 1e-9) layout.angleStep = l.angleStep;
+    } else return [];
+    const members = (Array.isArray(p.members) ? p.members : []).filter(
+      (m): m is number =>
+        typeof m === "number" &&
+        (seed.kind === "hole"
+          ? m !== seed.hole && !!body.holes?.[m]
+          : m !== seed.jointId && this.getJoint(m)?.bodyId === body.id)
+    );
+    return [{ id: p.id, bodyId: body.id, seed, layout, members: [...new Set(members)] }];
   }
 
   /** Snapshot of every body's pose, for save/restore around a simulation run. */
@@ -4233,6 +5075,8 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
       );
     case "guideLine":
       return a.guideId === (b as { guideId: number }).guideId;
+    case "patternAxis":
+      return a.patternId === (b as { patternId: number }).patternId && a.axis === (b as { axis: number }).axis;
     default:
       return false;
   }
