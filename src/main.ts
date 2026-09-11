@@ -1,6 +1,22 @@
 import "./style.css";
 import { notify } from "./notify";
 import {
+  FSDirectoryHandle,
+  FSFileHandle,
+  ensurePermission,
+  fsDirectorySupported,
+  fsSupported,
+  handleFromDrop,
+  listFiles,
+  loadHandle,
+  pickDirectory,
+  pickOpenFile,
+  pickSaveFile,
+  storeHandle,
+  writeFile,
+  writeToDirectory,
+} from "./filestore";
+import {
   Scene,
   SceneData,
   Body,
@@ -1293,13 +1309,14 @@ document.getElementById("clear-btn")!.addEventListener("click", () => {
   // In a definition context, clear only that definition's content (the document's
   // component list survives); at the root, clear the whole document.
   scene.clear(editPath.length === 0);
+  if (editPath.length === 0) setDocFile(null, null); // a fresh document: Ctrl+S asks where to save
   resetTransient();
   markDirty();
   updateCompPanel();
 });
 document.getElementById("fit-btn")!.addEventListener("click", fitView);
-document.getElementById("save-btn")!.addEventListener("click", saveToFile);
-document.getElementById("load-btn")!.addEventListener("click", () => fileInput.click());
+document.getElementById("save-btn")!.addEventListener("click", (e) => void saveToFile(e.shiftKey));
+document.getElementById("load-btn")!.addEventListener("click", () => void openFile());
 // Copy/paste are keyboard-only (Ctrl/Cmd+C / V); no toolbar buttons.
 document.getElementById("mirror-h-btn")!.addEventListener("click", () => mirrorSelection("h"));
 document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorSelection("v"));
@@ -1693,6 +1710,8 @@ function markDirty(): void {
   pushHistory();
   scheduleAutosave();
   updateCompPanel();
+  setDocModified(true);
+  armBackupTimer();
 }
 
 /** Load a whole document and re-enter the given editing path (root when empty). */
@@ -1714,6 +1733,8 @@ function setDocument(doc: SceneData, path: number[]): void {
   updateCrumbBar();
   updateCompPanel();
   scheduleAutosave();
+  setDocModified(true); // undo / redo / load: the on-disk file no longer matches
+  armBackupTimer();
 }
 
 // Undo / redo apply to the drawn layout only (draw mode), not a running simulation.
@@ -1746,8 +1767,105 @@ function timeStamp(): string {
   return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
 }
 
-function saveToFile(): void {
-  downloadText(JSON.stringify(canonicalData(), null, 2), `mechanism-${timeStamp()}.json`, "application/json");
+// --- the document's file (Ctrl+S) -------------------------------------------
+/**
+ * Where Ctrl+S writes. In Chromium browsers the File System Access API gives a real
+ * file handle: the first save (or Save as…) asks for a location, later saves overwrite
+ * that file silently, and Load / drop bind the loaded file the same way. The handle is
+ * remembered in IndexedDB so a reload (which restores the localStorage autosave) keeps
+ * the binding. Without the API (Firefox, Safari) a save is a download named after the
+ * document with a timestamp, as before.
+ */
+const DOC_HANDLE_KEY = "document";
+const saveBtn = document.getElementById("save-btn") as HTMLButtonElement;
+let docHandle: FSFileHandle | null = null;
+/** Display name of the document's file (also set for files loaded without a handle). */
+let docName: string | null = null;
+/** Changed since the last save to / load from a file (title shows a bullet). */
+let docModified = false;
+
+/** The document as saved to disk (pretty JSON, same for saves and backups). */
+function documentText(): string {
+  return JSON.stringify(canonicalData(), null, 2);
+}
+
+/** File-name stem of the document: its file's name without `.json`, else `mechanism`. */
+function docStem(): string {
+  const base = (docName ?? "")
+    .replace(/\.json$/i, "")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .trim();
+  return base || "mechanism";
+}
+
+function setDocFile(handle: FSFileHandle | null, name: string | null): void {
+  docHandle = handle;
+  docName = name ?? handle?.name ?? null;
+  if (fsSupported()) void storeHandle(DOC_HANDLE_KEY, handle);
+  updateDocTitle();
+}
+
+function setDocModified(on: boolean): void {
+  if (docModified === on) return;
+  docModified = on;
+  updateDocTitle();
+}
+
+function updateDocTitle(): void {
+  document.title = `${docModified ? "• " : ""}${docName ?? "Untitled"} — Disjointed`;
+  const target = docHandle ? `to ${docHandle.name}` : "mechanism to a file";
+  saveBtn.title = `Save ${target} (Ctrl+S) — Shift-click or Ctrl+Shift+S to save as a new file`;
+}
+
+/** The document on disk now matches `text`: clear the modified mark, nothing to back up. */
+function markSaved(text: string): void {
+  lastBackupText = text;
+  clearBackupTimer(); // the file is current — the next change starts a new countdown
+  refreshBackupPanel();
+  setDocModified(false);
+}
+
+/**
+ * Save the document. Writes the bound file in place; `saveAs` (or no bound file, or
+ * lost access to it) asks for a location first. Falls back to a download.
+ */
+async function saveToFile(saveAs = false): Promise<void> {
+  const text = documentText();
+  if (!fsSupported()) {
+    downloadText(text, `${docStem()}-${timeStamp()}.json`, "application/json");
+    markSaved(text);
+    return;
+  }
+  let handle = saveAs ? null : docHandle;
+  try {
+    if (handle && !(await ensurePermission(handle, true))) handle = null; // access lost — pick again
+    if (!handle) {
+      handle = await pickSaveFile(docName ?? `mechanism-${timeStamp()}.json`);
+      if (!handle) return; // cancelled
+    }
+    await writeFile(handle, text);
+  } catch (err) {
+    notify(`Could not save${handle ? ` ${handle.name}` : ""}: ${(err as Error).message}`, "error");
+    return;
+  }
+  setDocFile(handle, null);
+  markSaved(text);
+  notify(`Saved ${handle.name}`, "info");
+}
+
+/** Load a document via the file picker (binding the file for Ctrl+S when possible). */
+async function openFile(): Promise<void> {
+  if (!fsSupported()) {
+    fileInput.click();
+    return;
+  }
+  try {
+    const handle = await pickOpenFile();
+    if (!handle) return; // cancelled
+    await loadFromFile(await handle.getFile(), handle);
+  } catch (err) {
+    notify(`Could not open file: ${(err as Error).message}`, "error");
+  }
 }
 
 // --- cut-file export (src/export.ts) -----------------------------------------
@@ -1772,6 +1890,7 @@ function exportTargets(): Body[] {
 
 function setExportPanelVisible(on: boolean): void {
   if (on) {
+    setBackupPanelVisible(false); // the two panels share the corner
     const targets = exportTargets();
     const all = targets.length === scene.bodies.length;
     exportScopeLabel.textContent =
@@ -1841,13 +1960,254 @@ exportPanel.addEventListener("keydown", (e) => {
   else if (e.key === "Enter" && e.target instanceof HTMLInputElement) runExport();
 });
 
-async function loadFromFile(file: File): Promise<void> {
+// --- auto-backup: timestamped copies into a folder ---------------------------------
+/**
+ * The first change after a backup (or save) arms a one-shot timer; `intervalMin`
+ * minutes later `<stem>-backup-<timestamp>.json` is written into the chosen folder and
+ * that document's older backups are pruned down to `keep` (0 = keep all). Saving cancels
+ * a pending backup (the file is up to date). Needs a folder handle
+ * (File System Access API — Chromium); the panel explains when that's unavailable.
+ * Settings live in localStorage, the folder handle in IndexedDB.
+ */
+const BACKUP_SETTINGS_KEY = "disjointed:backup";
+const BACKUP_DIR_KEY = "backupDir";
+const BACKUP_INTERVALS = [1, 2, 5, 10, 15, 30];
+const BACKUP_KEEPS = [0, 5, 10, 20, 50];
+
+interface BackupSettings {
+  enabled: boolean;
+  intervalMin: number;
+  keep: number;
+}
+
+const backupPanel = document.getElementById("backup-panel")!;
+const backupBtn = document.getElementById("backup-btn") as HTMLButtonElement;
+const backupEnabledInput = document.getElementById("backup-enabled") as HTMLInputElement;
+const backupIntervalSelect = document.getElementById("backup-interval") as HTMLSelectElement;
+const backupKeepSelect = document.getElementById("backup-keep") as HTMLSelectElement;
+const backupFolderEl = document.getElementById("backup-folder")!;
+const backupChooseBtn = document.getElementById("backup-choose") as HTMLButtonElement;
+const backupStatusEl = document.getElementById("backup-status")!;
+const backupNextEl = document.getElementById("backup-next")!;
+const backupNowBtn = document.getElementById("backup-now") as HTMLButtonElement;
+
+let backupSettings: BackupSettings = loadBackupSettings();
+let backupDir: FSDirectoryHandle | null = null;
+/** Read/write permission on `backupDir` is currently granted. */
+let backupDirOk = false;
+/** Pending one-shot backup (armed by the first change since the last backup / save). */
+let backupTimer: number | undefined;
+/** Document text of the last backup or save — while unchanged there's nothing to back up. */
+let lastBackupText = "";
+/** Last outcome, shown in the panel. */
+let backupStatus = "";
+/** When the pending backup fires (ms epoch), while one is armed. */
+let backupNextAt: number | null = null;
+let backupBusy = false;
+
+function loadBackupSettings(): BackupSettings {
+  const def: BackupSettings = { enabled: false, intervalMin: 5, keep: 10 };
+  try {
+    const raw = localStorage.getItem(BACKUP_SETTINGS_KEY);
+    if (!raw) return def;
+    const p = JSON.parse(raw) as Partial<BackupSettings>;
+    return {
+      enabled: p.enabled === true,
+      intervalMin: BACKUP_INTERVALS.includes(p.intervalMin as number) ? (p.intervalMin as number) : def.intervalMin,
+      keep: BACKUP_KEEPS.includes(p.keep as number) ? (p.keep as number) : def.keep,
+    };
+  } catch {
+    return def;
+  }
+}
+
+function saveBackupSettings(): void {
+  try {
+    localStorage.setItem(BACKUP_SETTINGS_KEY, JSON.stringify(backupSettings));
+  } catch {
+    /* storage unavailable — settings are session-only */
+  }
+}
+
+/** Backups can actually run: enabled, with a folder we may write to. */
+function backupActive(): boolean {
+  return backupSettings.enabled && backupDir !== null && backupDirOk;
+}
+
+function clearBackupTimer(): void {
+  clearTimeout(backupTimer);
+  backupTimer = undefined;
+  backupNextAt = null;
+}
+
+/** A change happened: start the countdown to a backup, unless one is already pending. */
+function armBackupTimer(): void {
+  if (backupTimer !== undefined || !backupActive()) return;
+  const period = backupSettings.intervalMin * 60_000;
+  backupNextAt = Date.now() + period;
+  backupTimer = window.setTimeout(() => {
+    backupTimer = undefined;
+    backupNextAt = null;
+    void runBackup(false).then(refreshBackupPanel);
+  }, period);
+  refreshBackupPanel();
+}
+
+/** Settings / folder changed: drop any pending countdown and, if the document already
+ *  differs from the last backup, start a fresh one from now. */
+function restartBackupTimer(): void {
+  clearBackupTimer();
+  if (backupActive() && documentText() !== lastBackupText) armBackupTimer();
+  else refreshBackupPanel();
+}
+
+/** Write a backup now. `manual` (the panel button) also backs up an unchanged document
+ *  and may prompt for folder access; the timer stays silent and skips unchanged ones. */
+async function runBackup(manual: boolean): Promise<void> {
+  if (backupBusy) return;
+  if (!backupDir) {
+    if (manual) notify("Choose a backup folder first.");
+    return;
+  }
+  const text = documentText();
+  if (!manual && text === lastBackupText) return; // nothing changed since the last backup / save
+  backupBusy = true;
+  try {
+    if (!(await ensurePermission(backupDir, manual))) {
+      backupDirOk = false;
+      restartBackupTimer();
+      setBackupStatus(`Access to “${backupDir.name}” needs to be re-granted — click “Allow access…”.`);
+      return;
+    }
+    backupDirOk = true;
+    const name = `${docStem()}-backup-${timeStamp()}.json`;
+    await writeToDirectory(backupDir, name, text);
+    lastBackupText = text;
+    await pruneBackups();
+    setBackupStatus(`Last backup ${new Date().toLocaleTimeString()} — ${name}`);
+    if (manual) notify(`Backed up to ${backupDir.name}/${name}`, "info");
+  } catch (err) {
+    setBackupStatus(`Backup failed: ${(err as Error).message}`);
+    if (manual) notify(`Backup failed: ${(err as Error).message}`, "error");
+  } finally {
+    backupBusy = false;
+  }
+}
+
+/** Delete this document's oldest backups beyond the keep count (timestamps sort by name). */
+async function pruneBackups(): Promise<void> {
+  if (!backupDir || backupSettings.keep <= 0) return;
+  const prefix = `${docStem()}-backup-`;
+  const names = (await listFiles(backupDir)).filter((n) => n.startsWith(prefix) && n.endsWith(".json")).sort();
+  for (const n of names.slice(0, Math.max(0, names.length - backupSettings.keep))) {
+    try {
+      await backupDir.removeEntry(n);
+    } catch {
+      /* leave it — pruning is best-effort */
+    }
+  }
+}
+
+function setBackupStatus(text: string): void {
+  backupStatus = text;
+  refreshBackupPanel();
+}
+
+/** Tint the toolbar button while backups are wanted but can't run. */
+function refreshBackupButton(): void {
+  backupBtn.classList.toggle("paused", backupSettings.enabled && !backupActive());
+}
+
+function refreshBackupPanel(): void {
+  refreshBackupButton();
+  if (backupPanel.classList.contains("hidden")) return;
+  const supported = fsDirectorySupported();
+  backupEnabledInput.checked = backupSettings.enabled;
+  backupIntervalSelect.value = String(backupSettings.intervalMin);
+  backupKeepSelect.value = String(backupSettings.keep);
+  backupEnabledInput.disabled = backupIntervalSelect.disabled = backupKeepSelect.disabled = !supported;
+  backupChooseBtn.disabled = backupNowBtn.disabled = !supported;
+  backupFolderEl.textContent = backupDir ? backupDir.name : "none chosen";
+  backupFolderEl.title = backupDir ? backupDir.name : "";
+  backupChooseBtn.textContent = backupDir ? (backupDirOk ? "Change…" : "Allow access…") : "Choose…";
+  let status: string;
+  if (!supported) status = "Not available in this browser — auto-backup needs the File System Access API (Chrome, Edge, Opera).";
+  else if (backupStatus) status = backupStatus;
+  else if (backupActive()) status = `Waiting for changes — a backup is written ${backupSettings.intervalMin} min after the first change.`;
+  else if (!backupSettings.enabled) status = "Off. Backups are named <file>-backup-<date-time>.json.";
+  else if (!backupDir) status = "Choose a folder to start backing up.";
+  else status = `Access to “${backupDir.name}” needs to be re-granted — click “Allow access…”.`;
+  backupStatusEl.textContent = status;
+  backupNextEl.textContent = backupNextAt !== null ? `Next backup at ${new Date(backupNextAt).toLocaleTimeString()}.` : "";
+  backupNextEl.hidden = backupNextAt === null;
+}
+
+function setBackupPanelVisible(on: boolean): void {
+  if (on) setExportPanelVisible(false); // the two panels share the corner
+  backupPanel.classList.toggle("hidden", !on);
+  backupBtn.classList.toggle("active", on);
+  if (on) refreshBackupPanel();
+}
+
+/** Pick (or re-authorize) the backup folder; a user gesture is required. */
+async function chooseBackupFolder(): Promise<void> {
+  try {
+    if (backupDir && !backupDirOk && (await ensurePermission(backupDir, true))) {
+      backupDirOk = true;
+    } else {
+      const dir = await pickDirectory();
+      if (!dir) return; // cancelled
+      backupDir = dir;
+      backupDirOk = true;
+      void storeHandle(BACKUP_DIR_KEY, dir);
+    }
+    backupStatus = "";
+    restartBackupTimer();
+    refreshBackupPanel();
+  } catch (err) {
+    notify(`Could not use that folder: ${(err as Error).message}`, "error");
+  }
+}
+
+backupBtn.addEventListener("click", () => setBackupPanelVisible(backupPanel.classList.contains("hidden")));
+document.getElementById("backup-close")!.addEventListener("click", () => setBackupPanelVisible(false));
+backupChooseBtn.addEventListener("click", () => void chooseBackupFolder());
+backupNowBtn.addEventListener("click", () => void runBackup(true));
+backupEnabledInput.addEventListener("change", () => {
+  backupSettings.enabled = backupEnabledInput.checked;
+  saveBackupSettings();
+  restartBackupTimer();
+  refreshBackupPanel();
+  // Turning it on without a folder (or with a forgotten permission) goes straight to the picker.
+  if (backupSettings.enabled && !backupActive()) void chooseBackupFolder();
+});
+backupIntervalSelect.addEventListener("change", () => {
+  backupSettings.intervalMin = Number(backupIntervalSelect.value);
+  saveBackupSettings();
+  restartBackupTimer();
+  refreshBackupPanel();
+});
+backupKeepSelect.addEventListener("change", () => {
+  backupSettings.keep = Number(backupKeepSelect.value);
+  saveBackupSettings();
+  refreshBackupPanel();
+});
+backupPanel.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") return; // let Ctrl+S save
+  e.stopPropagation(); // keep canvas shortcuts out of the panel's fields
+  if (e.key === "Escape") setBackupPanelVisible(false);
+});
+
+async function loadFromFile(file: File, handle: FSFileHandle | null = null): Promise<void> {
   try {
     const data = JSON.parse(await file.text()) as SceneData;
     applyLoadedScene(data);
   } catch (err) {
     notify(`Could not load file: ${(err as Error).message}`, "error");
+    return;
   }
+  setDocFile(handle, file.name);
+  markSaved(documentText()); // freshly loaded: on disk already, nothing to back up yet
 }
 
 /** Replace the scene with loaded data, returning to a clean draw-mode state at the root. */
@@ -1864,12 +2224,44 @@ function applyLoadedScene(data: SceneData): void {
 }
 
 /** On startup, restore the last autosaved layout if present and valid. */
-function restoreAutosave(): void {
+function restoreAutosave(): boolean {
   try {
     const raw = localStorage.getItem(AUTOSAVE_KEY);
-    if (raw) scene.load(JSON.parse(raw) as SceneData);
+    if (!raw) return false;
+    scene.load(JSON.parse(raw) as SceneData);
+    return true;
   } catch {
-    /* corrupt autosave — start empty */
+    return false; /* corrupt autosave — start empty */
+  }
+}
+
+/**
+ * Startup: re-bind the document's file and the backup folder remembered from the last
+ * session. The file binding only makes sense when the autosave restored that document;
+ * the folder may come back without permission (browsers forget it) — backups then wait
+ * until the user re-grants access from the panel.
+ */
+async function initFileState(restored: boolean): Promise<void> {
+  if (fsSupported()) {
+    const h = await loadHandle<FSFileHandle>(DOC_HANDLE_KEY);
+    if (h && restored) {
+      docHandle = h;
+      docName = h.name;
+    } else if (h) {
+      void storeHandle(DOC_HANDLE_KEY, null);
+    }
+  }
+  setDocModified(false);
+  updateDocTitle();
+  if (fsDirectorySupported()) {
+    backupDir = await loadHandle<FSDirectoryHandle>(BACKUP_DIR_KEY);
+    backupDirOk = backupDir ? await ensurePermission(backupDir, false) : false;
+  }
+  lastBackupText = documentText(); // what's restored is what the last session had; back up changes only
+  restartBackupTimer();
+  refreshBackupButton();
+  if (backupSettings.enabled && backupDir && !backupDirOk) {
+    notify("Auto-backup is paused until folder access is re-granted — open the auto-backup panel (clock button) and click “Allow access…”.");
   }
 }
 
@@ -2355,7 +2747,10 @@ canvas.addEventListener("drop", (e) => {
   if (!file) return;
   const name = file.name.toLowerCase();
   if (name.endsWith(".dxf")) void importDxfFile(file, eventWorld(e));
-  else if (name.endsWith(".json")) void loadFromFile(file);
+  else if (name.endsWith(".json")) {
+    // Must be requested synchronously inside the drop event; binds the file for Ctrl+S.
+    void handleFromDrop(e.dataTransfer).then((h) => loadFromFile(file, h));
+  }
   else notify("Unsupported file type — drop a .dxf (imports as bodies) or a .json (loads a scene).");
 });
 
@@ -4843,6 +5238,18 @@ const TOOL_KEYS: Record<string, Tool> = {
 };
 
 window.addEventListener("keydown", (e) => {
+  // Ctrl/Cmd+S saves (Shift: save as…), Ctrl/Cmd+O opens — from anywhere, fields included,
+  // and always intercepted so the browser doesn't offer to save the web page itself.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
+    e.preventDefault();
+    void saveToFile(e.shiftKey);
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "o") {
+    e.preventDefault();
+    void openFile();
+    return;
+  }
   // Keys typed into a toolbar field (or the inline dimension editor) belong to that
   // field — not to canvas shortcuts like Delete or the tool letters.
   const t = e.target;
@@ -5531,7 +5938,8 @@ function frame(now?: number): void {
 }
 
 resize();
-restoreAutosave();
+const restored = restoreAutosave();
 pushHistory(); // seed the undo history with the initial (restored) layout
+void initFileState(restored);
 updateHint();
 requestAnimationFrame(frame);

@@ -37,6 +37,13 @@ and a converge-to-tolerance solver with **impossible-assembly handling** (ground
 unreachable pins/sliders are isolated, the rest still solves, and the breaks are drawn as red
 dotted lines plus an on-canvas error banner). The solver and shape/edit logic are verified
 by headless tests; the interactive canvas should be confirmed by eye via `npm run dev`.
+**Files**: **Ctrl+S saves in place** — in Chromium browsers the document is bound to a real
+file through the File System Access API (first save / Save as… asks where, later saves
+overwrite silently; Load / Ctrl+O / drop bind the loaded file; the binding survives a
+reload; the title shows `• name` while modified), with a timestamped download as the
+fallback elsewhere; **auto-backup** (clock button) writes `<name>-backup-<time>.json` into a
+user-chosen folder N minutes after the first change since the last backup / save, pruning to
+the last K, with a change-armed countdown shown in its panel.
 **View navigation**: zoom range 0.05×–200×; a **fit-to-screen** button + `F` shortcut frames the
 whole mechanism (bodies, joints, ground anchors) centered with a margin; **Tab** toggles
 draw ↔ simulate mode.
@@ -1320,6 +1327,17 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
   click or the ✕, and the stack keeps at most 4 (oldest dropped). Returns a dismiss function.
   Non-blocking — every former `alert(...)` site was followed by a `return` or nothing, so
   behaviour is unchanged. Styled in `style.css` (`.toast*`, theme-aware).
+- **filestore.ts** — **File System Access API** wrappers (Chromium only; `fsSupported()` /
+  `fsDirectorySupported()` gate every use, callers fall back to downloads / `<input type=file>`).
+  Declares the minimal handle types itself (not in lib.dom yet): `FSFileHandle`,
+  `FSDirectoryHandle`. `pickSaveFile(suggestedName)` / `pickOpenFile()` / `pickDirectory()`
+  return `null` on cancel (AbortError) and rethrow anything else; `ensurePermission(handle,
+  request)` queries read/write permission and — only with `request`, which needs a user
+  gesture — prompts for it; `writeFile`, `writeToDirectory(dir, name, text)`, `listFiles(dir)`;
+  `handleFromDrop(dataTransfer)` (must be called synchronously inside the drop event).
+  `storeHandle(key, handle | null)` / `loadHandle(key)` persist handles across reloads in
+  IndexedDB (`disjointed-fs` / `handles`); a restored handle keeps its `.name` but its
+  permission may come back as "prompt".
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.05..20).
 - **renderer.ts** — **component focus pass** (`highlightOccurrences`): after everything is
@@ -1396,7 +1414,8 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
 - **main.ts** — canvas/DPI setup, toolbar wiring (the toolbar is **icon buttons** — SVG glyphs with
   tooltips; wiring is by id/`data-*`/class, never button text), mode/tool state (tools are one-shot +
   have keyboard shortcuts), select-mode selection / move / delete / vertex-edit, the camera,
-  pointer + key handling, persistence (save/load/autosave) plus a **snapshot undo/redo history**
+  pointer + key handling, persistence (save/load/autosave, the document's **file binding** and
+  the **auto-backup** engine — see Persistence below) plus a **snapshot undo/redo history**
   (`pushHistory`/`undo`/`redo`; `markDirty` records a step + autosaves), and the
   requestAnimationFrame render/solve loop. `timedSolve` captures the solver's `ConstraintBreak`s
   into `solveBreaks`; `updateSimError` shows/hides the red **"Assembly impossible"** banner
@@ -1984,11 +2003,52 @@ Import (drag-and-drop onto the canvas):
   CAD export whose plate + 4 holes reconstruct fully (4 control corners each).
 
 Persistence:
-- **Save** downloads `mechanism-<timestamp>.json`; **Load** opens a `.json` via the file
-  picker (invalid files alert instead of breaking).
-- The drawn layout is autosaved to `localStorage` (debounced) on every mutation and restored
-  on startup. Simulated poses are never saved — save/autosave use the canonical (pre-sim)
-  poses, and loading exits sim and resets the view first.
+- **Save / Ctrl+S** (`saveToFile(saveAs)`, main.ts). With the File System Access API
+  (`fsSupported()`, Chromium) the document is **bound to a file handle** (`docHandle`,
+  `docName`): the first save — or Save as… (Ctrl+Shift+S / Shift-click Save) — opens
+  `showSaveFilePicker`, later saves overwrite the bound file silently, and a toast confirms
+  "Saved name". A handle whose permission lapsed is re-requested inside the save gesture and
+  falls back to the picker if refused. Without the API a save **downloads**
+  `<stem>-<timestamp>.json` (stem = the document's file name without `.json`, sanitized,
+  else `mechanism`). Ctrl+S / Ctrl+O are intercepted before the focused-field guard in the
+  window keydown handler (so they work from toolbar fields and never trigger the browser's
+  own save-page dialog); the backup panel's keydown lets Ctrl+S through.
+- **Load / Ctrl+O** (`openFile()`): `showOpenFilePicker` when available (binding the picked
+  file), else the hidden `<input type=file>`. `loadFromFile(file, handle?)` binds the file
+  (`setDocFile`) and the canvas drop handler passes the dropped `.json`'s handle via
+  `handleFromDrop`. A file loaded without a handle (Firefox, the input fallback) still sets
+  `docName`, so downloads are named after it. Invalid files toast an error.
+- **Modified flag**: `docModified` is set by `markDirty` and `setDocument` (undo / redo /
+  load), cleared by `markSaved` (after a save or a load); `updateDocTitle` renders
+  `• name — Disjointed` and the Save button's tooltip (`Save to name (Ctrl+S) …`).
+  **Clear** at the root unbinds the document (Ctrl+S asks where to save again).
+- **Binding survives reload**: the doc handle is stored in IndexedDB (`storeHandle("document")`)
+  and `initFileState(restored)` re-binds it at startup — only when the localStorage autosave
+  actually restored a document (otherwise the stale handle is dropped). The browser may
+  ask permission once on the next Ctrl+S.
+- **Auto-backup** (clock toolbar button → `#backup-panel`, next to Export; the two panels
+  share the corner and close each other). Settings `{enabled, intervalMin ∈ 1/2/5/10/15/30,
+  keep ∈ 0(all)/5/10/20/50}` in localStorage `disjointed:backup`; the folder handle in
+  IndexedDB (`"backupDir"`). Needs `fsDirectorySupported()` — elsewhere the panel's controls
+  are disabled and the status explains. **Change-armed one-shot timer**: `markDirty` /
+  `setDocument` call `armBackupTimer()`, which (when `backupActive()` = enabled + folder +
+  permission granted, and no timer pending) schedules `runBackup(false)` `intervalMin`
+  minutes out and records `backupNextAt`; later changes don't reset it. On firing, the
+  backup is skipped if `documentText()` equals `lastBackupText` (the text of the last backup
+  or save), else `<stem>-backup-<timestamp>.json` is written to the folder, `lastBackupText`
+  updated, and `pruneBackups()` deletes that stem's oldest `-backup-` files beyond `keep`
+  (timestamps sort lexicographically). `markSaved` clears a pending timer (the file is
+  current). `restartBackupTimer()` (settings / folder changed) clears and re-arms only if
+  the document already differs. "Back up now" (`runBackup(true)`) always writes and may
+  prompt for permission. Startup: `initFileState` loads the folder, queries permission
+  without prompting (`backupDirOk`), seeds `lastBackupText` with the restored document;
+  if enabled but not permitted, the button gets `.paused` (amber) and a toast points to the
+  panel's **Allow access…** button (re-grant needs a gesture). Panel status lines: last
+  result / "Waiting for changes — a backup is written N min after the first change." plus
+  "Next backup at HH:MM:SS." while armed.
+- The drawn layout is also autosaved to `localStorage` (debounced) on every mutation and
+  restored on startup. Simulated poses are never saved — save/backup/autosave use the
+  canonical (pre-sim) poses, and loading exits sim and resets the view first.
 
 ### Solver notes (important design decisions)
 - Each constraint is satisfied with effective-mass positional impulses:

@@ -209,13 +209,16 @@
           </button>
         </div>
         <div class="group">
-          <button id="save-btn" class="icon-btn" title="Save mechanism to a file" aria-label="Save">
+          <button id="save-btn" class="icon-btn" title="Save mechanism to a file (Ctrl+S) — Shift-click or Ctrl+Shift+S to save as a new file" aria-label="Save">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h9l3 3v9H4z"/><path d="M7 4v4h6V5"/><rect x="7" y="11" width="6" height="5"/></svg>
           </button>
           <button id="export-btn" class="icon-btn" title="Export a cut file (DXF / SVG) of the selected bodies — or all bodies when nothing is selected" aria-label="Export cut file">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9"/><path d="M6.5 8.5 10 12l3.5-3.5"/><path d="M4 13v2.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V13"/></svg>
           </button>
-          <button id="load-btn" class="icon-btn" title="Load mechanism from a file" aria-label="Load">
+          <button id="backup-btn" class="icon-btn" title="Auto-backup: periodically write timestamped copies of the mechanism to a folder" aria-label="Auto-backup settings">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6"/><path d="M3.2 3.6v3.2h3.2"/><path d="M10 6.5V10l2.6 1.6"/></svg>
+          </button>
+          <button id="load-btn" class="icon-btn" title="Load mechanism from a file (Ctrl+O)" aria-label="Load">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7a1 1 0 0 1 1-1h3l2 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>
           </button>
           <button id="clear-btn" class="icon-btn icon-btn-danger" title="Delete everything" aria-label="Clear all">
@@ -264,6 +267,46 @@
           <div class="export-actions">
             <button type="button" id="export-cancel">Cancel</button>
             <button type="button" id="export-go" class="active">Export</button>
+          </div>
+        </div>
+        <!-- Auto-backup settings: periodic timestamped copies into a folder the user picks
+             (File System Access API — Chromium only; other browsers see a notice). -->
+        <div id="backup-panel" class="hidden" role="dialog" aria-label="Auto-backup">
+          <div class="export-head">Auto-backup</div>
+          <div class="export-row">
+            <label title="Write a timestamped copy of the mechanism to the backup folder whenever it changed since the last backup">
+              <input type="checkbox" id="backup-enabled" /> Back up every
+              <select id="backup-interval" aria-label="Backup interval">
+                <option value="1">1 min</option>
+                <option value="2">2 min</option>
+                <option value="5" selected>5 min</option>
+                <option value="10">10 min</option>
+                <option value="15">15 min</option>
+                <option value="30">30 min</option>
+              </select>
+            </label>
+            <label title="Older backups of this mechanism are deleted from the folder once there are more than this">
+              <span>Keep the last</span>
+              <select id="backup-keep" aria-label="Backups to keep">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+                <option value="0">all</option>
+              </select>
+              <span>backups</span>
+            </label>
+          </div>
+          <div class="export-row backup-folder-row">
+            <span class="backup-folder-label">Folder:</span>
+            <span id="backup-folder" class="backup-folder-name">none chosen</span>
+            <button type="button" id="backup-choose">Choose…</button>
+          </div>
+          <div id="backup-status" class="export-scope backup-status"></div>
+          <div id="backup-next" class="export-scope backup-status"></div>
+          <div class="export-actions">
+            <button type="button" id="backup-now">Back up now</button>
+            <button type="button" id="backup-close" class="active">Close</button>
           </div>
         </div>
         <nav id="crumb-bar" class="hidden" aria-label="Component editing path"></nav>

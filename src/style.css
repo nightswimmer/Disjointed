@@ -743,7 +743,8 @@ input[type="color"]#body-color::-webkit-color-swatch {
 }
 
 /* --- cut-file export panel (src/export.ts) --------------------------------- */
-#export-panel {
+#export-panel,
+#backup-panel {
   position: absolute;
   top: 10px;
   right: 12px;
@@ -759,37 +760,77 @@ input[type="color"]#body-color::-webkit-color-swatch {
   font-size: 13px;
   user-select: none;
 }
-#export-panel.hidden {
+#export-panel.hidden,
+#backup-panel.hidden {
   display: none;
 }
-#export-panel .export-head {
+#export-panel .export-head,
+#backup-panel .export-head {
   font-weight: 600;
 }
-#export-panel .export-scope {
+#export-panel .export-scope,
+#backup-panel .export-scope {
   color: var(--text-dim);
   margin-top: -6px;
 }
-#export-panel .export-row {
+#export-panel .export-row,
+#backup-panel .export-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-#export-panel .export-row label {
+#export-panel .export-row label,
+#backup-panel .export-row label {
   display: flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
 }
-#export-panel .export-hint {
+#export-panel .export-hint,
+#backup-panel .export-hint {
   color: var(--text-dim);
   margin-left: auto;
 }
-#export-panel input[type="number"] {
+#export-panel input[type="number"],
+#backup-panel input[type="number"] {
   width: 64px;
   cursor: text;
 }
-#export-panel .export-actions {
+#export-panel .export-actions,
+#backup-panel .export-actions {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
+}
+
+/* Auto-backup panel specifics: a folder row with the name ellipsised, a status line,
+   and the toolbar button tinted while backups are enabled but can't run (no folder /
+   access to re-grant). */
+#backup-panel {
+  width: 300px;
+}
+#backup-panel .export-row label select {
+  cursor: pointer;
+}
+#backup-panel .backup-folder-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+#backup-panel .backup-folder-label {
+  color: var(--text-dim);
+}
+#backup-panel .backup-folder-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#backup-panel .backup-status {
+  margin-top: 0;
+  line-height: 1.35;
+}
+#backup-btn.paused {
+  color: #f0b441;
 }

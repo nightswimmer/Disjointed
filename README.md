@@ -470,10 +470,23 @@ hole being dragged out, lands on the nearest corner / midpoint / centre / joint 
 - **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode; turn on **Object snap** to drag by a corner / edge / centre and snap it onto other objects).
 - **Fit to screen** (`F`, or the toolbar button) — frame the whole mechanism centered in the canvas.
 - **Tab** — switch between Draw and Simulate mode.
+- `Ctrl/Cmd+S` save, `Ctrl/Cmd+Shift+S` save as, `Ctrl/Cmd+O` open (see below).
 
-### Save & load
-- **Save** downloads your mechanism as a `.json` file; **Load** opens one back up (you can
-  also drag-and-drop a `.json` onto the canvas).
+### Save, load & backups
+- **Save** (`Ctrl/Cmd+S`, or the toolbar button) writes your mechanism as a `.json` file. In
+  Chrome, Edge and other Chromium browsers the first save asks where to put it and every
+  later save **overwrites that same file** silently; `Ctrl+Shift+S` (or Shift-click Save) saves
+  as a new file. The tab title shows the file name, with a `•` while there are unsaved
+  changes. Firefox and Safari can't write files in place, so there a save downloads a
+  timestamped copy instead.
+- **Load** (`Ctrl/Cmd+O`, or the toolbar button) opens a `.json` — you can also drag-and-drop
+  one onto the canvas. The loaded file becomes the save target, and stays so after a reload
+  (the browser may ask permission once).
+- **Auto-backup** (the clock button next to Export) writes timestamped copies,
+  `<name>-backup-<date-time>.json`, into a folder you choose. Pick how long after the first
+  change a backup is written (1–30 min; the panel shows when the next one is due) and how many
+  to keep (older ones are pruned). Saving cancels the pending backup, since the file is up to
+  date. Needs a Chromium browser; the panel says so otherwise.
 - Your work is also auto-saved in the browser and restored automatically the next time you
   open the app.
 
