@@ -44,6 +44,16 @@ reload; the title shows `• name` while modified), with a timestamped download 
 fallback elsewhere; **auto-backup** (clock button) writes `<name>-backup-<time>.json` into a
 user-chosen folder N minutes after the first change since the last backup / save, pruning to
 the last K, with a change-armed countdown shown in its panel.
+**Implicit constraints while dragging** (draw mode, no format change): hold a dragged point /
+line over another element for ~0.4 s to arm it as the **alignment candidate** (violet, replaced
+by the next hover, dropped with Esc); release with the dragged reference H/V-aligned with a
+candidate point, or on a candidate line's infinite line (or a candidate point on the dragged
+line), within 10 px → the geometry is nudged exactly into alignment and the matching sketch
+constraint (H / V / point-on-line coincident) is created, previewed mid-drag by a dotted violet
+line carrying the constraint's badge; a rejected placement notifies instead of failing
+silently. **Pattern members ride with their seed in the sketch solver** (rigid-offset
+couplings instead of an immovable rank), so a dimension / constraint on a member moves the
+patterned body as a whole rather than pinning it.
 **View navigation**: zoom range 0.05×–200×; a **fit-to-screen** button + `F` shortcut frames the
 whole mechanism (bodies, joints, ground anchors) centered with a margin; **Tab** toggles
 draw ↔ simulate mode.
@@ -681,8 +691,12 @@ member), `patternSeedHole` (a member's index → its seed's, for UI redirects), 
 outer outline and clear of every other hole / joint, bbox-prefiltered) and `patternPreview`
 (the tool's hover: instances + fit for a would-be layout, existing members not counted as
 obstacles). Caps: `PATTERN_MAX_COUNT` 200 per axis, `PATTERN_MAX_MEMBERS` 400 per grid.
-**Semantics**: members are derived geometry — the sketch solver ranks member variables 3
-(immovable, like instance geometry — `varRank` asks `patternOfHole / patternOfJoint`), a
+**Semantics**: members are derived geometry — in the sketch solver a member variable ranks
+like ordinary geometry but is **coupled to its seed by a rigid offset** (`addPatternCouplings`
+in `buildSystem`, via `memberSeedKey`; internal items with id −1; members are skipped at
+writeback — the seed's re-layout places them), so a demand on a member moves the whole array
+and never a member alone (members used to rank 3 / immovable, which deadlocked any solve that
+needed a patterned body to shift — see Bugs), a
 driving dimension with both ends inside one pattern is rejected (`applyDrivingDimension`,
 via `patternOfRef`), a drag on a member is redirected to the seed (joint drag → seed joint;
 node / radius handle / double-click node edits on a member hole → the seed hole via
@@ -1217,7 +1231,8 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
   back via `moveGuidePoint`), and every variable carries a **mobility rank** — 0
   construction (guide points), 1 geometry (vertices, joints), 2 drag-anchored,
   3 **component-instance geometry** (immovable: its shape belongs to the definition, so
-  it outranks even the drag — dragging against it yields) — with each
+  it outranks even the drag — dragging against it yields); pattern members rank as
+  geometry and ride with their seed through rigid-offset couplings — with each
   pairwise projection weighted so corrections flow entirely to the **lowest** rank (equal
   ranks split evenly, the old symmetric behaviour): guide constraints move only free guide
   points, never geometry, and a drag is never tugged back by its constraints. Two
@@ -1703,6 +1718,34 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
     (`hoverObjSnap`, via `hoverObjSnapRef`) previews the reference a drag would pick — for the
     multi-selection when the cursor is on it, else the joint / body under the cursor; none over a
     selected body's reshape handles or with Shift held (rigid drag, no snap).
+  - **Implicit constraints (alignment while dragging)** — body / joint / vertex / multi drags
+    carry `align?: DragAlign` (`{ ref, hover, cand, match, slip }`, built by `newDragAlign`
+    from the same reference feature object snap would pick — independent of the object-snap
+    toggle: `pickObjSnapRef` now runs for every body / multi drag; a `bodyPoint` reference
+    (centre / midpoint) gets no align state). `objSnapTargets` returns `SnapPoint` /
+    `SnapLine` records carrying the constraint ref each feature stands for (null for centres
+    and midpoints); `dragSnapExclusions` is the shared exclusion set (members, joints stuck to
+    a dragged vertex, the vertex + its edges). `updateDragAlign` runs on every move and, from
+    the frame loop, only when a hover timer is **due** (so big scenes aren't rescanned at 60 fps):
+    the nearest constraint-capable target within `OBJ_SNAP_PX` of where the *cursor* put the
+    reference (`slip` = raw − snapped anchor undoes grid / object snap) is the **hover**; held
+    `ALIGN_HOVER_MS` (400) it becomes `cand` (replacing an earlier one; leaving keeps it).
+    **Match** (needs a candidate): point↔point within `ALIGN_TOL_PX` (10) of the same y →
+    horizontal / same x → vertical (on top of it = placement, no match); a point on a candidate
+    line's infinite line or a candidate point on the dragged line → coincident
+    (`pointOnLineMatch`, dotted preview from the nearer segment end to the point); an
+    existing identical constraint never re-matches (`sketchConstraintExists`). On mouseup
+    (after the settle + `markDirty`) `placeAlignConstraint(finished, align)` first applies
+    `alignCorrection` through `moveDragged` (the exact translation onto the alignment — the
+    solver then starts from a satisfied constraint; asked to close even a 0.3 mm gap itself it
+    split the correction with the other side and a dimension-pinned part made it fail), then
+    `placeConstraint(scene, kind, cand, ref)` (dragged side second, so a pose constraint moves
+    the dragged part); a rejection flashes the conflicts and `notify`s why. Esc mid-drag with
+    a candidate drops just the candidate (hover timer parked at +∞ so it can't re-arm in
+    place). Renderer: `RenderInput.dragAlign` (`{ ref, cand, match }` from `dragAlignView`,
+    null without a candidate) draws candidate + reference in `SKETCH_COLOR`, the dotted
+    match line and a kind badge at its midpoint (beside the point when the line is too short)
+    via the shared `drawSketchBadge` (factored out of `drawSketchGlyph`).
   - **Working units + DXF import**: the `#unit-select` dropdown writes `scene.unit`
     (markDirty → saved/undoable) and re-syncs from the scene each frame (`syncUnitSelect`,
     change-detected — load/undo can change the unit). Canvas `dragover`/`drop` handlers:
@@ -2378,7 +2421,9 @@ Persistence:
   joint patterns (free joint refused, members follow the seed, a member's ground follows, no
   constraint replication, member delete → all gone, seed delete → dissolve, circular joints);
   sketch solver (width pre-dimensioned so the solver path runs: the seed shares a correction
-  and members follow, seed↔member driving dimension rejected); mirror / scale carrying the
+  and members follow, seed↔member driving dimension rejected; a member coincident to a free
+  joint that is then dragged anchored → seed, members and spacing follow; an H between a
+  member and a component instance's corner moves the whole array — formerly rejected); mirror / scale carrying the
   layout, copy-paste of a rotated body (world-oriented vectors), save/load v19 (stale member
   list re-derived, missing seed dropped, pre-v19 → none), split dissolves; the pattern-axis
   reference (resolves to the dotted line, H accepted and held through a seed drag, parallel
@@ -2608,6 +2653,20 @@ Persistence:
   oscillated to the iteration cap (the guides-as-reference fallback didn't help — ties were
   exempt from it). Fixed by making a guide with 2+ ties the reference for its point-on-line
   ties (`multiTiedGuides`); point–point ties keep the old glued behaviour.
+- **Coincident onto a horizontal edge of a patterned part was silently rejected (drag or
+  O tool), and dragging the constrained point couldn't move that part.** Door Assembly 6 in
+  the gate scene: the red plate's hole grid is a pattern, and a driving dimension holds one
+  *member* 8 mm from another part's edge. Members ranked immovable in the sketch solver, so
+  that dimension pinned the plate vertically; a point dropped 0.3 mm off a horizontal edge
+  made the solver split the gap with the plate, the plate's half stalled on the dimension
+  (residual exactly the disturbance, sweeps irrelevant) and the placement was rejected — with
+  the red flash on a dimension label nobody was looking at. Vertical edges only needed an x
+  shift and worked. Fixed twice over: implicit placements first nudge the dragged geometry
+  exactly onto the alignment (`alignCorrection`) and notify on rejection, and pattern
+  members now ride with their seed via rigid-offset couplings (`addPatternCouplings`), so a
+  demand on a member translates the array and its body — the anchored drag of the hole now
+  pulls the plate (and, through the dimension, the other part) along. Diagnosed by replaying
+  the saved scene headlessly and by driving the app in Chrome with Playwright.
 
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);

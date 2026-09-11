@@ -10,7 +10,7 @@ import {
   ResolvedMeasureRef,
   SketchConstraintKind,
 } from "./model";
-import { Vec2, sub, dist, distToSegment, normalize, scale, convexHull } from "./geometry";
+import { Vec2, add, sub, vec, dist, distToSegment, normalize, scale, convexHull } from "./geometry";
 import { View } from "./view";
 import { ConstraintBreak } from "./solver";
 
@@ -73,6 +73,14 @@ export interface RenderInput {
    * a drag from the cursor would use.
    */
   dragSnap: { ref: ResolvedMeasureRef; hit: ResolvedMeasureRef | null; hitInfinite: boolean } | null;
+  /** Implicit-constraint preview during a drag: the armed alignment candidate and the
+   *  dragged reference (sketch violet), plus the alignment a release would constrain —
+   *  a dotted line with the constraint's badge. Null while no candidate is armed. */
+  dragAlign: {
+    ref: ResolvedMeasureRef;
+    cand: ResolvedMeasureRef;
+    match: { kind: SketchConstraintKind; from: Vec2; to: Vec2 } | null;
+  } | null;
   /** Ids of sketch constraints / dimensions flashing red after a rejected edit. */
   flash: Set<number> | null;
   /** Control-vertex handles to draw for the selected body (draggable to reshape it). */
@@ -829,6 +837,31 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     }
     drawMeasureRefHighlight(ctx, ref, px, false, viewRect, OSNAP_COLOR);
   }
+  // Implicit constraints: the armed alignment candidate and the dragged reference in the
+  // sketch violet, then the previewed alignment — a dotted line carrying the badge of the
+  // constraint a release would create.
+  if (input.dragAlign) {
+    const { ref, cand, match } = input.dragAlign;
+    drawMeasureRefHighlight(ctx, cand, px, false, viewRect, SKETCH_COLOR);
+    drawMeasureRefHighlight(ctx, ref, px, false, viewRect, SKETCH_COLOR);
+    if (match) {
+      const span = dist(match.from, match.to);
+      if (span > px(1)) {
+        ctx.strokeStyle = SKETCH_COLOR;
+        ctx.lineWidth = px(1.5);
+        ctx.setLineDash([px(3), px(4)]);
+        ctx.beginPath();
+        ctx.moveTo(match.from.x, match.from.y);
+        ctx.lineTo(match.to.x, match.to.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      // The badge sits at the dotted line's midpoint, or beside the point when the line is
+      // too short to host it (a point already within a candidate line's span).
+      const at = span > px(24) ? scale(add(match.from, match.to), 0.5) : add(match.to, vec(px(14), -px(14)));
+      drawSketchBadge(ctx, at, match.kind, view, dpr, theme, SKETCH_COLOR, 1, true);
+    }
+  }
 
   // Measurements (drawn last: dimension annotations sit on top of everything).
   const selectedMeasure = input.selection?.kind === "measure" ? input.selection.id : null;
@@ -1050,32 +1083,46 @@ function drawSketchGlyph(
   selected: boolean,
   flashed: boolean
 ): void {
-  const s = view.scale;
   const color = flashed || g.violated ? FLASH_COLOR : selected ? theme.ink : SKETCH_COLOR;
   // Faded unless the cursor is on the constrained element — selection / a reject flash /
   // a violated pose constraint always shows at full strength.
   const alpha = g.faded && !selected && !flashed && !g.violated ? 0.2 : 1;
-  for (const b of g.badges) {
-    const sx = b.x * s + view.tx;
-    const sy = b.y * s + view.ty;
-    ctx.save();
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.globalAlpha = alpha;
-    ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
-    const half = 8;
-    ctx.beginPath();
-    ctx.roundRect(sx - half, sy - half, 2 * half, 2 * half, 4);
-    ctx.fillStyle = theme.surface + "e6";
-    ctx.fill();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = selected || flashed || g.violated ? 1.6 : 1;
-    ctx.stroke();
-    ctx.fillStyle = color;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(SKETCH_SYMBOL[g.kind], sx, sy + 0.5);
-    ctx.restore();
-  }
+  const bold = selected || flashed || !!g.violated;
+  for (const b of g.badges) drawSketchBadge(ctx, b, g.kind, view, dpr, theme, color, alpha, bold);
+}
+
+/** One constant-size sketch badge (a pill with the kind's symbol) centred on world `at`. */
+function drawSketchBadge(
+  ctx: CanvasRenderingContext2D,
+  at: Vec2,
+  kind: SketchConstraintKind,
+  view: View,
+  dpr: number,
+  theme: Theme,
+  color: string,
+  alpha: number,
+  bold: boolean
+): void {
+  const s = view.scale;
+  const sx = at.x * s + view.tx;
+  const sy = at.y * s + view.ty;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.globalAlpha = alpha;
+  ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+  const half = 8;
+  ctx.beginPath();
+  ctx.roundRect(sx - half, sy - half, 2 * half, 2 * half, 4);
+  ctx.fillStyle = theme.surface + "e6";
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = bold ? 1.6 : 1;
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(SKETCH_SYMBOL[kind], sx, sy + 0.5);
+  ctx.restore();
 }
 
 /** Highlight a measure reference: a ring around a point, a soft thick stroke over a line

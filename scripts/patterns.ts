@@ -3,10 +3,10 @@
  * on one body. Covers member derivation and re-sync (seed drags, body reshapes, count
  * and spacing edits), the fit flags, dissolve vs remove semantics, index renumbering
  * when holes go, mirror / scale / copy-paste carrying the layout, load sanitizing, and
- * the sketch solver treating members as immovable.
+ * the sketch solver moving members only as a whole array (coupled to their seed).
  */
 import { Scene, SceneData, MeasureRef, patternLocalMotions } from "../src/model";
-import { solveSketch, applyDrivingDimension, tryAddConstraint } from "../src/sketch";
+import { solveSketch, applyDrivingDimension, tryAddConstraint, anchorVarsForJoint } from "../src/sketch";
 import { dist, vec, Vec2 } from "../src/geometry";
 
 let failures = 0;
@@ -225,7 +225,7 @@ const holeCentres = (s: Scene, bodyId: number): Vec2[] =>
   check("seed joint removed: members stay as plain joints", s.patterns.length === 0 && s.joints.filter((x) => x.bodyId === bodyId).length === 3);
 }
 
-// --- sketch solver: members are immovable, the seed drives ----------------------------
+// --- sketch solver: the seed drives, members stay derived ------------------------------
 {
   const { s, bodyId } = plate();
   const p = s.createLinearPattern({ kind: "hole", bodyId, hole: 0 }, vec(-50, 0), 3)!;
@@ -251,6 +251,33 @@ const holeCentres = (s: Scene, bodyId: number): Vec2[] =>
   check("member spacing stays derived (100)", near(dist(holeCentre(s, bodyId, p.members[0]), holeCentre(s, bodyId, 0)), 100, 1e-3));
   solveSketch(s);
   check("re-solve keeps members derived", near(dist(holeCentre(s, bodyId, p.members[0]), holeCentre(s, bodyId, 0)), 100, 1e-3));
+}
+
+// --- sketch solver: a demand on a member moves the whole array -------------------------
+{
+  const { s, bodyId } = plate();
+  const p = s.createLinearPattern({ kind: "hole", bodyId, hole: 0 }, vec(-50, 0), 3)!;
+  const member = p.members[1]; // centre at (50, 0)
+  const j = s.addFreeJoint(vec(50, 0));
+  const memberRef: MeasureRef = { kind: "vertex", bodyId, index: 0, hole: member };
+  const { constraint } = tryAddConstraint(s, "coincident", memberRef, { kind: "joint", jointId: j.id });
+  check("member ↔ joint coincident accepted", constraint !== null);
+  // Drag the joint (anchored): the array must come along — seed, members, spacing intact.
+  s.moveJoint(j.id, vec(0, 30));
+  const breaks = solveSketch(s, new Set(anchorVarsForJoint(s, j.id)));
+  check("anchored joint drag solves through the member", breaks.length === 0, JSON.stringify(breaks));
+  check("member followed the joint", nearPt(holeCentre(s, bodyId, member), vec(50, 30), 1e-3));
+  check("seed translated with it", nearPt(holeCentre(s, bodyId, 0), vec(-150, 30), 1e-3));
+  check("spacing stays derived", near(dist(holeCentre(s, bodyId, p.members[0]), holeCentre(s, bodyId, 0)), 100, 1e-3));
+  // Un-anchored, against an immovable point: an H between a member and a component
+  // instance's corner can only be met by moving the array (the instance never moves).
+  const other = s.addBody([vec(300, -50), vec(400, -50), vec(400, 50), vec(300, 50)]);
+  const inst = s.createComponentFromSelection("Block", [other.id])!;
+  const instBody = inst.instance.bodyMap[0].id;
+  const h = tryAddConstraint(s, "horizontal", memberRef, { kind: "vertex", bodyId: instBody, index: 0 });
+  check("member ↔ instance corner H accepted", h.constraint !== null, JSON.stringify(h.breaks));
+  check("array moved to the corner's level", near(holeCentre(s, bodyId, member).y, -50, 1e-3) && near(holeCentre(s, bodyId, 0).y, -50, 1e-3));
+  check("joint (coincident to the member) came along", nearPt(s.jointWorld(s.getJoint(j.id)!), holeCentre(s, bodyId, member), 1e-3));
 }
 
 // --- mirror / scale / copy-paste / save-load ------------------------------------------

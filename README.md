@@ -231,6 +231,9 @@ works in both modes. Measurements are saved with the mechanism.
   (or the badge): click to select, **Delete** to remove. A toolbar toggle next to the
   constraint tools **shows/hides all badges** (constraints keep working while hidden), and a
   matching toggle next to Measure shows/hides **all measurements** — in both modes.
+- **Constraints by dragging**: the common cases need no tool — mid-drag, hover a target to arm
+  it, then release aligned with it (or on its line) and the H / V / coincident constraint is
+  created. See *Implicit constraints while dragging* under Grid & snapping.
 - **Driving dimensions**: **double-click** a dimension's value, type a number, press Enter.
   The **first** driving dimension on an otherwise-unconstrained body **scales the whole body
   uniformly** (same shape, new size); further dimensions move **only the involved nodes**
@@ -465,6 +468,21 @@ reference and snaps onto the other features (its own body's other corners includ
 the features that move with it), and to **placement**: a new joint, or the centre of a round
 hole being dragged out, lands on the nearest corner / midpoint / centre / joint in range.
 
+**Implicit constraints while dragging** let you place the common sketch constraints without
+picking a tool. While dragging a body, joint, corner node or hole centre (with or without
+object snap), **hold** the dragged point or edge over another element — a corner, hole centre,
+joint, guide point, edge, rail or guideline — for about half a second: it becomes the
+**alignment candidate** and lights up violet (hovering something else later replaces it;
+**Esc** drops it and the drag goes on). Now move on to where you want the object. When the
+dragged point lines up **horizontally or vertically** with a candidate point, or lands on the
+**line** of a candidate edge / rail / guideline (or a candidate point lands on the dragged
+edge's line), a dotted violet line with the constraint's badge (H, V or ◎) shows the
+alignment. **Release while it shows** and the geometry is nudged exactly into alignment and the
+constraint is created — the same H / V / coincident you'd get from the tools, badge and all.
+Dropping a point right on top of a candidate point is a plain move (no constraint). If a
+placement can't be satisfied, nothing is created and a message says why (the conflicting
+items flash red).
+
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor (0.05× to 200×).
 - **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode; turn on **Object snap** to drag by a corner / edge / centre and snap it onto other objects).
@@ -499,7 +517,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, welds (rigid joints), pose-level driving dimensions, sketch constraints on components
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed)
 ```
 
 ## How it works
@@ -587,6 +605,9 @@ gives the CAD feel: guide constraints move guides rather than geometry, dragged 
 is never tugged back by its constraints (guides follow it exactly, so groups stay rigid),
 and when a drag would need the constraints to give way, a symmetric re-solve runs the same
 frame so the constraint visibly holds and the drag slides along the directions left free.
+**Pattern members** are derived geometry: each member variable is coupled to its seed by a
+rigid offset, so a constraint or dimension on a member moves the whole array — seed, members
+and their body together — instead of pinning it in place.
 **Pose dimensions and pose constraints** (`pose.ts`) handle dimensions and sketch
 constraints whose every end lives on component instances — not shape material at all:
 between two instances the correction is a closed-form **rigid move** of one of them — a

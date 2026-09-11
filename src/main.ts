@@ -378,6 +378,19 @@ const OBJ_SNAP_PX = 12;
 /** A line reference only snaps onto (near-)parallel lines: within this angle (≈2°). */
 const OBJ_SNAP_PARALLEL_TOL = (2 * Math.PI) / 180;
 
+/**
+ * Implicit constraints while dragging (draw mode; any body / joint / vertex / multi drag
+ * whose reference feature can take a sketch constraint — a joint, a control vertex, a
+ * guide point or a control edge): holding the dragged reference over another point /
+ * line for `ALIGN_HOVER_MS` arms that element as the *alignment candidate* (a later
+ * hover over something else replaces it; Esc drops it). Releasing the drag with the
+ * reference H/V-aligned with a candidate point, or on the infinite line of a candidate
+ * line, within `ALIGN_TOL_PX` creates the matching sketch constraint automatically — a
+ * dotted line with the constraint's badge previews it during the drag.
+ */
+const ALIGN_HOVER_MS = 400;
+const ALIGN_TOL_PX = 10;
+
 /** Screen-px capture range for snapping onto a construction guideline. */
 const GUIDE_SNAP_PX = 10;
 
@@ -435,15 +448,33 @@ let pan: { lastScreen: Vec2 } | null = null;
  */
 type DragObjSnap = { ref: MeasureRef; hit: ResolvedMeasureRef | null; hitInfinite: boolean };
 
+/**
+ * Implicit-constraint state carried by a body / joint / vertex / multi drag: `ref` is the
+ * dragged reference (the feature object snap would use, when it can take a constraint —
+ * independent of the object-snap toggle), `hover` the target it currently sits on and
+ * since when, `cand` the armed candidate, `match` the constraint a release right now
+ * would create. `slip` is the last snap correction (unsnapped − snapped anchor), so a
+ * hover is judged where the cursor put the reference, not where the grid moved it.
+ */
+type DragAlign = {
+  ref: MeasureRef;
+  hover: { ref: MeasureRef; since: number } | null;
+  cand: MeasureRef | null;
+  match: AlignMatch | null;
+  slip: Vec2;
+};
+/** A previewed implicit constraint: its kind and the dotted preview line's endpoints. */
+type AlignMatch = { kind: SketchConstraintKind; from: Vec2; to: Vec2 };
+
 /** A drag anchor spec: a fixed offset from a body's centroid, or a joint. */
 type DragAnchorSpec = { bodyId: number; offset: Vec2 } | { jointId: number };
 
 type LeftDrag =
-  | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap }
-  | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap }
+  | { kind: "body"; id: number; anchorOffset: Vec2; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap; align?: DragAlign }
+  | { kind: "joint"; id: number; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap; align?: DragAlign }
   // `hole` scopes a vertex/fillet drag to one of the body's holes (null = the outer outline).
   // With object snap on, the dragged vertex is its own snapping reference (`osnap`).
-  | { kind: "vertex"; bodyId: number; index: number; hole: number | null; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap }
+  | { kind: "vertex"; bodyId: number; index: number; hole: number | null; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap; align?: DragAlign }
   // Per-corner radius handle: the cursor's position maps straight to that corner's radius.
   | { kind: "fillet"; bodyId: number; index: number; hole: number | null; moved: boolean }
   | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean }
@@ -465,6 +496,7 @@ type LeftDrag =
       grabOffset: Vec2;
       moved: boolean;
       osnap?: DragObjSnap;
+      align?: DragAlign;
     }
   // Rigid (Shift) drag: the grabbed selection moves like in simulation — the solver drives
   // it each frame, grounds hold, and the rest of the scene is frozen (`freeze`).
@@ -632,6 +664,32 @@ function dragMembers(d: LeftDrag): { bodies: Set<number>; joints: Set<number> } 
 }
 
 /**
+ * What a drag's snapping / alignment must ignore: the dragged members; for a vertex
+ * reshape drag also the joints stuck to that vertex (the joint↔node link — e.g. a shaft
+ * joint at a hole's centre — travels with it) and, via `vertex`, the vertex itself
+ * plus the two edges it ends.
+ */
+function dragSnapExclusions(d: LeftDrag): {
+  bodies: Set<number>;
+  joints: Set<number>;
+  vertex?: { bodyId: number; hole: number | null; index: number };
+} {
+  const excl = dragMembers(d);
+  if (d.kind !== "vertex") return excl;
+  const vw = dragAnchorWorld(d);
+  for (const j of scene.joints) {
+    if (j.bodyId === d.bodyId && dist(scene.jointWorld(j), vw) < VERTEX_LINK_EPS) excl.joints.add(j.id);
+  }
+  return { ...excl, vertex: { bodyId: d.bodyId, hole: d.hole, index: d.index } };
+}
+
+/** An object-snap target feature: its geometry, and the reference it stands for as a
+ *  constraint / measurement element (null for features no sketch constraint can take —
+ *  body centres and edge midpoints). */
+type SnapPoint = { p: Vec2; ref: MeasureRef | null };
+type SnapLine = { a: Vec2; b: Vec2; infinite: boolean; ref: MeasureRef | null };
+
+/**
  * Object-snap targets: the same features on everything that isn't being dragged —
  * other bodies' control vertices, edge midpoints, centroids and control edges (outer +
  * holes), joints (not on a dragged body), rails, and guidelines (defining points +
@@ -641,27 +699,37 @@ function objSnapTargets(
   excludeBodies: Set<number>,
   excludeJoints: Set<number>,
   excludeVertex?: { bodyId: number; hole: number | null; index: number }
-): { points: Vec2[]; lines: { a: Vec2; b: Vec2; infinite: boolean }[] } {
-  const points: Vec2[] = [];
-  const lines: { a: Vec2; b: Vec2; infinite: boolean }[] = [];
+): { points: SnapPoint[]; lines: SnapLine[] } {
+  const points: SnapPoint[] = [];
+  const lines: SnapLine[] = [];
   for (const body of scene.bodies) {
     if (excludeBodies.has(body.id)) continue;
     // A vertex reshape drag: its own body's other features are fair targets (a hole
     // centre onto a corner, say), but not the vertex itself, the two edges it ends (and
     // their midpoints), or the centroid — all of which move with it and would stick.
     const ex = excludeVertex?.bodyId === body.id ? excludeVertex : null;
-    if (!ex) points.push(body.pos);
+    if (!ex) points.push({ p: body.pos, ref: null });
     for (const { verts, hole } of bodyControlLoops(body)) {
       const n = verts.length;
       const exI = ex && ex.hole === hole ? ex.index : -1;
       for (let i = 0; i < n; i++) {
         const v = verts[i];
-        if (i !== exI) points.push(v);
+        if (i !== exI) {
+          points.push({
+            p: v,
+            ref: hole === null ? { kind: "vertex", bodyId: body.id, index: i } : { kind: "vertex", bodyId: body.id, index: i, hole },
+          });
+        }
         if (n < 2) continue;
         if (i === exI || (i + 1) % n === exI) continue;
         const w = verts[(i + 1) % n];
-        points.push(scale(add(v, w), 0.5));
-        lines.push({ a: v, b: w, infinite: false });
+        points.push({ p: scale(add(v, w), 0.5), ref: null });
+        lines.push({
+          a: v,
+          b: w,
+          infinite: false,
+          ref: hole === null ? { kind: "edge", bodyId: body.id, index: i } : { kind: "edge", bodyId: body.id, index: i, hole },
+        });
       }
     }
   }
@@ -670,15 +738,21 @@ function objSnapTargets(
     return !j || excludeJoints.has(id) || (j.bodyId !== null && excludeBodies.has(j.bodyId));
   };
   for (const j of scene.joints) {
-    if (!jointExcluded(j.id)) points.push(scene.jointWorld(j));
+    if (!jointExcluded(j.id)) points.push({ p: scene.jointWorld(j), ref: { kind: "joint", jointId: j.id } });
   }
   for (const c of scene.constraints) {
     if (c.kind !== "slider" || jointExcluded(c.railA) || jointExcluded(c.railB)) continue;
-    lines.push({ a: scene.jointWorld(scene.getJoint(c.railA)!), b: scene.jointWorld(scene.getJoint(c.railB)!), infinite: false });
+    lines.push({
+      a: scene.jointWorld(scene.getJoint(c.railA)!),
+      b: scene.jointWorld(scene.getJoint(c.railB)!),
+      infinite: false,
+      ref: { kind: "rail", sliderId: c.id },
+    });
   }
   for (const g of scene.guides) {
-    points.push(g.a, g.b);
-    lines.push({ a: g.a, b: g.b, infinite: true });
+    points.push({ p: g.a, ref: { kind: "guidePoint", guideId: g.id, which: "a" } });
+    points.push({ p: g.b, ref: { kind: "guidePoint", guideId: g.id, which: "b" } });
+    lines.push({ a: g.a, b: g.b, infinite: true, ref: { kind: "guideLine", guideId: g.id } });
   }
   return { points, lines };
 }
@@ -697,29 +771,17 @@ function objSnapTarget(d: LeftDrag, os: DragObjSnap, raw: Vec2): Vec2 | null {
   os.hitInfinite = false;
   const cur = scene.resolveMeasureRef(os.ref);
   if (!cur) return null;
-  const excl = dragMembers(d);
-  if (d.kind === "vertex") {
-    // Joints stuck to the dragged vertex (the joint↔node link — e.g. a shaft joint at a
-    // hole's centre) travel with it, so they can't be targets either.
-    const vw = dragAnchorWorld(d);
-    for (const j of scene.joints) {
-      if (j.bodyId === d.bodyId && dist(scene.jointWorld(j), vw) < VERTEX_LINK_EPS) excl.joints.add(j.id);
-    }
-  }
-  const targets = objSnapTargets(
-    excl.bodies,
-    excl.joints,
-    d.kind === "vertex" ? { bodyId: d.bodyId, hole: d.hole, index: d.index } : undefined
-  );
+  const excl = dragSnapExclusions(d);
+  const targets = objSnapTargets(excl.bodies, excl.joints, excl.vertex);
   const r = OBJ_SNAP_PX / view.scale;
   if (cur.kind === "point") {
     let bestP: Vec2 | null = null;
     let bd = r;
-    for (const p of targets.points) {
-      const dd = dist(raw, p);
+    for (const t of targets.points) {
+      const dd = dist(raw, t.p);
       if (dd <= bd) {
         bd = dd;
-        bestP = p;
+        bestP = t.p;
       }
     }
     if (bestP) {
@@ -813,6 +875,225 @@ function dragSnapView(): { ref: ResolvedMeasureRef; hit: ResolvedMeasureRef | nu
   return null;
 }
 
+// --- implicit constraints (alignment while dragging) ---------------------------------
+/** Whether a reference can take a sketch constraint (see `Scene.addSketchConstraint`). */
+function alignPointRef(r: MeasureRef): boolean {
+  return r.kind === "joint" || r.kind === "vertex" || r.kind === "guidePoint";
+}
+function alignLineRef(r: MeasureRef): boolean {
+  return r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
+}
+
+/** Fresh implicit-constraint state for a drag whose reference is `ref` — none when the
+ *  reference can't take a constraint (a body centre / edge midpoint `bodyPoint`). */
+function newDragAlign(ref: MeasureRef | null | undefined): DragAlign | undefined {
+  if (!ref || !(alignPointRef(ref) || alignLineRef(ref))) return undefined;
+  return { ref, hover: null, cand: null, match: null, slip: vec(0, 0) };
+}
+
+/** Whether an equivalent sketch constraint (same kind, same two refs, either order) exists. */
+function sketchConstraintExists(kind: SketchConstraintKind, a: MeasureRef, b: MeasureRef): boolean {
+  return scene.sketch.some(
+    (c) =>
+      c.kind === kind &&
+      c.refB !== null &&
+      ((sameMeasureRef(c.refA, a) && sameMeasureRef(c.refB, b)) || (sameMeasureRef(c.refA, b) && sameMeasureRef(c.refB, a)))
+  );
+}
+
+/**
+ * Advance a drag's implicit-constraint state — on every move, and every frame while the
+ * cursor rests (a hover is a matter of time, not motion).
+ *
+ * Hovering: the nearest constraint-capable target under the dragged reference — a point
+ * reference over a target point, else over a target line; a line reference over a target
+ * point along its segment — within the object-snap range of where the *cursor* put the
+ * reference (`slip` undoes the grid / object snap). Held for `ALIGN_HOVER_MS` it becomes
+ * the candidate, replacing any earlier one; leaving it keeps the candidate armed.
+ *
+ * Matching (needs a candidate): point↔point within `ALIGN_TOL_PX` of the same y →
+ * horizontal, same x → vertical (sitting right on top of it is a placement, not an
+ * alignment — no match); a point on a candidate line's infinite line, or a candidate
+ * point on the dragged line's, → point-on-line coincident. Judged on the geometry as
+ * placed (snapped, live-solved) — that's what the release commits; the constraint's own
+ * solve then closes the residual. A constraint that already exists never re-matches.
+ */
+function updateDragAlign(d: LeftDrag, al: DragAlign, now: number): void {
+  al.match = null;
+  const cur = scene.resolveMeasureRef(al.ref);
+  if (!cur) {
+    al.hover = null;
+    al.cand = null;
+    return;
+  }
+  // --- hover → candidate ---
+  const excl = dragSnapExclusions(d);
+  const targets = objSnapTargets(excl.bodies, excl.joints, excl.vertex);
+  const r = OBJ_SNAP_PX / view.scale;
+  let over: MeasureRef | null = null;
+  let bd = r;
+  if (cur.kind === "point") {
+    const at = add(cur.p, al.slip);
+    for (const t of targets.points) {
+      if (!t.ref) continue;
+      const dd = dist(at, t.p);
+      if (dd <= bd) {
+        bd = dd;
+        over = t.ref;
+      }
+    }
+    if (!over) {
+      for (const t of targets.lines) {
+        if (!t.ref) continue;
+        const ab = sub(t.b, t.a);
+        const L = lenSq(ab);
+        if (L < 1e-12) continue;
+        let u = dot(sub(at, t.a), ab) / L;
+        if (!t.infinite) u = Math.max(0, Math.min(1, u));
+        const dd = dist(at, add(t.a, scale(ab, u)));
+        if (dd <= bd) {
+          bd = dd;
+          over = t.ref;
+        }
+      }
+    }
+  } else {
+    const a = add(cur.a, al.slip);
+    const b = add(cur.b, al.slip);
+    for (const t of targets.points) {
+      if (!t.ref) continue;
+      const dd = distToSegment(t.p, a, b);
+      if (dd <= bd) {
+        bd = dd;
+        over = t.ref;
+      }
+    }
+  }
+  if (!over) al.hover = null;
+  else if (!al.hover || !sameMeasureRef(al.hover.ref, over)) al.hover = { ref: over, since: now };
+  if (al.hover && now - al.hover.since >= ALIGN_HOVER_MS && !(al.cand && sameMeasureRef(al.cand, al.hover.ref))) {
+    al.cand = al.hover.ref;
+  }
+  // --- candidate → match ---
+  if (!al.cand) return;
+  const cand = scene.resolveMeasureRef(al.cand);
+  if (!cand) {
+    al.cand = null;
+    return;
+  }
+  const tol = ALIGN_TOL_PX / view.scale;
+  let m: AlignMatch | null = null;
+  if (cur.kind === "point" && cand.kind === "point") {
+    const dx = Math.abs(cur.p.x - cand.p.x);
+    const dy = Math.abs(cur.p.y - cand.p.y);
+    if (dx <= tol && dy <= tol) m = null; // on top of it: a placement, not an alignment
+    else if (dy <= tol) m = { kind: "horizontal", from: cand.p, to: cur.p };
+    else if (dx <= tol) m = { kind: "vertical", from: cand.p, to: cur.p };
+  } else if (cur.kind === "point" && cand.kind === "line") {
+    m = pointOnLineMatch(cur.p, cand, tol);
+  } else if (cur.kind === "line" && cand.kind === "point") {
+    m = pointOnLineMatch(cand.p, cur, tol);
+  }
+  if (m && sketchConstraintExists(m.kind, al.cand, al.ref)) m = null;
+  al.match = m;
+}
+
+/** Point-on-line match: `p` within `tol` of `line`'s infinite line. The dotted preview
+ *  runs from the nearer end of the defining segment out to the point (collapsed to the
+ *  point when it lies within the segment's span — the badge alone marks it then). */
+function pointOnLineMatch(p: Vec2, line: Extract<ResolvedMeasureRef, { kind: "line" }>, tol: number): AlignMatch | null {
+  const ab = sub(line.b, line.a);
+  const L = lenSq(ab);
+  if (L < 1e-12) return null;
+  const u = dot(sub(p, line.a), ab) / L;
+  const foot = add(line.a, scale(ab, u));
+  if (dist(p, foot) > tol) return null;
+  const from = u < 0 ? line.a : u > 1 ? line.b : foot;
+  return { kind: "coincident", from, to: p };
+}
+
+/** Perpendicular foot of `p` on the infinite line through `a`–`b` (null when degenerate). */
+function footOnLine(p: Vec2, a: Vec2, b: Vec2): Vec2 | null {
+  const ab = sub(b, a);
+  const L = lenSq(ab);
+  if (L < 1e-12) return null;
+  return add(a, scale(ab, dot(sub(p, a), ab) / L));
+}
+
+/**
+ * The translation that makes a previewed alignment exact: the dragged reference onto
+ * the candidate's y (horizontal) / x (vertical), a point onto the candidate line, or the
+ * dragged line onto the candidate point. Applied before the constraint is placed, so the
+ * solver starts from a satisfied constraint — asked to close even a small gap itself it
+ * splits the correction with the other side, and when that side is pinned by dimensions
+ * (a fully dimensioned part) the solve can fail and the placement gets rejected.
+ */
+function alignCorrection(kind: SketchConstraintKind, cur: ResolvedMeasureRef, cand: ResolvedMeasureRef): Vec2 | null {
+  if (cur.kind === "point" && cand.kind === "point") {
+    if (kind === "horizontal") return vec(0, cand.p.y - cur.p.y);
+    if (kind === "vertical") return vec(cand.p.x - cur.p.x, 0);
+    return null;
+  }
+  if (kind !== "coincident") return null;
+  if (cur.kind === "point" && cand.kind === "line") {
+    const foot = footOnLine(cur.p, cand.a, cand.b);
+    return foot ? sub(foot, cur.p) : null;
+  }
+  if (cur.kind === "line" && cand.kind === "point") {
+    const foot = footOnLine(cand.p, cur.a, cur.b);
+    return foot ? sub(cand.p, foot) : null;
+  }
+  return null;
+}
+
+/** Translate a drag's geometry by `delta` — the same movers the drag itself uses. */
+function moveDragged(d: LeftDrag, delta: Vec2): void {
+  if (d.kind === "vertex") scene.moveBodyVertex(d.bodyId, d.index, delta, d.hole);
+  else if (d.kind === "body") scene.moveBody(d.id, delta);
+  else if (d.kind === "joint") scene.moveJoint(d.id, delta);
+  else if (d.kind === "multi") {
+    for (const id of d.bodies) scene.moveBody(id, delta);
+    for (const id of d.joints) scene.moveJoint(id, delta);
+  }
+}
+
+/**
+ * Place the constraint an implicit alignment previewed (on drag release). The dragged
+ * reference goes second, so a pose constraint (both ends on components) moves the
+ * dragged part rather than the candidate's. Selection stays on what was dragged; a
+ * rejected solve flashes the conflicts like any constraint placement.
+ */
+function placeAlignConstraint(d: LeftDrag, al: DragAlign): void {
+  if (!al.match || !al.cand) return;
+  // Close the (sub-tolerance) gap exactly first — see alignCorrection.
+  const cur = scene.resolveMeasureRef(al.ref);
+  const cand = scene.resolveMeasureRef(al.cand);
+  if (!cur || !cand) return;
+  const corr = alignCorrection(al.match.kind, cur, cand);
+  if (corr && (corr.x !== 0 || corr.y !== 0)) moveDragged(d, corr);
+  const { constraint, breaks } = placeConstraint(scene, al.match.kind, al.cand, al.ref);
+  if (!constraint) {
+    // A silent no-op would read as "nothing happened": say why.
+    if (breaks.length) {
+      flashSketchItems(breaks);
+      notify("Constraint not applied: it can't be satisfied without breaking an existing dimension or constraint.", "error");
+    } else notify("Constraint not applied: not possible between these elements.", "error");
+    markDirty(); // the alignment correction above moved the geometry
+    return;
+  }
+  setSketchVisible(true); // a constraint placed while the layer is hidden would be invisible
+  markDirty();
+}
+
+/** Implicit-constraint preview for the renderer: the armed candidate, the dragged
+ *  reference, and the alignment a release would constrain (none without a candidate). */
+function dragAlignView(): RenderInput["dragAlign"] {
+  if (mode !== "draw" || !leftDrag || !("align" in leftDrag) || !leftDrag.align?.cand) return null;
+  const ref = scene.resolveMeasureRef(leftDrag.align.ref);
+  const cand = scene.resolveMeasureRef(leftDrag.align.cand);
+  return ref && cand ? { ref, cand, match: leftDrag.align.match } : null;
+}
+
 /**
  * Placement snap for a new point (a joint, a round hole's centre): with object snap on,
  * the nearest object-snap target point within range (corners, edge midpoints, centroids,
@@ -823,7 +1104,7 @@ function placeSnap(p: Vec2): Vec2 {
     const r = OBJ_SNAP_PX / view.scale;
     let best: Vec2 | null = null;
     let bd = r;
-    for (const q of objSnapTargets(new Set(), new Set()).points) {
+    for (const { p: q } of objSnapTargets(new Set(), new Set()).points) {
       const d = dist(p, q);
       if (d <= bd) {
         bd = d;
@@ -994,8 +1275,10 @@ function startMultiDrag(grab: Vec2): void {
     const j = scene.getJoint(id);
     if (j) consider(scene.jointWorld(j), { jointId: id });
   }
-  // Object snap on: the reference feature nearest the grab becomes the anchor instead.
-  const os = objSnapEnabled ? pickObjSnapRef([...multiSel.bodies], [...multiSel.joints], grab) : null;
+  // Object snap on: the reference feature nearest the grab becomes the anchor instead
+  // (either way it's the feature implicit constraints align).
+  const pick = pickObjSnapRef([...multiSel.bodies], [...multiSel.joints], grab);
+  const os = objSnapEnabled ? pick : null;
   if (os) {
     anchor = os.spec;
     anchorPos = os.anchor;
@@ -1009,6 +1292,7 @@ function startMultiDrag(grab: Vec2): void {
     grabOffset: sub(grab, anchorPos),
     moved: false,
     osnap: os ? { ref: os.ref, hit: null, hitInfinite: false } : undefined,
+    align: newDragAlign(pick?.ref),
   };
   canvas.style.cursor = "move";
 }
@@ -4781,6 +5065,7 @@ canvas.addEventListener("mousedown", (e) => {
           grabOffset: sub(world, at),
           moved: false,
           osnap: objSnapEnabled ? { ref: vref, hit: null, hitInfinite: false } : undefined,
+          align: newDragAlign(vref),
         };
         canvas.style.cursor = "move";
       } else if (selection?.kind === "pattern" && patternHandleAt(world)) {
@@ -4807,7 +5092,9 @@ canvas.addEventListener("mousedown", (e) => {
           // Object snap on: the reference feature nearest the grab is the anchor (and
           // what snaps); otherwise the centroid or nearest corner grid-snaps.
           const body = scene.getBody(selection.id)!;
-          const os = objSnapEnabled ? pickObjSnapRef([body.id], [], world) : null;
+          // The reference feature nearest the grab is also what implicit constraints align.
+          const pick = pickObjSnapRef([body.id], [], world);
+          const os = objSnapEnabled ? pick : null;
           const anchor = os ? os.anchor : bodyDragAnchor(selection.id, world);
           leftDrag = {
             kind: "body",
@@ -4816,6 +5103,7 @@ canvas.addEventListener("mousedown", (e) => {
             grabOffset: sub(world, anchor),
             moved: false,
             osnap: os ? { ref: os.ref, hit: null, hitInfinite: false } : undefined,
+            align: newDragAlign(pick?.ref),
           };
           canvas.style.cursor = "move";
         } else if (selection?.kind === "joint") {
@@ -4830,6 +5118,7 @@ canvas.addEventListener("mousedown", (e) => {
             moved: false,
             // A joint is its own object-snap reference.
             osnap: objSnapEnabled ? { ref: { kind: "joint", jointId: dragId }, hit: null, hitInfinite: false } : undefined,
+            align: newDragAlign({ kind: "joint", jointId: dragId }),
           };
           canvas.style.cursor = "move";
         } else if (selection?.kind === "guide") {
@@ -5023,6 +5312,10 @@ canvas.addEventListener("mousemove", (e) => {
     } else scene.moveJoint(leftDrag.id, delta);
     leftDrag.moved = true;
     solveSketchLive(); // sketch dragging: constraints hold while the geometry follows
+    if ("align" in leftDrag && leftDrag.align) {
+      leftDrag.align.slip = sub(raw, target); // where the cursor put it vs. where it snapped
+      updateDragAlign(leftDrag, leftDrag.align, performance.now());
+    }
     return;
   }
 
@@ -5094,6 +5387,9 @@ window.addEventListener("mouseup", (e) => {
         solveSketchLive();
       }
       markDirty(); // persist a reposition (a plain click just selects)
+      // Released on a previewed alignment: place the implicit constraint (after the
+      // settle, so it's added to — and solved against — the resting geometry).
+      if ("align" in finished && finished.align) placeAlignConstraint(finished, finished.align);
     }
     canvas.style.cursor = defaultCursor();
   }
@@ -5313,6 +5609,15 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!exportPanel.classList.contains("hidden")) {
       setExportPanelVisible(false);
+      return;
+    }
+    // Mid-drag with an armed alignment candidate: Esc only drops the candidate — the drag
+    // goes on and its release creates nothing. Parking the hover timer at +∞ keeps the
+    // same element from re-arming while the cursor still rests on it.
+    if (leftDrag && "align" in leftDrag && leftDrag.align?.cand) {
+      leftDrag.align.cand = null;
+      leftDrag.align.match = null;
+      if (leftDrag.align.hover) leftDrag.align.hover.since = Infinity;
       return;
     }
     // Abort the current placement / drag and return to the mode's normal state
@@ -5883,6 +6188,16 @@ function frame(now?: number): void {
   syncUnitSelect();
   syncCompPanelHighlight();
   if (sketchFlash && performance.now() >= sketchFlash.until) sketchFlash = null;
+  // A hover is a matter of time: while the cursor rests mid-drag (no pointer events
+  // arrive then) promote a hover that has lasted long enough — only then, so the target
+  // scan doesn't run every frame on a big scene.
+  if (mode === "draw" && leftDrag && "align" in leftDrag && leftDrag.align) {
+    const al = leftDrag.align;
+    const now = performance.now();
+    const due =
+      al.hover !== null && now - al.hover.since >= ALIGN_HOVER_MS && !(al.cand && sameMeasureRef(al.cand, al.hover.ref));
+    if (due) updateDragAlign(leftDrag, al, now);
+  }
   // Containment check (draw mode): flag joints a shape change stranded outside their
   // body. Refresh the hint when the count changes so the warning appears/clears itself.
   const prevOutside = containmentErrors.size;
@@ -5931,6 +6246,7 @@ function frame(now?: number): void {
     sketchGlyphs: sketchGlyphsView(),
     sketchDraft: sketchDraftView(),
     dragSnap: dragSnapView(),
+    dragAlign: dragAlignView(),
     flash: sketchFlash?.ids ?? null,
     theme: theme === "light" ? LIGHT_THEME : DARK_THEME,
   });

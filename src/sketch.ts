@@ -53,7 +53,8 @@ interface System {
    * Per-variable mobility rank: 0 = construction (guideline defining points),
    * 1 = geometry (body control vertices, joints), 2 = pinned by the active drag,
    * 3 = component-instance geometry (immovable — the shape belongs to the definition,
-   * so it outranks even the drag: dragging against it yields instead).
+   * so it outranks even the drag: dragging against it yields instead). Pattern members
+   * rank like the geometry they sit on and ride with their seed (addPatternCouplings).
    * Corrections always flow to the **lowest** rank in a pair — so guide constraints
    * are satisfied by moving free guide points, never by moving joints or body nodes,
    * and a drag is never tugged back by its constraints. Equal ranks split evenly.
@@ -160,13 +161,9 @@ function varRank(scene: Scene, key: string, anchored: boolean): number {
       ? scene.instanceOfBody(id) !== undefined
       : scene.instanceOfJoint(id) !== undefined;
     if (owned) return 3;
-    // Pattern members are derived from their seed: the solve never moves them either
-    // (a constraint on one moves the other side; the seed itself stays free geometry).
-    const parts = key.split(":");
-    const member = key.startsWith("v:")
-      ? parts.length > 3 && scene.patternOfHole(id, Number(parts[3]))?.role === "member"
-      : key.startsWith("j:") && scene.patternOfJoint(id)?.role === "member";
-    if (member) return 3;
+    // Pattern members rank like any geometry: each is coupled to its seed by a rigid
+    // offset item (addPatternCouplings), so a demand on a member moves the whole array
+    // — seed and members together — instead of stalling on an immovable point.
   }
   if (anchored) return 2;
   return key.startsWith("g:") ? 0 : 1;
@@ -255,6 +252,27 @@ function lineVarKeys(scene: Scene, ref: MeasureRef): [string, string] | null {
     return p && p.layout.kind === "linear" && p.layout.axes[ref.axis]
       ? [`pa:${ref.patternId}`, `pb:${ref.patternId}:${ref.axis}`]
       : null;
+  }
+  return null;
+}
+
+/**
+ * The seed variable a pattern **member** variable is derived from — a member hole's
+ * vertex → the seed hole's same vertex, a member joint → the seed joint's variable —
+ * or null for anything that isn't a member.
+ */
+function memberSeedKey(scene: Scene, key: string): string | null {
+  const parts = key.split(":");
+  if (parts[0] === "v" && parts.length > 3) {
+    const bodyId = Number(parts[1]);
+    const ph = scene.patternOfHole(bodyId, Number(parts[3]));
+    if (ph?.role !== "member" || ph.pattern.seed.kind !== "hole") return null;
+    return vertexKey(bodyId, Number(parts[2]), ph.pattern.seed.hole);
+  }
+  if (parts[0] === "j") {
+    const pj = scene.patternOfJoint(Number(parts[1]));
+    if (pj?.role !== "member" || pj.pattern.seed.kind !== "joint") return null;
+    return pointVarKey(scene, { kind: "joint", jointId: pj.pattern.seed.jointId });
   }
   return null;
 }
@@ -729,7 +747,45 @@ function buildSystem(
     if (item === "invalid") invalid.push({ id: spec.m.id, kind: "dimension", error: Infinity });
     else items.push(item);
   }
+  addPatternCouplings(scene, sys, items);
   return { sys, items, invalid };
+}
+
+/**
+ * Couple every pattern-member variable in the system to its seed by a rigid offset (the
+ * member's current position relative to the seed). Members are derived geometry — the
+ * scene re-lays them out from the seed after every edit — so the solver must not move
+ * one on its own; it may move the whole array: a demand on a member translates the seed
+ * and, through these couplings, every member with it, which is exactly what the
+ * re-derivation then reproduces. (Members used to be immovable, and a dimension from a
+ * member to another body pinned that body's whole chain: any solve that needed the
+ * patterned body to shift stalled and was rejected — a coincident onto one of its edges,
+ * or dragging a point constrained to it.) A fixed offset is exact for translations; a
+ * solve that rotates the patterned body leaves the re-derived members slightly off, and
+ * the post-apply verification reverts it like any unsatisfied solve. Couplings carry
+ * id -1: internal items, never user-facing.
+ */
+function addPatternCouplings(scene: Scene, sys: System, items: SolveItem[]): void {
+  const members = sys.keys.map((k, i) => ({ seed: memberSeedKey(scene, k), i })).filter((m) => m.seed !== null);
+  for (const { seed, i } of members) {
+    const s = acquire(scene, sys, seed!);
+    if (s === null || s === i) continue;
+    const offset = sub(sys.pos[i], sys.pos[s]);
+    const w = shareOf(sys.rank[i], sys.rank[s]); // fraction the member absorbs
+    items.push({
+      id: -1,
+      kind: "constraint",
+      run(pos, apply) {
+        const d = sub(sub(pos[i], pos[s]), offset); // member's drift off its derived spot
+        const err = len(d);
+        if (apply && err > 0) {
+          pos[i] = sub(pos[i], scale(d, w));
+          pos[s] = add(pos[s], scale(d, 1 - w));
+        }
+        return err;
+      },
+    });
+  }
 }
 
 /** Run Gauss-Seidel sweeps until every residual is under tolerance (or the budget runs out). */
@@ -770,6 +826,8 @@ function applySystem(scene: Scene, sys: System): void {
     if (len(delta) < EPS) continue;
     const parts = key.split(":");
     if (parts[0] === "pa") continue; // derived from the seed: never written back
+    // Pattern members are re-laid out from the seed when the seed is written back.
+    if (memberSeedKey(scene, key) !== null) continue;
     if (parts[0] === "pb") {
       // The axis step is the solved first instance relative to the solved anchor (both
       // in the solver's frame, so a body that moved in the same solve doesn't skew it).
