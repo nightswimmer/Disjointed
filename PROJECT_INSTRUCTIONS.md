@@ -722,6 +722,35 @@ dimension editor (`patternEdit`; count = whole number ≥ 2, spacing > 0, angle 
 the body) selects the pattern (`Selection.kind "pattern"`; Delete = `removePattern`). Members
 that don't fit get a red dashed ring. Pattern overlays draw in `PATTERN_COLOR` (pink), ink when
 selected. Tests: `scripts/patterns.ts`.
+**Mirrored component instances** (no format change): **Mirror H/V now works on component
+instances** — the instance becomes its definition's **mirror image** at the reflected
+placement; the definition and its other instances are untouched, and definition edits keep
+cascading into it. `InstanceTransform` and `ComponentInstance` gained an optional
+**`mirrored`** flag (absent = false, so old files load unchanged): a placement is now "reflect
+the def frame across its x-axis (y → −y), then rotate by `angle`, then translate to `pos`".
+`expandInstance` honours it — body angles become `t.angle − defAngle` (M·R(a) = R(−a)·M),
+body-local material reflects (control polygon + sampled outline + holes **reflected and
+reversed** to keep the winding, exactly like `mirrorBody`, per-corner radii reversed with
+them; attached-joint locals reflected; free joints / anchors through the reflected `xf`) and
+**motors get a negated `speed`** (a mirror image spins the other way; actuators, pins, rails,
+slider locks — captured from the drawn pose — and chassis groups are reflection-invariant).
+`instanceTransform` has the inverse branch (placement angle = body angle **+** def angle,
+`defPos` reflected), so re-expansion of a mirrored instance is a no-op, rotated / moved ones
+included. New **`Scene.mirrorInstance(id, axis, c)`**: composes the world reflection with the
+current placement (`"v"`: angle → −angle; `"h"` = R(π)·M: angle → π − angle; flag toggles,
+pos reflected) and **re-expands** there — so, like any re-expansion, an internally posed
+mechanism snaps back to the definition layout. Assembly-level ground anchors on the instance's
+joints follow the reflection; `bodyPoint` refs on its bodies reflect their local (y → −y) and
+vertex / edge refs are renumbered by the new private `remapReversedOutlineRefs(bodyId)`
+(factored out of `mirrorBody`, which now calls it). `mirrorBodies` is **instance-aware**:
+instance material counts towards the combined bbox, then each instance is mirrored whole via
+`mirrorInstance` (mixed selections of instances + plain bodies work). main's `mirrorSelection`
+dropped its "instances can't be mirrored yet" refusal (a lone instance body routes through
+`mirrorBodies`), `pasteAt` passes the flag through (`instancePlacement` already returns it, so
+copied mirrored instances paste mirrored), and load sanitizes the flag. Nested defs need
+nothing special: a mirrored inner instance is materialized bodies in the outer def's data,
+and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar tooltips now say
+"selection" rather than "body". Tests: 31 new checks in `scripts/components.ts` (146 total).
 
 ### Tech stack
 - **Vite + TypeScript + HTML5 Canvas** (no UI framework). Builds to static files.
@@ -932,6 +961,11 @@ selected. Tests: `scripts/patterns.ts`.
     `mirrorBodies(bodyIds, freeJointIds, axis)` mirrors a whole selection about the centre of
     its **combined bounding box**: each body mirrors in place + its centroid reflects across
     the shared axis, free joints reflect their position — cross-body pins stay coincident.
+    Component-instance material counts towards the box but is mirrored as whole instances:
+    `mirrorInstance(id, axis, c)` toggles the instance's `mirrored` flag, composes the world
+    reflection with its placement and re-expands it there (assembly-level ground anchors,
+    `bodyPoint` refs and — via the shared `remapReversedOutlineRefs` — vertex/edge refs on
+    its bodies follow); the def and its other instances are untouched.
     Copy/paste: `extractSelection(bodyIds, freeJointIds?)` snapshots a **`SelectionClip`** —
     one or more bodies (control polygon, radius/round, **colour**), their joints, selected
     free joints, and every constraint whose joints all travel with the clip: grounds, internal
@@ -1547,8 +1581,9 @@ selected. Tests: `scripts/patterns.ts`.
     `main` — a multi-selection copies via `extractSelection` with everything internal to it,
     incl. cross-body pins and group membership; a single body via `extractBody`; paste lands
     at the cursor, grid-snapped, and re-selects the copy via `setMulti`),
-    `mirrorSelection("h"|"v")` (multi-selection / group → `scene.mirrorBodies` about the
-    combined bbox centre; single body → `mirrorBody` about its centroid), and a **rotate**
+    `mirrorSelection("h"|"v")` (multi-selection / group / instance → `scene.mirrorBodies`
+    about the combined bbox centre, instances flipping whole; single plain body →
+    `mirrorBody` about its centroid), and a **rotate**
     tool. Rotate is a persistent mode (not one-shot): `startRotate` picks the pivot — a
     control node of the singly-selected body if grabbed; the **centre of the combined bbox**
     when the grabbed body is part of the multi-selection (or of a permanent group, which
@@ -1597,8 +1632,9 @@ selected. Tests: `scripts/patterns.ts`.
     it never grows edit handles); clicking an instance joint/body selects the whole instance;
     Delete removes whole instances (`removeInstance`; deleting an instance-owned slider alone
     is refused); copy/paste carries instances as **placements** (`clipboard = { clip,
-    instances: {defId, t}[], center }`) and pastes new instances; mirror refuses instance
-    material (v1); Ctrl+G refuses instance material; Ground tool on an instance body grounds
+    instances: {defId, t}[], center }` — `t.mirrored` included) and pastes new instances;
+    Mirror H/V flips whole instances (`mirrorBodies` → `mirrorInstance`, the instance
+    becoming its def's mirror image); Ctrl+G refuses instance material; Ground tool on an instance body grounds
     its **chassis group**; Shift-rigid-drag of a grabbed member moves the whole instance
     sim-style (internal mechanism articulates). The breadcrumb bar (`#crumb-bar`) overlays
     the canvas top-left. The `#component-group` toolbar group hides in sim, like the others.
@@ -2175,7 +2211,7 @@ Persistence:
   locked joints is a group-riding track (addSlider doesn't auto-ground them; riders slide
   and follow the towed group); serialize/load round-trip + legacy files; copy/paste carries
   group joints.
-- **components.ts** — hierarchical components end-to-end (89 checks): creation from a
+- **components.ts** — hierarchical components end-to-end (146 checks): creation from a
   selection (def carries sketch/measurements/grounded flags; assembly carries neither;
   instance replaces the originals exactly in place; sketch constraints on instance geometry
   rejected); joint-ground conversion (synthesized chassis anchor + pin; grounding the
@@ -2183,7 +2219,15 @@ Persistence:
   instances (rotated placement; chassis rigid under tow; other instances untouched);
   **cascade** (recolor/reshape/add/remove def bodies → every instance reconciles, surviving
   scene ids kept, placement — translation *and* rotation — preserved, new def material
-  arrives in the instance's frame); **containment warning** (`jointsOutsideBody`: clean
+  arrives in the instance's frame); **mirrored instances** (mirrorBodies on instance
+  material toggles `mirrored` and lands every joint on its reflection, ids + chassis group
+  survive, hole and per-corner radius stay on their reflected corner, motor speed negated,
+  vertex / bodyPoint refs keep their spot; re-expansion of a rotated + moved mirrored
+  instance is a no-op; def edit cascades in place; a V- then H-mirror of the rotated
+  instance reflect exactly and restore / re-set the flag; save/load and
+  `instantiateComponent` from `instancePlacement` keep the flag; a mirrored inner instance
+  inside an empty outer def matches a direct mirrored instance and follows an inner-def
+  edit in place); **containment warning** (`jointsOutsideBody`: clean
   scene reports none, an edge-clamped joint is not flagged, a def-shrink cascade flags the
   stranded assembly joint *without moving it*, and dragging it back inside clears the
   flag); **pose snap** (a posed body / free joint snaps back to
@@ -2537,8 +2581,9 @@ Persistence:
 - **Group follow-ups**: ~~groups contain bodies only~~ (done in v14 — free joints can be
   locked members); reshaping a grouped body's outline in draw mode is still per-body
   (groups constrain sim + move-together, not draw-mode shape editing).
-- **Component follow-ups (v1 scope decisions)**: no per-instance **mirroring** or scaling
-  (mirror inside the definition instead); no explicit "ports" (every instance joint is
+- **Component follow-ups (v1 scope decisions)**: ~~no per-instance **mirroring**~~ (done —
+  `mirrored` flag + `mirrorInstance`; note a mirror re-expands, so an internally posed
+  mechanism snaps back to the def layout) or scaling; no explicit "ports" (every instance joint is
   connectable); editing an instance's actuator/motor speed at the assembly level works but
   is overwritten by the next definition cascade (per-instance overrides would need an
   override record); assembly measurements referencing an instance's *slider rail* survive

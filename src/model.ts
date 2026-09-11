@@ -627,6 +627,9 @@ export interface ComponentInstance {
   /** Groups recreated from the definition's own groups (src = def group id). */
   groupMap: InstanceMapEntry[];
   groupId: number | null;
+  /** Expanded as the definition's mirror image (see `InstanceTransform.mirrored`).
+   *  Absent = false; pre-mirror files simply have none. */
+  mirrored?: boolean;
 }
 
 /** The material one occurrence of a component expanded into, in the ids of the context
@@ -638,10 +641,14 @@ export interface ComponentOccurrence {
   jointIds: number[];
 }
 
-/** A rigid placement mapping def-frame coordinates into the owning context. */
+/** A placement mapping def-frame coordinates into the owning context: an optional
+ *  reflection of the def frame (`mirrored` — across the def's x-axis, y → −y), then a
+ *  rotation by `angle` and a translation to `pos`. */
 export interface InstanceTransform {
   pos: Vec2;
   angle: number;
+  /** The instance is the mirror image of its definition. Absent = false. */
+  mirrored?: boolean;
 }
 
 /** Serializable snapshot of an entire scene (for save / load / autosave). */
@@ -3210,13 +3217,23 @@ export class Scene {
     });
     for (const j of attached) j.local = sub(jointWorlds.get(j.id)!, c);
     this.rebuildBody(body);
-    // The reversal renumbered the control polygon, so vertex/edge refs (sketch constraints
-    // and measurements) must be remapped to keep naming the same — now reflected — corner
-    // or edge: vertex i → n−1−i; edge i (vᵢ→vᵢ₊₁) → n−2−i, wrapping for i = n−1. Without
-    // this, an H/V constraint jumps to a different edge and the next sketch solve drags
-    // the geometry to satisfy the wrong element. (Reflection itself preserves every
-    // constraint kind: H stays H, V stays V, parallel/perpendicular/equal/coincident and
-    // distances are all reflection-invariant.)
+    this.remapReversedOutlineRefs(bodyId);
+    // bodyPoint refs land on the reflection of the spot they marked (angle is 0 now).
+    for (const bp of bodyPoints) bp.ref.local = sub(reflect(bp.world), body.pos);
+  }
+
+  /**
+   * After a body's control polygons were reversed (a mirror), vertex/edge refs on it
+   * (sketch constraints and measurements) must be remapped to keep naming the same — now
+   * reflected — corner or edge: vertex i → n−1−i; edge i (vᵢ→vᵢ₊₁) → n−2−i, wrapping for
+   * i = n−1. Without this, an H/V constraint jumps to a different edge and the next
+   * sketch solve drags the geometry to satisfy the wrong element. (Reflection itself
+   * preserves every constraint kind: H stays H, V stays V, parallel/perpendicular/equal/
+   * coincident and distances are all reflection-invariant.)
+   */
+  private remapReversedOutlineRefs(bodyId: number): void {
+    const body = this.getBody(bodyId);
+    if (!body) return;
     const remap = (ref: MeasureRef | null): void => {
       if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) return;
       // Each outline reversed independently, so a ref remaps within its own outline.
@@ -3233,8 +3250,6 @@ export class Scene {
       remap(sc.refA);
       remap(sc.refB);
     }
-    // bodyPoint refs land on the reflection of the spot they marked (angle is 0 now).
-    for (const bp of bodyPoints) bp.ref.local = sub(reflect(bp.world), body.pos);
   }
 
   /**
@@ -3243,7 +3258,8 @@ export class Scene {
    * reflected across the shared axis (in-place reflection + centroid reflection = a true
    * reflection of the whole arrangement), and free joints reflect their world position.
    * Pins between selected bodies stay coincident, since both endpoints land on the same
-   * reflected point.
+   * reflected point. Component-instance material counts towards the box but is mirrored
+   * as whole instances (`mirrorInstance`) — an instance's shape belongs to its definition.
    */
   mirrorBodies(bodyIds: number[], freeJointIds: number[], axis: "h" | "v"): void {
     const bodies = [...new Set(bodyIds)]
@@ -3265,13 +3281,25 @@ export class Scene {
     const c = (min + max) / 2;
     const reflectDelta = (p: Vec2): Vec2 =>
       axis === "h" ? vec(2 * (c - p.x), 0) : vec(0, 2 * (c - p.y));
+    const instanceIds = new Set<number>();
     for (const b of bodies) {
+      const inst = this.instanceOfBody(b.id);
+      if (inst) {
+        instanceIds.add(inst.id);
+        continue;
+      }
       this.mirrorBody(b.id, axis); // mirror in place about its own centroid...
       this.moveBody(b.id, reflectDelta(b.pos)); // ...then reflect the centroid itself
     }
     for (const j of joints) {
+      const inst = this.instanceOfJoint(j.id);
+      if (inst) {
+        instanceIds.add(inst.id);
+        continue;
+      }
       this.moveJoint(j.id, reflectDelta(this.jointWorld(j)));
     }
+    for (const id of instanceIds) this.mirrorInstance(id, axis, c);
   }
 
   // --- permanent body groups ------------------------------------------------
@@ -4009,6 +4037,46 @@ export class Scene {
     }
   }
 
+  /**
+   * Mirror a whole component instance across the world line x = c (`"h"`) or y = c
+   * (`"v"`): the instance becomes its definition's mirror image (the `mirrored` flag
+   * toggles) at the reflected placement, and is re-expanded there — so, as with any
+   * re-expansion, its internal mechanism snaps back to the definition layout. Scene ids,
+   * the chassis group and the instance's own grounding survive (a reconciling
+   * re-expansion). Assembly-level ground anchors on its joints follow the reflection, and
+   * vertex / edge / bodyPoint refs on its bodies (pose dims and constraints) keep naming
+   * the same physical spot: outlines reverse on a mirror (winding), so their indices are
+   * remapped like `mirrorBody` does.
+   */
+  mirrorInstance(instanceId: number, axis: "h" | "v", c: number): void {
+    const inst = this.instances.find((i) => i.id === instanceId);
+    const def = inst ? this.getComponent(inst.defId) : undefined;
+    if (!inst || !def) return;
+    const t = this.instanceTransform(inst, def);
+    const reflect = (w: Vec2): Vec2 =>
+      axis === "h" ? vec(2 * c - w.x, w.y) : vec(w.x, 2 * c - w.y);
+    // Compose the world reflection S with the placement T = translate · R(angle) · M^m
+    // (M = the def-frame reflection y → −y used by expansion). S_v (y → −y) is M itself
+    // and conjugates a rotation to its inverse: M·R(a) = R(−a)·M, so the angle negates
+    // and the reflection count flips. S_h (x → −x) = R(π)·M, so the angle becomes π − a.
+    const angle = axis === "v" ? -t.angle : Math.PI - t.angle;
+    const nt: InstanceTransform = { pos: reflect(t.pos), angle, mirrored: t.mirrored !== true };
+    const bodyIds = new Set(inst.bodyMap.map((e) => e.id));
+    const jointIds = new Set([...inst.jointMap, ...inst.anchorMap].map((e) => e.id));
+    for (const con of this.constraints) {
+      if (con.kind === "ground" && jointIds.has(con.joint)) con.anchor = reflect(con.anchor);
+    }
+    this.expandInstance(def, inst, nt);
+    // Body-local material reflected across the local x-axis (see expandInstance), so a
+    // bodyPoint ref follows with it; reversed outlines renumber vertex / edge refs.
+    for (const m of this.measurements) {
+      for (const ref of [m.refA, m.refB]) {
+        if (ref?.kind === "bodyPoint" && bodyIds.has(ref.bodyId)) ref.local = vec(ref.local.x, -ref.local.y);
+      }
+    }
+    for (const id of bodyIds) this.remapReversedOutlineRefs(id);
+  }
+
   /** Every def id a definition's expansion (transitively) uses — for cycle checks:
    *  a def may not be instantiated into a context whose def it uses. */
   componentUses(defId: number): Set<number> {
@@ -4235,15 +4303,18 @@ export class Scene {
   /** The instance's current placement (def frame → context), derived from a surviving
    *  reference body's scene pose vs its cached def pose (chassis bodies preferred — they
    *  move rigidly with the instance). Falls back to a surviving free joint (translation
-   *  only), then to identity. */
+   *  only), then to identity. A mirrored instance inverts the def-frame reflection first:
+   *  its bodies sit at angle − defAngle, so the placement angle is their sum. */
   private instanceTransform(inst: ComponentInstance, def: ComponentDef): InstanceTransform {
+    const mirrored = inst.mirrored === true;
+    const refl = (p: Vec2): Vec2 => (mirrored ? vec(p.x, -p.y) : p);
     const pick =
       inst.bodyMap.find((e) => e.chassis && this.getBody(e.id)) ??
       inst.bodyMap.find((e) => this.getBody(e.id));
     if (pick) {
       const b = this.getBody(pick.id)!;
-      const angle = b.angle - pick.defAngle;
-      return { pos: sub(b.pos, rotate(pick.defPos, angle)), angle };
+      const angle = mirrored ? b.angle + pick.defAngle : b.angle - pick.defAngle;
+      return { pos: sub(b.pos, rotate(refl(pick.defPos), angle)), angle, mirrored };
     }
     const dJoint = new Map(def.data.joints.map((j) => [j.id, j]));
     const dBody = new Map(def.data.bodies.map((b) => [b.id, b]));
@@ -4254,9 +4325,9 @@ export class Scene {
       const dw = dj.bodyId === null
         ? dj.local
         : add(dBody.get(dj.bodyId)!.pos, rotate(dj.local, dBody.get(dj.bodyId)!.angle));
-      return { pos: sub(this.jointWorld(j), dw), angle: 0 };
+      return { pos: sub(this.jointWorld(j), refl(dw)), angle: 0, mirrored };
     }
-    return { pos: vec(0, 0), angle: 0 };
+    return { pos: vec(0, 0), angle: 0, mirrored };
   }
 
   /**
@@ -4276,7 +4347,27 @@ export class Scene {
     t: InstanceTransform
   ): ComponentInstance {
     const d = def.data;
-    const xf = (p: Vec2): Vec2 => add(t.pos, rotate(p, t.angle));
+    // A mirrored instance is the definition reflected across its x-axis (y → −y), then
+    // the rigid part of the placement. Reflecting the def frame negates every body's
+    // def angle (M·R(a) = R(−a)·M) and reflects body-local material — shapes and attached
+    // joints — the same way; outlines are reversed to keep their winding, exactly as
+    // `mirrorBody` does (per-corner radii reverse with them, staying on their corner).
+    const m = t.mirrored === true;
+    const refl = (p: Vec2): Vec2 => (m ? vec(p.x, -p.y) : vec(p.x, p.y));
+    const xf = (p: Vec2): Vec2 => add(t.pos, rotate(refl(p), t.angle));
+    const xfAngle = (a: number): number => (m ? t.angle - a : t.angle + a);
+    const loop = (pts: Vec2[]): Vec2[] => (m ? pts.map(refl).reverse() : pts.map((p) => vec(p.x, p.y)));
+    const radii = (r: (number | null)[]): (number | null)[] => (m ? [...r].reverse() : [...r]);
+    const holesOf = (db: Body): BodyHole[] => {
+      const hs = cloneBodyHoles(db.holes ?? []);
+      if (m) {
+        for (const h of hs) {
+          h.controlLocal = h.controlLocal.map(refl).reverse();
+          if (h.radii) h.radii = [...h.radii].reverse();
+        }
+      }
+      return hs;
+    };
     const dBody = new Map(d.bodies.map((b) => [b.id, b]));
     const dJoint = new Map(d.joints.map((j) => [j.id, j]));
     const defJointWorld = (j: Joint): Vec2 =>
@@ -4310,15 +4401,15 @@ export class Scene {
         // re-expansion snaps every part back to the def layout at the instance's
         // placement. Only the grounded flag is instance state (grounding an instance
         // happens outside).
-        sb.controlLocal = db.controlLocal.map((p) => vec(p.x, p.y));
-        sb.local = db.local.map((p) => vec(p.x, p.y));
+        sb.controlLocal = loop(db.controlLocal);
+        sb.local = loop(db.local);
         sb.radius = db.radius;
-        if (db.radii) sb.radii = [...db.radii];
+        if (db.radii) sb.radii = radii(db.radii);
         else delete sb.radii;
         sb.round = db.round;
         if (db.holes?.length) {
-          sb.holes = cloneBodyHoles(db.holes);
-          sb.holesLocal = (db.holesLocal ?? []).map((l) => l.map((p) => vec(p.x, p.y)));
+          sb.holes = holesOf(db);
+          sb.holesLocal = (db.holesLocal ?? []).map(loop);
         } else {
           delete sb.holes;
           delete sb.holesLocal;
@@ -4327,25 +4418,25 @@ export class Scene {
         sb.invInertia = db.invInertia;
         sb.color = db.color;
         sb.pos = xf(db.pos);
-        sb.angle = db.angle + t.angle;
+        sb.angle = xfAngle(db.angle);
       } else {
         sb = {
           id: this.id(),
-          controlLocal: db.controlLocal.map((p) => vec(p.x, p.y)),
+          controlLocal: loop(db.controlLocal),
           radius: db.radius,
           round: db.round,
-          ...(db.radii ? { radii: [...db.radii] } : {}),
-          local: db.local.map((p) => vec(p.x, p.y)),
+          ...(db.radii ? { radii: radii(db.radii) } : {}),
+          local: loop(db.local),
           pos: xf(db.pos),
-          angle: db.angle + t.angle,
+          angle: xfAngle(db.angle),
           invMass: db.invMass,
           invInertia: db.invInertia,
           color: db.color,
           grounded: false,
         };
         if (db.holes?.length) {
-          sb.holes = cloneBodyHoles(db.holes);
-          sb.holesLocal = (db.holesLocal ?? []).map((l) => l.map((p) => vec(p.x, p.y)));
+          sb.holes = holesOf(db);
+          sb.holesLocal = (db.holesLocal ?? []).map(loop);
         }
         this.bodies.push(sb);
       }
@@ -4381,7 +4472,7 @@ export class Scene {
             sj = undefined;
           } else {
             sj.bodyId = bid;
-            sj.local = vec(dj.local.x, dj.local.y);
+            sj.local = refl(dj.local);
           }
         }
       }
@@ -4391,7 +4482,7 @@ export class Scene {
         } else {
           const bid = bodyIdMap.get(dj.bodyId);
           if (bid === undefined) continue;
-          sj = { id: this.id(), bodyId: bid, local: vec(dj.local.x, dj.local.y) };
+          sj = { id: this.id(), bodyId: bid, local: refl(dj.local) };
         }
         this.joints.push(sj);
       }
@@ -4528,7 +4619,7 @@ export class Scene {
           sc.bodyId = body;
           sc.pivotJointId = pivot;
           sc.crankJointId = crank;
-          sc.speed = dc.speed;
+          sc.speed = m ? -dc.speed : dc.speed; // a mirror image spins the other way
           keep(dc.id, sc.id);
         } else {
           const nm: MotorConstraint = {
@@ -4537,7 +4628,7 @@ export class Scene {
             bodyId: body,
             pivotJointId: pivot,
             crankJointId: crank,
-            speed: dc.speed,
+            speed: m ? -dc.speed : dc.speed, // a mirror image spins the other way
           };
           this.constraints.push(nm);
           keep(dc.id, nm.id);
@@ -4595,6 +4686,8 @@ export class Scene {
       inst.anchorMap = anchorMap;
       inst.groupMap = groupMap;
       inst.groupId = groupId;
+      if (m) inst.mirrored = true;
+      else delete inst.mirrored;
       return inst;
     }
     return {
@@ -4606,6 +4699,7 @@ export class Scene {
       anchorMap,
       groupMap,
       groupId,
+      ...(m ? { mirrored: true } : {}),
     };
   }
 
@@ -4881,6 +4975,7 @@ export class Scene {
       inst.anchorMap = Array.isArray(inst.anchorMap) ? inst.anchorMap : [];
       inst.groupMap = Array.isArray(inst.groupMap) ? inst.groupMap : [];
       inst.groupId = typeof inst.groupId === "number" ? inst.groupId : null;
+      if (inst.mirrored !== true) delete inst.mirrored;
     }
     this.pruneInstances();
     // Construction guidelines arrived in v11; older files simply have none.

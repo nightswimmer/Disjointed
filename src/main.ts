@@ -1083,8 +1083,8 @@ function applyBoxSelect(): void {
   setMulti(bodies, joints);
 }
 
-/** Whether the current selection contains component-instance material (grouping,
- *  ungrouping and mirroring don't apply to it — edit the definition instead). */
+/** Whether the current selection contains component-instance material (grouping and
+ *  ungrouping don't apply to it — edit the definition instead). */
 function selectionTouchesInstance(): boolean {
   if (multiSel) {
     for (const id of multiSel.bodies) if (scene.instanceOfBody(id)) return true;
@@ -3534,6 +3534,7 @@ function pasteAt(at: Vec2 | null): void {
     const inst = scene.instantiateComponent(entry.defId, {
       pos: add(entry.t.pos, offset),
       angle: entry.t.angle,
+      ...(entry.t.mirrored ? { mirrored: true } : {}),
     });
     if (inst) addInstanceMembers(inst, bodies, joints);
   }
@@ -3545,20 +3546,20 @@ function pasteAt(at: Vec2 | null): void {
 }
 
 /** Mirror the selection in place: a single body about its centroid, a multi-selection /
- *  group about the centre of its combined bounding box. */
+ *  group / component instance about the centre of its combined bounding box. Instance
+ *  material mirrors as whole instances (`Scene.mirrorInstance`, via `mirrorBodies`): the
+ *  instance becomes its definition's mirror image — the definition and its other
+ *  instances are untouched, and a definition edit still cascades into it. */
 function mirrorSelection(axis: "h" | "v"): void {
   if (mode !== "draw") return;
-  if (selectionTouchesInstance()) {
-    notify("Component instances can't be mirrored yet — mirror inside the definition instead.");
-    return;
-  }
   if (multiSel) {
     scene.mirrorBodies([...multiSel.bodies], [...multiSel.joints], axis);
     markDirty();
     return;
   }
   if (selection?.kind !== "body") return;
-  scene.mirrorBody(selection.id, axis);
+  if (scene.instanceOfBody(selection.id)) scene.mirrorBodies([selection.id], [], axis);
+  else scene.mirrorBody(selection.id, axis);
   markDirty();
 }
 

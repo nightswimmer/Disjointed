@@ -155,8 +155,10 @@ unit — and in **Simulate mode it moves as a single rigid body**.
   outside the selection (e.g. a pin to an uncopied body) isn't reproduced.
 - **Mirror H / V** — reflect a selected body left↔right or top↔bottom in place about its centroid;
   a multi-selection / group reflects about the centre of its combined bounding box. Constraints
-  and dimensions follow their corners/edges through the flip. Grouped in the toolbar next to
-  **Rotate**.
+  and dimensions follow their corners/edges through the flip. **Component instances mirror
+  too**: the instance becomes its definition's mirror image (motors spin the other way) while
+  the definition and its other instances stay as they are — see *Components* below. Grouped
+  in the toolbar next to **Rotate**.
 - **Combine** (toolbar button next to **Split**, or **N**) — merge the **multi-selected bodies**
   (Ctrl+click or box-select two or more) into one body: the union of their shapes. They must
   **overlap or share an edge** (bodies that don't touch the rest, or touch only at a corner,
@@ -309,12 +311,18 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   components (place instances inside it, no throwaway body needed). An empty definition can't be
   placed until it has content.
 - **Instances are atomic**: clicking any part selects the whole instance (dashed outline);
-  drag / rotate / copy / delete act on it whole, and pasting a copied instance creates a new
+  drag / rotate / mirror / copy / delete act on it whole, and pasting a copied instance creates a new
   instance of the same definition. Shapes are **design-locked** — no corner handles, and
   constraints / dimensions never reshape an instance: they move the free side, or **drive the
   instance's pose** (see *Driving dimensions* and *Constraints on components* above).
   **Shift-drag** a member to pose the
   instance's internal mechanism rigidly, exactly like simulating it.
+- **Mirror an instance** (Mirror H / V with it selected): the instance becomes the
+  **mirror image of its definition** — a left-hand part from a right-hand design — and stays
+  linked: definition edits keep cascading into it, and copies of it paste mirrored. The
+  definition and every other instance are untouched. Motors inside spin the other way, as a
+  reflection should. Mirroring re-places the instance from its definition, so an internal
+  mechanism you had posed with Shift-drag returns to the definition's layout.
 - **Grounding in a definition = the chassis**: grounded bodies and grounded free joints become
   one rigid cluster per instance; a joint-ground on a moving part becomes a pivot fixed to that
   chassis. Ground an instance in the assembly (Ground tool on any of its bodies) to fix its

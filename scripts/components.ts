@@ -21,6 +21,13 @@
  *    other components.
  *  - removeInstance / dissolveInstance / removeComponent behave; serialize/load
  *    round-trips components + instances (v14) and pre-v14 files load with none.
+ *  - Mirrored instances: mirrorBodies mirrors instance material as whole instances
+ *    (`mirrorInstance` toggles the `mirrored` flag and re-expands at the reflected
+ *    placement): every joint lands on its reflection, ids / chassis group survive, holes
+ *    and per-corner radii stay on their corners, motors spin the other way; the derived
+ *    placement round-trips (re-expansion is a no-op, rotated instances included), def
+ *    edits cascade into a mirrored instance (nested too), save/load and copy/paste keep
+ *    the flag, and vertex / bodyPoint refs on the instance keep naming the same spot.
  */
 import {
   Scene,
@@ -30,7 +37,7 @@ import {
 } from "../src/model";
 import { solve, Driver } from "../src/solver";
 import { applyDrivingDimension, solveSketch } from "../src/sketch";
-import { Vec2, dist, sub, rotate } from "../src/geometry";
+import { Vec2, add, dist, sub, rotate } from "../src/geometry";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail: string) {
@@ -708,6 +715,204 @@ function editDef(scene: Scene, defId: number, mutate: (s: Scene) => void): Set<n
   const l2 = new Scene();
   l2.load(legacy);
   check("pre-v14 files load with no components", l2.components.length === 0 && l2.instances.length === 0, "clean");
+}
+
+// --- mirrored instances ----------------------------------------------------------
+{
+  /** World positions of an instance's mechanism joints (by def src) and anchors (by
+   *  "a<src>"), so poses can be compared across a mirror / re-expansion. */
+  const jointWorlds = (s: Scene, instId: number): Map<string, Vec2> => {
+    const inst = s.instances.find((i) => i.id === instId)!;
+    const out = new Map<string, Vec2>();
+    for (const e of inst.jointMap) out.set(`${e.src}`, s.jointWorld(s.getJoint(e.id)!));
+    for (const e of inst.anchorMap) out.set(`a${e.src}`, s.jointWorld(s.getJoint(e.id)!));
+    return out;
+  };
+  const maxDiff = (a: Map<string, Vec2>, b: Map<string, Vec2>, f: (p: Vec2) => Vec2 = (p) => p): number => {
+    let worst = 0;
+    for (const [k, p] of a) worst = Math.max(worst, b.has(k) ? dist(f(p), b.get(k)!) : Infinity);
+    return a.size === b.size ? worst : Infinity;
+  };
+  const freeJointIds = (s: Scene, instId: number): number[] => {
+    const inst = s.instances.find((i) => i.id === instId)!;
+    return [...inst.jointMap, ...inst.anchorMap].map((e) => e.id).filter((id) => s.getJoint(id)?.bodyId === null);
+  };
+  const bodyIds = (s: Scene, instId: number): number[] =>
+    s.instances.find((i) => i.id === instId)!.bodyMap.map((e) => e.id);
+  /** The x (or y) centre of the instance's bounding box — the mirror axis mirrorBodies uses. */
+  const boxCentre = (s: Scene, instId: number, axis: "h" | "v"): number => {
+    let min = Infinity, max = -Infinity;
+    const inc = (p: Vec2): void => {
+      const v = axis === "h" ? p.x : p.y;
+      min = Math.min(min, v);
+      max = Math.max(max, v);
+    };
+    for (const id of bodyIds(s, instId)) s.bodyWorldVerts(s.getBody(id)!).forEach(inc);
+    for (const id of freeJointIds(s, instId)) inc(s.jointWorld(s.getJoint(id)!));
+    return (min + max) / 2;
+  };
+  const reflectAbout = (axis: "h" | "v", c: number) => (p: Vec2): Vec2 =>
+    axis === "h" ? { x: 2 * c - p.x, y: p.y } : { x: p.x, y: 2 * c - p.y };
+  const mirror = (s: Scene, instId: number, axis: "h" | "v"): ((p: Vec2) => Vec2) => {
+    const f = reflectAbout(axis, boxCentre(s, instId, axis));
+    s.mirrorBodies(bodyIds(s, instId), freeJointIds(s, instId), axis);
+    return f;
+  };
+  const bodyDrift = (s: Scene, ids: number[], before: Map<number, Vec2>): number =>
+    Math.max(...ids.map((id) => dist(s.getBody(id)!.pos, before.get(id)!)));
+  const bodyPoses = (s: Scene, ids: number[]): Map<number, Vec2> =>
+    new Map(ids.map((id) => [id, { ...s.getBody(id)!.pos }]));
+
+  const scene = new Scene();
+  // Definition: a grounded base + a grounded free joint (a two-member chassis), an arm
+  // pinned to the base with an off-axis crank joint driven by a motor, one rounded base
+  // corner and a hole — enough asymmetry that a reflection is visibly different.
+  const base0 = square(scene, 0, 0);
+  const arm0 = square(scene, 100, 0);
+  const bj = scene.addJoint(base0.id, { x: 15, y: 0 });
+  const aj = scene.addJoint(arm0.id, { x: 85, y: 0 });
+  const crank = scene.addJoint(arm0.id, { x: 100, y: 10 });
+  scene.addPin(bj.id, aj.id);
+  scene.toggleBodyGround(base0.id);
+  const cj = scene.addFreeJoint({ x: -40, y: -30 });
+  scene.addGround(cj.id, { x: -40, y: -30 });
+  scene.setBodyCornerRadius(base0.id, 0, 6);
+  scene.addBodyHole(base0.id, [{ x: 5, y: 5 }, { x: 12, y: 5 }, { x: 12, y: 12 }]);
+  check("motor created in the def-to-be", scene.addMotor(arm0.id, aj.id, crank.id) !== null, "motor");
+  const res = scene.createComponentFromSelection("Crank", [base0.id, arm0.id], [cj.id])!;
+  const { def, instance: inst } = res;
+  const defMotorSpeed = def.data.constraints.find((c) => c.kind === "motor")!.speed;
+  const baseId = inst.bodyMap.find((e) => e.chassis)!.id;
+  const armId = inst.bodyMap.find((e) => !e.chassis)!.id;
+  const idsBefore = [...bodyIds(scene, inst.id)].sort();
+
+  // Refs on the instance (a vertex ref and a bodyPoint ref, each paired with an outside
+  // free joint) must keep naming the same physical spot through the mirror.
+  const outside = scene.addFreeJoint({ x: 0, y: 200 });
+  const mVert = scene.addMeasurement("draw", { kind: "vertex", bodyId: baseId, index: 1 }, { kind: "joint", jointId: outside.id }, { x: 0, y: 120 })!;
+  const mBp = scene.addMeasurement("draw", { kind: "bodyPoint", bodyId: baseId, local: { x: 3, y: 7 } }, { kind: "joint", jointId: outside.id }, { x: 0, y: 140 })!;
+  const refPoint = (m: { refA: import("../src/model").MeasureRef }): Vec2 => {
+    const r = scene.resolveMeasureRef(m.refA)!;
+    return r.kind === "point" ? r.p : r.a;
+  };
+  const vertBefore = refPoint(mVert);
+  const bpBefore = refPoint(mBp);
+  const baseBody = (): import("../src/model").Body => scene.getBody(baseId)!;
+  const roundedCornerWorld = (): Vec2 => {
+    const b = baseBody();
+    const i = b.radii!.findIndex((r) => r === 6);
+    return scene.bodyControlWorld(b)[i];
+  };
+  const cornerBefore = roundedCornerWorld();
+  const holeBefore = scene.bodyHoleControlWorld(baseBody(), 0);
+
+  const jBefore = jointWorlds(scene, inst.id);
+  const f1 = mirror(scene, inst.id, "h");
+  check("mirror sets the mirrored flag", inst.mirrored === true, `${inst.mirrored}`);
+  check("still one instance of two bodies", scene.instances.length === 1 && scene.bodies.length === 2, `${scene.bodies.length} bodies`);
+  check("mirror preserves the body ids", JSON.stringify([...bodyIds(scene, inst.id)].sort()) === JSON.stringify(idsBefore), idsBefore.join(","));
+  const jAfter = jointWorlds(scene, inst.id);
+  const err1 = maxDiff(jBefore, jAfter, f1);
+  check("every joint lands on its reflection", err1 < 1e-9, `max err ${err1.toExponential(2)}`);
+  const chassis = scene.groups.find((g) => g.id === inst.groupId);
+  check("chassis group survives the mirror", !!chassis && chassis.bodyIds.length === 1 && chassis.jointIds.length === 1, chassis ? `${chassis.bodyIds.length}b+${chassis.jointIds.length}j` : "gone");
+  const motor = scene.constraints.find((c) => c.kind === "motor")!;
+  check("mirrored motor spins the other way", motor.speed === -defMotorSpeed, `${motor.speed} vs def ${defMotorSpeed}`);
+  check("def motor speed untouched", def.data.constraints.find((c) => c.kind === "motor")!.speed === defMotorSpeed, `${defMotorSpeed}`);
+  const cornerAfter = roundedCornerWorld();
+  check("per-corner radius stays on its (reflected) corner", dist(cornerAfter, f1(cornerBefore)) < 1e-9, `${dist(cornerAfter, f1(cornerBefore)).toExponential(2)}`);
+  const holeAfter = scene.bodyHoleControlWorld(baseBody(), 0);
+  const holeErr = Math.max(...holeBefore.map((p) => Math.min(...holeAfter.map((q) => dist(f1(p), q)))));
+  check("hole reflected with the body", holeAfter.length === 3 && holeErr < 1e-9, `err ${holeErr.toExponential(2)}`);
+  check("vertex ref still names the same corner", dist(refPoint(mVert), f1(vertBefore)) < 1e-9, `${dist(refPoint(mVert), f1(vertBefore)).toExponential(2)}`);
+  check("bodyPoint ref follows the reflection", dist(refPoint(mBp), f1(bpBefore)) < 1e-9, `${dist(refPoint(mBp), f1(bpBefore)).toExponential(2)}`);
+  const armAfter = scene.getBody(armId)!;
+  const armVerts = scene.bodyWorldVerts(armAfter);
+  const crankW = jAfter.get(`${def.data.joints.find((j) => j.bodyId !== null && Math.abs(j.local.y) > 1)!.id}`)!;
+  check("crank joint sits on the reflected arm", armVerts.length > 0 && Math.abs(crankW.x - f1(jBefore.get(`${def.data.joints.find((j) => j.bodyId !== null && Math.abs(j.local.y) > 1)!.id}`)!).x) < 1e-9, "on arm");
+
+  // The derived placement must round-trip: a re-expansion is a no-op, also once the
+  // mirrored instance has been rotated and moved (placement angle = body angle + def angle).
+  const pl = scene.instancePlacement(inst.id)!;
+  check("instancePlacement reports mirrored", pl.mirrored === true, `${pl.mirrored}`);
+  scene.rotateInstance(inst.id, { x: 30, y: 10 }, 0.7);
+  scene.moveInstance(inst.id, { x: 12, y: -8 });
+  const poses1 = bodyPoses(scene, bodyIds(scene, inst.id));
+  const j1 = jointWorlds(scene, inst.id);
+  scene.reexpandInstances(new Set([def.id]));
+  const d1 = Math.max(bodyDrift(scene, bodyIds(scene, inst.id), poses1), maxDiff(j1, jointWorlds(scene, inst.id)));
+  check("re-expansion of a rotated mirrored instance is a no-op", d1 < 1e-9, `drift ${d1.toExponential(2)}`);
+  check("body angles negate the def angles", Math.abs(scene.getBody(armId)!.angle - (scene.instancePlacement(inst.id)!.angle - inst.bodyMap.find((e) => e.id === armId)!.defAngle)) < 1e-9, `${scene.getBody(armId)!.angle.toFixed(4)}`);
+
+  // A definition edit cascades into the mirrored instance without moving it.
+  editDef(scene, def.id, (s) => s.bodies.forEach((b) => (b.color = "#abcdef")));
+  const d2 = Math.max(bodyDrift(scene, bodyIds(scene, inst.id), poses1), maxDiff(j1, jointWorlds(scene, inst.id)));
+  check("def edit keeps the mirrored instance in place", d2 < 1e-9, `drift ${d2.toExponential(2)}`);
+  check("def edit recolours the mirrored instance", scene.bodies.every((b) => b.color === "#abcdef"), "recoloured");
+  check("def edit keeps the mirrored flag", inst.mirrored === true, `${inst.mirrored}`);
+
+  // Mirroring again (the other axis, on the rotated instance) undoes the flag and lands
+  // every joint on its reflection — the composition of reflection and rotation.
+  const j2 = jointWorlds(scene, inst.id);
+  const f2 = mirror(scene, inst.id, "v");
+  check("second mirror clears the flag", inst.mirrored !== true, `${inst.mirrored}`);
+  const err2 = maxDiff(j2, jointWorlds(scene, inst.id), f2);
+  check("V-mirror of a rotated instance reflects every joint", err2 < 1e-9, `max err ${err2.toExponential(2)}`);
+  check("motor spins the original way again", scene.constraints.find((c) => c.kind === "motor")!.speed === defMotorSpeed, `${scene.constraints.find((c) => c.kind === "motor")!.speed}`);
+  const j3 = jointWorlds(scene, inst.id);
+  const f3 = mirror(scene, inst.id, "h");
+  const err3 = maxDiff(j3, jointWorlds(scene, inst.id), f3);
+  check("H-mirror of a rotated instance reflects every joint", inst.mirrored === true && err3 < 1e-9, `max err ${err3.toExponential(2)}`);
+
+  // Save / load keeps the flag and the geometry (re-expansion after load is a no-op).
+  const data = JSON.parse(JSON.stringify(scene.serialize())) as SceneData;
+  check("serialize writes the mirrored flag", (data.instances ?? [])[0]?.mirrored === true, `${data.instances?.[0]?.mirrored}`);
+  const loaded = new Scene();
+  loaded.load(data);
+  const lInst = loaded.instances[0];
+  const lPoses = bodyPoses(loaded, bodyIds(loaded, lInst.id));
+  const lJ = jointWorlds(loaded, lInst.id);
+  loaded.reexpandInstances(new Set([def.id]));
+  const d4 = Math.max(bodyDrift(loaded, bodyIds(loaded, lInst.id), lPoses), maxDiff(lJ, jointWorlds(loaded, lInst.id)));
+  check("loaded mirrored instance re-expands in place", lInst.mirrored === true && d4 < 1e-9, `drift ${d4.toExponential(2)}`);
+
+  // Copy / paste: placing a new instance from the mirrored placement reproduces it.
+  const t = scene.instancePlacement(inst.id)!;
+  const copy = scene.instantiateComponent(def.id, { ...t, pos: add(t.pos, { x: 500, y: 0 }) })!;
+  const shift = (p: Vec2): Vec2 => add(p, { x: 500, y: 0 });
+  const errCopy = maxDiff(jointWorlds(scene, inst.id), jointWorlds(scene, copy.id), shift);
+  check("instance placed from a mirrored placement is mirrored", copy.mirrored === true && errCopy < 1e-9, `max err ${errCopy.toExponential(2)}`);
+
+  // Nested: an (initially empty) outer definition holding a mirrored, rotated inner
+  // instance. An outer instance shows the same material as a direct mirrored instance
+  // at the composed placement; editing the inner def cascades through the outer def's
+  // data (reexpandData honours the flag) and into the outer instance without moving it.
+  const outerDef = scene.createEmptyComponent("Pair");
+  editDef(scene, outerDef.id, (s) => {
+    s.instantiateComponent(def.id, { pos: { x: 0, y: 0 }, angle: 0.3, mirrored: true });
+  });
+  check("outer def records the inner instance as mirrored", (outerDef.data.instances ?? [])[0]?.mirrored === true, `${outerDef.data.instances?.[0]?.mirrored}`);
+  const outerInst = scene.instantiateComponent(outerDef.id, { pos: { x: 700, y: 0 }, angle: 0 })!;
+  const direct = scene.instantiateComponent(def.id, { pos: { x: 700, y: 0 }, angle: 0.3, mirrored: true })!;
+  const setErr = (a: Vec2[], b: Vec2[]): number =>
+    a.length === b.length ? Math.max(...a.map((p) => Math.min(...b.map((q) => dist(p, q))))) : Infinity;
+  const nestedErr = setErr([...jointWorlds(scene, outerInst.id).values()], [...jointWorlds(scene, direct.id).values()]);
+  check("nested mirrored instance matches a direct one", nestedErr < 1e-9, `max err ${nestedErr.toExponential(2)}`);
+  const nestedVertErr = setErr(
+    bodyIds(scene, outerInst.id).flatMap((id) => scene.bodyControlWorld(scene.getBody(id)!)),
+    bodyIds(scene, direct.id).flatMap((id) => scene.bodyControlWorld(scene.getBody(id)!))
+  );
+  check("nested mirrored outlines match a direct one", nestedVertErr < 1e-9, `max err ${nestedVertErr.toExponential(2)}`);
+  const oPoses = bodyPoses(scene, bodyIds(scene, outerInst.id));
+  const oJ = jointWorlds(scene, outerInst.id);
+  editDef(scene, def.id, (s) => s.bodies.forEach((b) => (b.color = "#0000ff")));
+  const d5 = Math.max(bodyDrift(scene, bodyIds(scene, outerInst.id), oPoses), maxDiff(oJ, jointWorlds(scene, outerInst.id)));
+  check("inner def edit cascades through the outer def in place", d5 < 1e-9, `drift ${d5.toExponential(2)}`);
+  check("nested mirrored bodies recoloured", bodyIds(scene, outerInst.id).every((id) => scene.getBody(id)!.color === "#0000ff"), "recoloured");
+  const outerMotors = outerInst.constraintMap
+    .map((e) => scene.constraints.find((c) => c.id === e.id)!)
+    .filter((c) => c.kind === "motor");
+  check("nested mirrored motor spins the other way", outerMotors.length === 1 && outerMotors[0].speed === -defMotorSpeed, `${outerMotors.map((c) => c.speed).join(",")}`);
 }
 
 if (failures > 0) {
