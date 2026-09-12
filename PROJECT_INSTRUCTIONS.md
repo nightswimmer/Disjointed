@@ -17,11 +17,12 @@ shortcuts; free (body-less) joints that can be grounded as anchors; bodies built
 (freehand polygon, or from existing joints); rounded corners (editable control polygon +
 radius, re-editable by dragging corner handles, with vertices added/removed by double-click,
 and a fillet that handles convex + concave corners without overlapping on thin shapes);
-**rails** with end-stops (called "sliders" internally / pre-v17) — a rail is either two
-joints on one body (a moving rail) or two free joints (a world-fixed track, auto-grounded),
-with joints auto-attached as riders when placed on a rail (Joint tool or body-from-joints),
-and riders optionally **orientation-locked** ("sliders", v17 — see the rails & sliders
-paragraph below);
+**rails** drawn as double-headed arrows (called "sliders" internally / pre-v17) — a rail is
+either two joints on one body (a moving rail) or two free joints (a world-fixed track,
+auto-grounded), with joints auto-attached as riders when placed on a rail (Joint tool or
+body-from-joints), and riders optionally **orientation-locked** ("sliders", v17); **two-click
+sliders** (v20 UI): the Slider tool builds the whole prismatic joint from a click on the
+moving body + a click where the travel ends (see the two-click sliders paragraph below);
 **linear actuators** (a self-driving rider on a slider that travels back and forth in animation
 at a configurable speed + motion profile) and **motors** (a pivot + crank pair on a body whose
 crank pin orbits the pivot at a configurable angular speed in animation), with a sim-mode
@@ -429,6 +430,72 @@ through save/load, copy/paste (`SelectionClip.sliders[].locked`), component expa
 cascades away with the rider; `attachSliderRider` gained a `locked` flag, plus
 `sliderOfRider` / `setSliderRiderLocked`. The analyzer counts a locked rider as removing
 2 DOF (vs 1). New test script `scripts/slider-locks.ts` (12 checks).
+**Two-click sliders (v20 — one optional field, `SliderConstraint.startRiders`)**: the three-step flow (joints → Rail tool →
+Slider tool) is replaced by one gesture in the **Slider tool (`S`)**: **click a body** where the
+travel starts — that body is the **owner**, the part that moves — then **click where the
+travel ends**. `Scene.createSlider(ownerBodyId, p1, p2, trackBodyId?)` mints the owner's
+**rider joint at p1 (locked)**, the two **rail joints at p1 / p2**, the rail between them, and
+attaches the rider — so the result is the same `slider` constraint + locked rider as before
+(everything downstream — solver, save/load, copy/paste, components, measurements, snaps —
+is unchanged), and the endpoints are ordinary joints (draggable, grid / object snapped,
+snap targets, constrainable). A first click on one of a body's **existing joints** (not a
+rider / rail joint) starts the slider *at that joint*, which becomes the rider
+(`createSlider`'s trailing `riderJointId` — no second joint stacked on it; the picked joint
+is highlighted via `activeJoints`). **Track frame**: the topmost body under the second click other
+than the owner becomes the track (its rail joints attach to it — a *moving track*, the
+owner slides relative to it) when it contains **both** points (joint containment); otherwise,
+or with a toast when that body doesn't reach the start, the rail joints are free and
+`addSlider` grounds them (a *world-fixed track*). The start is clamped into the owner; the
+end lands via `placeSnap` (object snap → grid), previewed as a dashed arrow from the start
+(`sliderDraft` state, rendered through the existing `railDraft` view). The old affordances
+stay as the tool's secondary behaviours when the first click lands on an existing rail /
+rider: toggle a rider's lock, attach a loose joint near a rail as a locked rider, or mint a
+locked rider on a bare rail (a rail under the click wins over starting a new slider — a
+second carriage on one track). The Rail tool (`K`) remains for pin-in-slot riders / rails
+between existing joints. **Rendering**: every rail is now a **double-headed arrow**
+(`drawRailArrow`, chevron heads `RAIL_HEAD = 13` px so they show past the joint dots; the
+old end-cap segment is gone), the locked rider keeps its carriage glyph. **The start pair**:
+the rider and rail joint A sit on one spot. `Scene.jointAt(p, r, prefer)` breaks ties
+(`COINCIDENT_EPS`) by preference: **`"rail"` by default** — in draw mode the endpoints are
+what gets edited, so a press on the start grabs the rail joint (unclamped when free) — and
+**`"rider"`** for the sim-mode grab (a grounded / track-bound rail joint can't drive
+anything), the sim hover, and the Slider tool's lock toggle. **Start riders**
+(`SliderConstraint.startRiders?: number[]`, ⊆ riders, present only when non-empty —
+`createSlider` records its rider via `setSliderStartRider`): the carriage's *home* is
+`railA`. `Scene.moveJoint` on a slider's `railA` ends with `settleStartRiders`: every start
+rider whose body contains the moved start point is **re-placed exactly under it**; one that
+would land outside its body is left where it is — so dragging the start out of the body
+leaves the carriage behind, and bringing it back anywhere inside snaps the carriage home
+again (no coincidence needed, and never the other way round: dragging the rider alone moves
+just the rider; the far joint never moves a rider). Because it lives in `moveJoint`, every
+mover benefits (drags, the owned-track carry below, sketch-driven joint moves). The list
+rides along everywhere `locked` does: save/load (sanitized ⊆ riders), copy/paste + component
+clips (`sliders[].startRiders`), component expansion, `pruneConstraint`. **Delete
+all**: user-level deletion now goes through `Scene.deleteSlider` / `deleteJoint` /
+`deleteBody` (used by `deleteSelection` and the multi-selection delete): deleting the
+arrow removes the rail **and** its rail joints and riders; deleting a rail joint, or the
+last rider (or the owner body carrying it), takes the rest of the slider along — always
+skipping joints with **another role** (`jointHasOtherRoles`: pins, motors, other sliders,
+an actuator on another slider, a group, a pattern; grounds and the slider's own actuator
+don't count). The raw `removeBody` / `removeJoint` / `removeConstraint` stay surgical for
+internal callers (split / combine, aborted drafts, component expansion). **Actuator on the
+owner's rider**: the A tool now prefers the rail's own **not-yet-driven rider nearest the
+click** (`Scene.addLinearActuatorOn(sliderId, riderId)` — refuses non-riders and doubly
+driven riders; `addLinearActuator` delegates to it after minting its free rider), so
+actuating a two-click slider drives the body itself; a rail with no rider still gets a
+free one. **Owned tracks follow the body**: `Scene.ownedTrackJoints(bodyId)` names the
+free, grounded, not group-locked rail joints of every slider whose riders all live on that
+body — the body's own world-fixed slider. `moveBody` / `rotateBody` / `mirrorBody` carry
+them (their ground anchors follow through `moveJoint`), which covers the plain drag, the
+multi-selection drag, the Rotate tool, mirror H/V and sketch-driven moves (the sketch
+solver moves bodies through the same methods; the sim solver poses bodies directly, so the
+track is fixed in simulation as it must be); `extractSelection` adds a copied body's
+owned track joints to the clip, so copy/paste brings the arrow, its grounds and the slider.
+`ownedTrackJointsOf(bodyIds)` lets the multi drag, `beginRotate` and `mirrorBodies` skip
+free joints a selected body already carries (no double move). Deliberately **not** owned:
+a track shared by riders on several bodies (nobody carries it) and a moving track (its
+rail joints live on the track body and move with *that* body; the owner is left behind).
+Tests: `scripts/two-click-slider.ts` (67 checks).
 **Empty components + the definition as pose reference** (no format change): pressing **⊞
 with nothing selected** now creates a **completely empty component** and opens it for
 editing — the way to build a component made entirely of other components, no throwaway
@@ -901,7 +968,9 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
     in the UI: two joints `railA`/`railB`, plus a `riders` list of joints confined to the
     segment between them, with end-stops, and a `locked` list (v17, ⊆ riders) naming the
     **orientation-locked riders** — "sliders" in the UI: prismatic, the rider's body keeps its
-    drawn angle relative to the rail; a plain rider is a pin-in-slot). The rail is either
+    drawn angle relative to the rail; a plain rider is a pin-in-slot — plus an optional
+    `startRiders` list (v20, ⊆ riders) naming the riders whose home is `railA`: moving that
+    joint re-places them under it whenever it lies inside their body). The rail is either
     **two joints on one body** (it moves with that body, coupling two bodies) or **two free
     joints** (a track fixed in world space — `addSlider` auto-grounds them). Riders may be
     body joints or free joints (a lock on a free rider is inert until it gains a body).
@@ -1073,13 +1142,20 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
     (refused whole — `outerRefused` — if fewer than 3 would remain), then holes from the
     highest index down (a hole left below its minimum goes whole via `removeBodyHole`).
     Tests: `scripts/features.ts`.
-  - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
-    (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
-    `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
+  - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt` — ties between coincident joints go
+    to the attached one, `sliderAt`), `bodyControlWorld` (corner handles), `addFreeJoint`,
+    `attachSliderRider`, `createSlider(ownerBodyId, p1, p2, trackBodyId?)` (the two-click
+    slider: rider + rail joints + rail in one call, v20), `removeBody`/`removeJoint`/
+    `removeConstraint` + `pruneConstraint` (surgical, for internal callers) and the user-level
+    `deleteBody`/`deleteJoint`/`deleteSlider` (whole-slider cascade via `sliderOrphans` /
+    `jointHasOtherRoles`), `ownedTrackJoints(bodyId)` / `ownedTrackJointsOf(bodyIds)` (a
+    body's own world-fixed slider tracks — carried by `moveBody` / `rotateBody` /
+    `mirrorBody` and copied by `extractSelection`, v20), pose snapshot/restore, role queries.
   - Construction helpers for the powered constraints: `addLinearActuator(sliderId, worldPos?)`
     drops a free joint on the rail (snapped to the click point, or rail midpoint), attaches
     it as a slider rider, and stores the actuator constraint that will drive it during
-    animation. `addMotor(bodyId, pivotJointId, crankJointId)` validates that both joints
+    animation; `addLinearActuatorOn(sliderId, riderId)` drives an *existing* rider instead
+    (may be a body joint — the A tool's preferred path, v20). `addMotor(bodyId, pivotJointId, crankJointId)` validates that both joints
     belong to the body (and aren't the same joint) before storing the motor constraint.
     Cascade removal: dropping a slider removes any actuators on it (the rider survives as a
     free joint); removing a body's joints prunes any motor that referenced them.
@@ -1906,25 +1982,40 @@ place one element, then it returns to **Select** mode. `Esc` aborts the current 
   grounded → all ungrounded, else all grounded).
 - **Rail** (`K` — called "Slider" pre-v17) — click two joints on the *same body* (a rail that
   moves with it), or two *free joints* (a world-fixed track — they get grounded automatically),
-  to create a rail (riders are attached later via Connect, the Joint tool, or the Slider tool).
-  A free+body or cross-body pair restarts the draft.
-- **Slider** (`S`) — click a **rail** to add a slider: an **orientation-locked rider** that
-  travels along the rail while its body keeps its drawn angle relative to it (prismatic —
-  a plain rider is a pin-in-slot). The click projects onto the rail; the joint attaches to
-  the topmost body under the cursor (excluding the rail's own body), else it's free (the
-  lock activates once the joint gains a body). Clicking an **existing rider** toggles its
-  rotation lock; clicking a loose joint near a rail attaches it as a locked rider. The
-  locked angle re-captures from the drawn pose on every sim entry / rigid drag.
+  to create a bare rail for **pin-in-slot** riders (attached via Connect / the Joint tool).
+  A free+body or cross-body pair restarts the draft. Rails draw as double-headed arrows.
+- **Slider** (`S`, two clicks — v20) — click a **body** where the travel starts (that body is
+  the **owner**, the part that moves), then click where the travel **ends**: the owner gets a
+  joint at the start riding a new rail from start to end, **orientation-locked** (prismatic —
+  the body translates along the arrow keeping its drawn angle relative to the track). The
+  second click over **another body** that contains both points makes that body the track
+  (a moving track — the rail joints attach to it); otherwise the rail joints are free and
+  grounded (a world-fixed track; a toast says so when the body under the click doesn't
+  reach the start). Start snaps like a Joint placement (clamped into the owner), the end
+  via object snap / grid, previewed by a dashed arrow; a first click on one of the body's
+  existing joints starts there and makes that joint the rider. On an **existing** rail the old
+  behaviours apply: click a rider to toggle its rotation lock, a loose joint near a rail to
+  attach it as a locked rider, or a bare rail to mint a locked rider there (attached to the
+  topmost body under the cursor excluding the rail's own, else free). The locked angle
+  re-captures from the drawn pose on every sim entry / rigid drag. The start point is a
+  coincident **rider + rail joint** pair: in draw mode a press grabs the **rail joint**; the
+  rider (a *start rider*) is re-placed under it whenever the start point lies inside the
+  body — taken outside it stays behind, brought back it snaps home; in sim the grab goes
+  to the rider (`jointAt(…, "rider")`). A world-fixed track ridden only by one body is that
+  body's **own**: dragging, rotating, mirroring or copying the body carries the arrow
+  (`ownedTrackJoints`); a shared or moving track stays put.
 - **Guideline** (`L`) — two clicks place an **infinite construction line**. Clicks land
   exactly on joints / body corners / other guides' points (with an auto-coincident), project
   onto rails / body edges, or grid/guide-snap. Select it to drag the whole line (angle kept)
   or either defining point (re-aims); Delete removes it with its constraints/measurements.
   With snap on, placements prefer guidelines (and guide intersections) over the grid.
   Constraints on guides move **only free guide points**, never geometry.
-- **Linear actuator** (`A`) — click a *slider rail* to drop a **self-driving rider** on it (a free
-  joint attached as a rider, plus a `linearActuator` constraint that drives it during animation).
-  Off-animation the rider is a normal slider rider (draggable / pinnable). Default speed 0.5 Hz,
-  default profile `triangle`.
+- **Linear actuator** (`A`) — click a *slider / rail* to make it **self-driving**: the rail's
+  own not-yet-driven rider nearest the click (a two-click slider's carriage — a body joint,
+  so the body itself is driven) becomes the actuator's rider; a rail with none gets a new
+  free rider dropped at the click. Stored as a `linearActuator` constraint that drives the
+  rider during animation. Off-animation the rider is a normal slider rider (draggable /
+  pinnable). Default speed 0.5 Hz, default profile `triangle`.
 - **Motor** (`M`) — click a joint to set the **pivot** (must be on a body), then another joint on
   the *same body* for the **crank pin** (a cross-body second click restarts the draft at that
   joint). Creates a `motor` constraint that spins the body during animation. Default speed 0.25 Hz.
@@ -2041,9 +2132,12 @@ Select mode (default, no tool armed):
   dragged object to the frozen world snaps closed as the drag pulls (assemble-on-drag).
   The poses you release at become the new drawn layout (one undo step). Sketch constraints
   are not applied during a rigid drag (sim-like); corner-handle reshaping wins over Shift.
-- `Delete` removes the selection: a body takes its joints/constraints with it; a slider keeps
-  its joints; a joint detaches from any rail and any constraints referencing it go; a
-  measurement just disappears (measurements are also cascade-removed with their elements).
+- `Delete` removes the selection: a body takes its joints/constraints with it; a **slider
+  goes as a whole** (v20 — the arrow, its rail joints and its riders; deleting a rail joint,
+  the last rider or the owner body takes the rest of the slider too, always sparing joints
+  that still serve a pin / motor / other slider / group / pattern); a plain joint detaches
+  and any constraints referencing it go; a measurement just disappears (measurements are
+  also cascade-removed with their elements).
 - A **measurement's value label** is the topmost pick: click to select it, drag to reposition
   (a point–point measurement re-derives h/v/direct from the new spot), Delete to remove —
   this works in **sim mode** too, without disturbing the mechanism underneath.
@@ -2275,6 +2369,29 @@ Persistence:
 - **free-rail.ts** — a slider built from two **free** joints: asserts `addSlider` auto-grounds
   both, a free rider stays on the world-fixed line (zero offset), the rail joints never move,
   and the rider clamps at each grounded endpoint.
+- **two-click-slider.ts** — two-click sliders (v20, 67 checks): `createSlider` on a world-fixed
+  track (rider on the owner + locked, free rail joints auto-grounded, rail joint A on the
+  rider; the owner translates without rotating, stays on the line and reaches exactly both
+  ends of the range) and on a moving track (rail joints on the track body, no grounds, the
+  owner keeps its angle relative to the tilted track); rejections (zero travel, owner as its
+  own track, track not containing the start), start clamping, and reusing an existing joint
+  of the owner as the rider (start = its position; a free joint or a joint already riding a
+  rail is refused); the deletion cascade
+  (`deleteSlider` / `deleteJoint` on an end or the rider / `deleteBody` on the owner all leave
+  nothing; a pinned rider survives with its pin; a track with another carriage stays; the
+  raw `removeJoint` / `removeConstraint` stay surgical); `addLinearActuatorOn` (no extra
+  joint, refuses a second actuator / a non-rider; an anchor on the body rider translates the
+  body along the arrow without rotation; deleting the slider drops the actuator); save/load
+  round trip; `jointAt` picks the rail joint of the coincident start pair by default and
+  the rider with `"rider"`; start riders (`createSlider` records the rider; moving `railA`
+  inside the body re-places the rider exactly, outside leaves it, back inside snaps it home;
+  the far joint never moves it; the owned-track body drag keeps it home; `startRiders`
+  survives save/load and paste, drops with the rider; a plain K-tool rail has none, so its
+  rider is never re-placed); owned tracks (`ownedTrackJoints` names both rail joints;
+  `moveBody` / `rotateBody` / `mirrorBody` carry the track + ground anchors with the rider
+  still on the start; a shared track and a moving track aren't owned and stay put;
+  `extractBody` → `insertBody` recreates the slider, its offset grounded track, owned by the
+  copy).
 - **slider-locks.ts** — orientation-locked riders (v17, 12 checks): a locked rider's body
   never rotates on a fixed track (and stays on the rail) while the same drag rotates it once
   unlocked; the baseline locks a tilted **drawn** angle; a locked body keeps its angle
@@ -2871,7 +2988,15 @@ Persistence:
   re-captured from the drawn pose (by design — no stored angle parameter); if an explicit,
   persistent relative angle is ever wanted, store a per-lock phase in the constraint instead
   of the solver-side baseline map. A group-locked *free* rider has no orientation, so its
-  lock is inert (attach the slider to a body of the group instead).
+  lock is inert (attach the slider to a body of the group instead). Two-click slider (v20)
+  loose ends: the second click on an existing joint / corner only snaps the rail end there
+  (no auto-coincident like the guide tool); a moving-track rail joint clamps into the track
+  body like any attached joint, so the start can't leave the track body at all; a start
+  rider left behind (start point outside its body) shows the dotted connector until the
+  start comes back inside; feature-selection deletes of a rider don't use the cascade;
+  a track shared by two carriages follows neither body, and dragging a moving track's
+  body leaves the owner behind (both deliberately out of scope — the symmetric "dragging
+  the track body carries the owners" rule is the natural extension).
 - ~~Joint containment covers placement + drags only: reshaping a body can strand a joint
   outside the new outline with no feedback~~ (resolved — stranded joints are now **flagged**,
   deliberately not auto-clamped: `jointsOutsideBody()` + red dashed ring + hint warning; the

@@ -212,6 +212,8 @@ export interface SketchGlyphView {
 
 /** On-screen joint radius in CSS pixels (kept constant regardless of zoom). */
 const JOINT_R = 6;
+/** Length (px) of a rail arrow's head wings — long enough to show past a joint dot. */
+const RAIL_HEAD = 13;
 
 interface JointRoles {
   pinned: Set<number>;
@@ -398,8 +400,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     if (selected) drawInstanceHull(inst);
   }
 
-  // Rails (drawn under joints): a bounded segment between the two rail joints, with
-  // end-caps marking the stops that the riding joint is clamped between.
+  // Rails (drawn under joints): a double-headed arrow between the two rail joints — the
+  // range a rider travels, its heads at the stops the rider is clamped between.
   const selectedRail =
     input.selection?.kind === "rail" ? input.selection.id : null;
   for (const c of scene.constraints) {
@@ -410,7 +412,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     const a = scene.jointWorld(ja);
     const b = scene.jointWorld(jb);
     const sel = c.id === selectedRail;
-    drawRailSegment(ctx, a, b, sel ? theme.ink : "#5bd6a6", px(sel ? 2.5 : 1.5), px(6));
+    drawRailArrow(ctx, a, b, sel ? theme.ink : "#5bd6a6", px(sel ? 2.5 : 1.5), px(RAIL_HEAD));
     // Orientation-locked riders (prismatic sliders) get a rail-aligned carriage
     // rectangle on top of the rail so they read differently from pin-in-slot riders.
     for (const riderId of c.locked) {
@@ -420,11 +422,11 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     }
   }
 
-  // In-progress rail: dashed preview of the segment being defined.
+  // In-progress rail / slider: dashed preview of the arrow being defined.
   if (input.railDraft) {
     const { rail, cursor } = input.railDraft;
     ctx.setLineDash([px(6), px(4)]);
-    drawRailSegment(ctx, rail[0], rail.length >= 2 ? rail[1] : cursor, "#9aa0ac", px(1.5), px(6));
+    drawRailArrow(ctx, rail[0], rail.length >= 2 ? rail[1] : cursor, "#9aa0ac", px(1.5), px(RAIL_HEAD));
     ctx.setLineDash([]);
   }
 
@@ -1465,28 +1467,44 @@ function drawCarriage(
   ctx.restore();
 }
 
-/** Draw the bounded rail segment a→b with perpendicular end-caps marking the stops. */
-function drawRailSegment(
+/**
+ * Draw a rail as a double-headed arrow a↔b: the line between the two rail joints with an
+ * open chevron head at each end (tips at the joints, wings `head` long at 30°, so they
+ * stay visible around the joint dots drawn on top).
+ */
+function drawRailArrow(
   ctx: CanvasRenderingContext2D,
   a: Vec2,
   b: Vec2,
   color: string,
   lineWidth: number,
-  cap: number
+  head: number
 ): void {
   const d = sub(b, a);
   const l = Math.hypot(d.x, d.y);
   if (l < 1e-6) return;
-  const n = { x: (-d.y / l) * cap, y: (d.x / l) * cap }; // perpendicular cap offset
+  const u = { x: d.x / l, y: d.y / l };
+  const wing = (tip: Vec2, back: Vec2, s: number): Vec2 => ({
+    x: tip.x + back.x * head * Math.cos(Math.PI / 6) - back.y * head * Math.sin(Math.PI / 6) * s,
+    y: tip.y + back.y * head * Math.cos(Math.PI / 6) + back.x * head * Math.sin(Math.PI / 6) * s,
+  });
   ctx.strokeStyle = color;
   ctx.lineWidth = lineWidth;
+  ctx.lineJoin = "round";
   ctx.beginPath();
   ctx.moveTo(a.x, a.y);
   ctx.lineTo(b.x, b.y);
-  ctx.moveTo(a.x - n.x, a.y - n.y);
-  ctx.lineTo(a.x + n.x, a.y + n.y);
-  ctx.moveTo(b.x - n.x, b.y - n.y);
-  ctx.lineTo(b.x + n.x, b.y + n.y);
+  // Head at b: wings point back along -u; head at a: wings point along +u.
+  for (const [tip, back] of [
+    [b, { x: -u.x, y: -u.y }],
+    [a, u],
+  ] as [Vec2, Vec2][]) {
+    const w1 = wing(tip, back, 1);
+    const w2 = wing(tip, back, -1);
+    ctx.moveTo(w1.x, w1.y);
+    ctx.lineTo(tip.x, tip.y);
+    ctx.lineTo(w2.x, w2.y);
+  }
   ctx.stroke();
 }
 

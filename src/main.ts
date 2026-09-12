@@ -240,6 +240,9 @@ let hoverObjSnap: ResolvedMeasureRef | null = null;
 let hoverDef: number | null = null; // component definition hovered in the browser list
 let selectedJoint: number | null = null; // first pick for connect
 let railDraftIds: number[] = []; // rail joints picked so far for the rail tool (0–2)
+/** Slider tool (v20): the owner body + start point of the travel picked by the first click
+ *  (`riderId` when the click landed on one of the owner's existing joints — it becomes the rider). */
+let sliderDraft: { bodyId: number; at: Vec2; riderId: number | null } | null = null;
 let guideDraft: Vec2 | null = null; // guide tool: the first defining point placed
 /** The existing point element the first guide click landed on (→ coincident on commit). */
 let guideDraftPick: MeasureRef | null = null;
@@ -1095,7 +1098,7 @@ function alignCorrection(kind: SketchConstraintKind, cur: ResolvedMeasureRef, ca
 function moveDragged(d: LeftDrag, delta: Vec2): void {
   if (d.kind === "vertex") scene.moveBodyVertex(d.bodyId, d.index, delta, d.hole);
   else if (d.kind === "body") scene.moveBody(d.id, delta);
-  else if (d.kind === "joint") scene.moveJoint(d.id, delta);
+  else if (d.kind === "joint") scene.moveJoint(d.id, delta); // an arrow start brings its carriage home (model)
   else if (d.kind === "multi") {
     for (const id of d.bodies) scene.moveBody(id, delta);
     for (const id of d.joints) scene.moveJoint(id, delta);
@@ -1329,10 +1332,13 @@ function startMultiDrag(grab: Vec2): void {
     anchorPos = os.anchor;
   }
   if (!anchor) return; // no live members — nothing to drag
+  // A free joint that is a selected body's own slider track is carried by moveBody — don't
+  // move it a second time as a selected joint.
+  const carried = scene.ownedTrackJointsOf(multiSel.bodies);
   leftDrag = {
     kind: "multi",
     bodies: [...multiSel.bodies],
-    joints: [...multiSel.joints],
+    joints: [...multiSel.joints].filter((id) => !carried.has(id)),
     anchor,
     grabOffset: sub(grab, anchorPos),
     moved: false,
@@ -1584,11 +1590,11 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   weld: "Click where bodies overlap to weld them rigidly together at that point (no relative rotation) — or click an existing pinned joint to toggle it weld ↔ pin.",
   connect: "Click a joint, then another joint to pin them — or a rail to attach the joint to it as a rider.",
   ground: "Click a joint to lock its position (it can still rotate), or a body / group to fix it entirely; click again to unground.",
-  rail: "Click two joints on the same body (a moving rail) — or two free joints (a fixed track) — to create a rail that joints and sliders can ride along.",
-  slider: "Click a rail to add a slider: it travels along the rail but keeps its body's orientation (no rotation). Placed over a body it attaches to it; click an existing rider to toggle its rotation lock.",
+  rail: "Click two joints on the same body (a moving rail) — or two free joints (a fixed track) — to create a rail that joints and sliders can ride along (a pin-in-slot: riders placed on it slide and rotate).",
+  slider: "Click a body where the slider starts (that body is the part that moves), then click where the travel ends — over another body the track rides that body, otherwise it is fixed in the world. On an existing rail: click it to add a slider there, or click a rider to toggle its rotation lock.",
   guide: "Click two points to place an infinite construction guideline — clicks land on joints, body corners and edges (points get a coincident constraint). Drag the line to move it (angle kept), or drag one of its two points to re-aim it. With snap on, placements prefer guidelines over the grid.",
   rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. A multi-selection or group rotates as one about its centre. Snaps to 45°.",
-  linearActuator: "Click a rail to drop a self-driving rider — it travels back and forth when animation runs.",
+  linearActuator: "Click a slider or rail to make it self-driving — its carriage travels back and forth when animation runs (a rail with no rider gets a free one).",
   motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
   measure: "Click two references — a joint, body corner, body edge, rail, guideline, or a point on a body — then click where the value should sit.",
   coincident: "Click two points (joints, body corners, or guideline points) to make them share a position — or a point and a line (body edge, rail or guideline) to hold the point on the infinite line.",
@@ -1940,6 +1946,7 @@ function resetTransient(): void {
   jointDraftExpanding = false;
   selectedJoint = null;
   railDraftIds = [];
+  sliderDraft = null;
   guideDraft = null;
   guideDraftPick = null;
   motorPivotDraft = null;
@@ -3258,14 +3265,44 @@ function handleDrawClick(p: Vec2): void {
       break;
     }
     case "slider": {
-      // A slider is an orientation-locked rider: it travels along the rail but its body
-      // keeps the drawn angle relative to the rail (prismatic, vs the pin-in-slot of a
-      // plain rider). On an existing rider: toggle its lock. On another joint near a
-      // rail: attach it as a locked rider. On a bare rail: mint a new joint there —
-      // attached to the topmost body under the cursor (excluding the rail's own body),
-      // else free (the lock activates once the joint gains a body).
+      // Two-click slider (v20). First click on a body: that body is the owner — the part
+      // that moves — and the click is where its travel starts. Second click anywhere: the
+      // end of the travel. The result is a rail from start to end with the owner's new
+      // joint riding it orientation-locked (prismatic — the body translates along the
+      // arrow keeping its angle). Over another body that reaches both points, the rail
+      // joints attach to that body (a moving track: the owner slides relative to it);
+      // otherwise they are free joints grounded in place (a world-fixed track).
+      if (sliderDraft) {
+        const owner = scene.getBody(sliderDraft.bodyId);
+        if (!owner) {
+          sliderDraft = null;
+          break;
+        }
+        const end = sliderEndAt(p);
+        if (dist(end, sliderDraft.at) < 1e-6) return; // same point — wait for a distinct end
+        // The topmost body under the click other than the owner carries the track — if it
+        // contains the start too (joint containment); otherwise the track is world-fixed.
+        const track = scene.bodiesAt(p).find((b) => b.id !== owner.id) ?? null;
+        let trackId: number | null = null;
+        if (track) {
+          if (scene.pointInBody(track, sliderDraft.at) && scene.pointInBody(track, end)) trackId = track.id;
+          else notify("That body doesn't reach the slider's start point — the track is fixed in the world instead.");
+        }
+        const made = scene.createSlider(owner.id, sliderDraft.at, end, trackId, sliderDraft.riderId);
+        sliderDraft = null;
+        if (made) {
+          selection = { kind: "rail", id: made.slider.id };
+          placed = true;
+        }
+        break;
+      }
+      // Existing rails keep their affordances: on a rider, toggle its lock; on another
+      // joint near a rail, attach it as a locked rider; on a bare rail, mint a locked
+      // rider there — attached to the topmost body under the cursor (excluding the rail's
+      // own body), else free (the lock activates once the joint gains a body). A rail
+      // under the click wins over starting a new slider (a second carriage on one track).
       const s = scene.sliderAt(p, pickRadius());
-      const j = scene.jointAt(p, pickRadius());
+      const j = scene.jointAt(p, pickRadius(), "rider"); // a start pair means its rider here
       if (j) {
         const owner = scene.sliderOfRider(j.id);
         if (owner) {
@@ -3282,10 +3319,31 @@ function handleDrawClick(p: Vec2): void {
             selection = { kind: "joint", id: j.id };
             placed = true;
           }
+          break;
         }
-        break;
+        // An existing joint of a body, away from any rail: start the slider *at that joint*
+        // — it becomes the rider (no second joint stacked on it). Rail joints and free
+        // joints have no body to move, so they can't start one.
+        if (j.bodyId === null || scene.constraints.some((c) => c.kind === "slider" && (c.railA === j.id || c.railB === j.id))) {
+          notify("Click on a body to start a slider — that body is the part that will move.");
+          break;
+        }
+        sliderDraft = { bodyId: j.bodyId, at: scene.jointWorld(j), riderId: j.id };
+        return; // nothing committed yet
       }
-      if (!s) break;
+      if (!s) {
+        // First click: pick the owner body and the start of the travel (snapped like a
+        // Joint-tool placement — a snap that would leave the body uses the exact click).
+        const owner = scene.bodyAt(p);
+        if (!owner) {
+          notify("Click on a body to start a slider — that body is the part that will move.");
+          break;
+        }
+        let at = placeSnap(p);
+        if (!scene.pointInBody(owner, at)) at = p;
+        sliderDraft = { bodyId: owner.id, at, riderId: null };
+        return; // nothing committed yet
+      }
       const ja = scene.getJoint(s.railA)!;
       const jb = scene.getJoint(s.railB)!;
       const a = scene.jointWorld(ja);
@@ -3333,11 +3391,26 @@ function handleDrawClick(p: Vec2): void {
       return;
     }
     case "linearActuator": {
-      // Single click on a rail: drop a self-driving rider on it (a free joint
-      // attached as a rider) and create the actuator constraint that will drive it.
+      // Single click on a rail: make it self-driving. The rail's own rider nearest the
+      // click (a two-click slider's carriage, or any rider not yet driven) becomes the
+      // actuator's rider; a rail with none gets a new free rider dropped at the click.
       const s = scene.sliderAt(p, pickRadius());
       if (!s) break;
-      const created = scene.addLinearActuator(s.id, snap(p));
+      const driven = new Set(linearActuators().map((a) => a.riderId));
+      let riderId: number | null = null;
+      let bestD = Infinity;
+      for (const rid of s.riders) {
+        if (driven.has(rid)) continue;
+        const rj = scene.getJoint(rid);
+        if (!rj) continue;
+        const d = dist(scene.jointWorld(rj), p);
+        if (d < bestD) {
+          bestD = d;
+          riderId = rid;
+        }
+      }
+      const created =
+        riderId !== null ? scene.addLinearActuatorOn(s.id, riderId) : scene.addLinearActuator(s.id, snap(p));
       if (created) {
         selection = { kind: "joint", id: created.riderId };
         placed = true;
@@ -4208,8 +4281,8 @@ function deleteSelection(): void {
       if (inst) instIds.add(inst.id);
     }
     for (const iid of instIds) scene.removeInstance(iid);
-    for (const id of multiSel.bodies) if (scene.getBody(id)) scene.removeBody(id);
-    for (const id of multiSel.joints) if (scene.getJoint(id)) scene.removeJoint(id);
+    for (const id of multiSel.bodies) if (scene.getBody(id)) scene.deleteBody(id);
+    for (const id of multiSel.joints) if (scene.getJoint(id)) scene.deleteJoint(id);
     multiSel = null;
     selection = null;
     markDirty();
@@ -4232,13 +4305,15 @@ function deleteSelection(): void {
     notify("This rail belongs to a component instance — edit the definition, or delete the whole instance.");
     return;
   }
-  if (selection.kind === "body") scene.removeBody(selection.id);
-  else if (selection.kind === "joint") scene.removeJoint(selection.id);
+  // Bodies, joints and rails delete through the whole-slider cascade (v20): any part of a
+  // slider takes the rest of it — rail joints and riders with no other role — along.
+  if (selection.kind === "body") scene.deleteBody(selection.id);
+  else if (selection.kind === "joint") scene.deleteJoint(selection.id);
   else if (selection.kind === "measure") scene.removeMeasurement(selection.id);
   else if (selection.kind === "sketch") scene.removeSketchConstraint(selection.id);
   else if (selection.kind === "guide") scene.removeGuide(selection.id);
   else if (selection.kind === "pattern") scene.removePattern(selection.id); // members go, the seed stays
-  else scene.removeConstraint(selection.id); // rail: remove it, keep the joints
+  else scene.deleteSlider(selection.id); // rail: the arrow, its endpoints and its riders
   selection = null;
   markDirty();
 }
@@ -4655,9 +4730,12 @@ function startRotate(p: Vec2): void {
 function beginRotate(bodyIds: number[], jointIds: number[], pivot: Vec2, grab: Vec2): void {
   const ref = scene.getBody(bodyIds[0]);
   if (!ref) return;
+  // Selected free joints that are a selected body's own slider track turn with the body
+  // (rotateBody carries them) — leave them out of the explicit orbit.
+  const carried = scene.ownedTrackJointsOf(bodyIds);
   rotateDrag = {
     bodyIds,
-    jointIds,
+    jointIds: jointIds.filter((id) => !carried.has(id)),
     pivot,
     grabAngle: ref.angle,
     prevPointer: Math.atan2(grab.y - pivot.y, grab.x - pivot.x),
@@ -5542,7 +5620,8 @@ canvas.addEventListener("mousedown", (e) => {
       canvas.style.cursor = "move";
       return;
     }
-    const j = scene.jointAt(world, pickRadius());
+    // On a slider's start pair, grab the rider: the rail joint is grounded / on the track.
+    const j = scene.jointAt(world, pickRadius(), "rider");
     if (j) {
       driver = { jointId: j.id, target: world };
       canvas.style.cursor = "grabbing";
@@ -5700,7 +5779,7 @@ canvas.addEventListener("mousemove", (e) => {
       for (const id of leftDrag.bodies) scene.moveBody(id, delta);
       for (const id of leftDrag.joints) scene.moveJoint(id, delta);
     } else if (leftDrag.kind === "features") moveFeatures(leftDrag, delta);
-    else scene.moveJoint(leftDrag.id, delta);
+    else scene.moveJoint(leftDrag.id, delta); // an arrow start brings its carriage home (model)
     leftDrag.moved = true;
     solveSketchLive(); // sketch dragging: constraints hold while the geometry follows
     if ("align" in leftDrag && leftDrag.align) {
@@ -5710,7 +5789,7 @@ canvas.addEventListener("mousemove", (e) => {
     return;
   }
 
-  hoverJoint = scene.jointAt(world, pickRadius())?.id ?? null;
+  hoverJoint = scene.jointAt(world, pickRadius(), mode === "sim" ? "rider" : "rail")?.id ?? null;
   // In normal/select mode, also highlight the body under the cursor (when no joint is).
   hoverBody =
     mode === "draw" && tool === null && hoverJoint === null
@@ -6374,15 +6453,25 @@ function activeJoints(): number[] {
   if (mode !== "draw") return [];
   if (tool === "connect") return selectedJoint !== null ? [selectedJoint] : [];
   if (tool === "rail") return railDraftIds;
+  if (tool === "slider") return sliderDraft?.riderId !== null && sliderDraft?.riderId !== undefined ? [sliderDraft.riderId] : [];
   if (tool === "body") return jointDraftIds;
   if (tool === "motor") return motorPivotDraft !== null ? [motorPivotDraft] : [];
   return [];
 }
 
-/** Rail-joint positions picked so far for the rail tool, with the live cursor. */
+/** Rail-joint positions picked so far for the rail tool, with the live cursor — or the
+ *  slider tool's start point with where its second click would land. */
 function railDraftView(): { rail: Vec2[]; cursor: Vec2 } | null {
-  if (mode !== "draw" || tool !== "rail" || railDraftIds.length === 0 || !cursor) return null;
+  if (mode !== "draw" || !cursor) return null;
+  if (tool === "slider" && sliderDraft) return { rail: [sliderDraft.at], cursor: sliderEndAt(cursor) };
+  if (tool !== "rail" || railDraftIds.length === 0) return null;
   return { rail: railDraftIds.map((id) => scene.jointWorld(scene.getJoint(id)!)), cursor };
+}
+
+/** Where the slider tool's second click at `p` lands: object snap (corners / joints /
+ *  centres) first, then the grid — the same landing as a Joint-tool placement. */
+function sliderEndAt(p: Vec2): Vec2 {
+  return placeSnap(p);
 }
 
 /** Guide tool: the first defining point placed, with the live cursor (line preview,

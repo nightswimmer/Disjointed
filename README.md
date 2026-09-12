@@ -42,9 +42,11 @@ you can then drag and watch move.
     is a **pin-in-slot**: it slides along the rail *and* rotates freely.
   - **Slider** — a rider whose rotation is **locked**: it travels along the rail while its body
     keeps its drawn angle relative to the rail (a prismatic joint, in CAD terms) — the way two
-    parts move relative to each other along exactly one axis. Placed with the Slider tool (`S`)
-    on any rail; the locked-in angle is whatever you drew, re-captured every time simulation
-    starts. Drawn as a small rail-aligned **carriage rectangle** on the rider.
+    parts move relative to each other along exactly one axis. The Slider tool (`S`) builds one
+    in **two clicks**: click the body that moves where its travel starts, then click where the
+    travel ends — the rail (a double-headed arrow), its two endpoints and the body's riding
+    joint are all created for you. The locked-in angle is whatever you drew, re-captured every
+    time simulation starts. Drawn as a small rail-aligned **carriage rectangle** on the rider.
   - **Linear actuator** — a special rider on a rail that travels back and forth along the rail
     automatically when animation runs. Configurable speed (Hz) and motion profile (triangle = constant
     speed, sine = smooth ease). Off-animation it behaves like any other rider — draggable, pinnable.
@@ -97,11 +99,11 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Weld** | `W` | Click where **bodies overlap** to weld them rigidly together at that point — a joint in each, sharing the position **and** locked at the drawn relative angle (no relative rotation; the angle re-captures from the drawn pose on every sim entry, like a slider's lock). Click an **existing pinned joint** to toggle its pin(s) **weld ↔ revolute**. |
 | **Connect** | `C` | Click a joint, then another joint on a different body to **pin** them — or click a **rail** to attach the joint to it as a rider. |
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed rail keeps its ground — the track must stay anchored). |
-| **Rail** | `K` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a rail. Attach riders with Connect / the Joint tool, or sliders with the Slider tool. |
-| **Slider** | `S` | Click a **rail** to add a slider — a rider that travels along the rail **without rotating** (its body keeps the drawn angle relative to the rail). It attaches to the body under the cursor (or stays free until one absorbs it). Click an **existing rider** to toggle its rotation lock on/off. |
+| **Rail** | `K` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a bare rail for **pin-in-slot** riders (joints that slide *and* rotate). Attach riders with Connect / the Joint tool. Rails are drawn as **double-headed arrows** spanning the travel. |
+| **Slider** | `S` | **Two clicks.** Click a **body** where the slider starts — that body is the part that will move — then click where the travel **ends**. The body gets a joint at the start that rides a new arrow from start to end **without rotating** (it keeps its drawn angle relative to the track). If the second click lands on **another body** that covers both points, the arrow rides *that* body (a moving track — e.g. a block in a slot); otherwise the arrow is fixed in the world. Clicking one of the body's **existing joints** starts the slider there (that joint becomes the rider). A world-fixed arrow ridden only by this body is **its own**: dragging, rotating, mirroring or copy/pasting the body carries the arrow along (an arrow shared by two bodies, or riding another body, stays put). Both endpoints are ordinary joints: drag them, snap them, snap other things to them — dragging the **start** endpoint in Draw mode re-places the body's riding joint under it wherever the start lies inside the body (take it outside and the joint stays behind; bring it back and it snaps home). On an **existing** arrow: click it to add another slider there, or click a **rider** to toggle its rotation lock on/off. |
 | **Guideline** | `L` | Click **two points** to place an **infinite construction line**. Each click lands exactly on a joint / body corner / another guide's point (with an automatic **coincident** constraint), projects onto a rail or body edge, or snaps to the grid. See *Construction guidelines* below. |
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
-| **Linear actuator** | `A` | Click a **rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
+| **Linear actuator** | `A` | Click a **slider arrow** (or rail) to make it self-driving: the slider's own carriage — the body — travels back and forth along the arrow when animation runs in Simulate mode. A bare rail with no rider gets a free self-driving rider instead. Off-animation the rider is just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
 | **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a guideline). Click the **rim of a round hole** (or disk body) as the first pick for a **diameter** dimension — it needs no second reference, the next click places the label. Likewise, click a **rounded corner's arc** as the first pick for a **radius** dimension. Works in **both modes** — see *Measurements* below. |
 | **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position — or a **point and a line** (body edge, rail or guideline, either order) to hold the point on the **infinite** line. |
@@ -126,8 +128,10 @@ centre included — snaps onto other corners, centres, joints and edges). With a
 **double-click**: double-click an **edge** (outer or hole) to add a node there (snapped to the
 grid when Snap is on), or double-click a **node** to remove it (outer outlines keep a minimum
 of 3) — double-clicking a hole's **last removable node deletes the whole hole**. Press
-**Delete** to remove the selection: a body takes its joints and constraints with it; a rail
-leaves its joints; a joint detaches from any rail (taking its slider lock with it).
+**Delete** to remove the selection: a body takes its joints and constraints with it; a slider
+arrow takes its endpoints and riders with it (deleting an endpoint, the last rider or the
+moving body removes the rest of the slider too — joints that still serve a pin, motor, other
+rail, group or pattern are spared); a plain joint detaches from everything referencing it.
 
 **Rigid drag (Shift).** Hold **Shift** when you start a drag and the grabbed object moves the way
 it would in Simulate mode instead of being translated: it behaves as a rigid body, **grounds hold
@@ -550,7 +554,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed)
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed)
 ```
 
 ## How it works

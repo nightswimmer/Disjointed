@@ -37,6 +37,8 @@ import { unionRegions, segmentsCross, pointOnSegment, PolyRegion } from "./boole
  * exact up to float error from frame transforms, so the tolerance can be tiny.
  */
 export const VERTEX_LINK_EPS = 1e-6;
+/** Two joints closer than this count as one point for hit-testing / drag carrying (v20). */
+export const COINCIDENT_EPS = 1e-6;
 
 /**
  * Slack for the joint-containment warning (`jointsOutsideBody`): a drag clamps a joint
@@ -350,6 +352,14 @@ export interface SliderConstraint {
   riders: number[];
   /** Riders whose body's orientation is locked to the rail (prismatic sliders). */
   locked: number[];
+  /**
+   * Riders whose *home* is `railA` — a two-click slider's carriage (v20): its body's joint
+   * was minted at the arrow's start. Moving `railA` (`moveJoint`) re-places every start
+   * rider exactly under it whenever that point lies inside the rider's body, so a start
+   * point taken out of the body and brought back snaps the carriage home again. Subset of
+   * `riders`; present only when non-empty (older files / plain rails have none).
+   */
+  startRiders?: number[];
 }
 
 /**
@@ -734,7 +744,7 @@ export interface SelectionClip {
   /** Copied joints: attached ones carry their body's tmp id, free ones null. */
   joints: { tmp: number; bodyTmp: number | null; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
-  sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[] }[];
+  sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[]; startRiders?: number[] }[];
   pins: { a: number; b: number; rigid?: boolean }[];
   /** Powered constraints fully internal to the clip (slider/rider — body/joints — copied). */
   actuators: { slider: number; rider: number; speed: number; profile: "triangle" | "sine" }[];
@@ -777,7 +787,7 @@ export interface FeatureClip {
   holes: { tmp: number; control: Vec2[]; radius: number; radii?: (number | null)[]; round?: RoundMode }[];
   joints: { tmp: number; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
-  sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[] }[];
+  sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[]; startRiders?: number[] }[];
   motors: { pivot: number; crank: number; speed: number }[];
   sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null }[];
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
@@ -2522,6 +2532,38 @@ export class Scene {
     );
   }
 
+  /** Mark a rider's home as the rail's start joint (see `SliderConstraint.startRiders`). */
+  setSliderStartRider(sliderId: number, jointId: number): void {
+    const c = this.constraints.find(
+      (x): x is SliderConstraint => x.id === sliderId && x.kind === "slider"
+    );
+    if (!c || !c.riders.includes(jointId)) return;
+    if (!c.startRiders) c.startRiders = [];
+    if (!c.startRiders.includes(jointId)) c.startRiders.push(jointId);
+  }
+
+  /**
+   * Bring the start riders of every slider whose `railA` is `railJointId` home: each one
+   * whose body contains the rail joint's world point is re-placed exactly there (one that
+   * would land outside its body is left where it is). Called from `moveJoint`.
+   */
+  private settleStartRiders(railJointId: number): void {
+    const rj = this.getJoint(railJointId);
+    if (!rj) return;
+    const at = this.jointWorld(rj);
+    for (const c of this.constraints) {
+      if (c.kind !== "slider" || c.railA !== railJointId || !c.startRiders) continue;
+      for (const rid of c.startRiders) {
+        const r = this.getJoint(rid);
+        if (!r || r.bodyId === null) continue;
+        const body = this.getBody(r.bodyId);
+        if (!body || !this.pointInBody(body, at)) continue;
+        const w = this.jointWorld(r);
+        if (dist(w, at) > 0) this.moveJoint(rid, sub(at, w));
+      }
+    }
+  }
+
   /**
    * Lock / unlock a rider's orientation to its rail (prismatic slider vs pin-in-slot).
    * A no-op when the joint isn't a rider of that rail.
@@ -2533,6 +2575,50 @@ export class Scene {
     if (!c || !c.riders.includes(jointId)) return;
     if (locked && !c.locked.includes(jointId)) c.locked.push(jointId);
     else if (!locked) c.locked = c.locked.filter((r) => r !== jointId);
+  }
+
+  /**
+   * Two-click slider (v20): a complete prismatic joint in one call. `p1` is a point on the
+   * owner body — the part that moves, and the point that travels; `p2` is the far end of
+   * the travel. Creates the owner's rider joint at `p1` (orientation-locked), the two rail
+   * joints at `p1` / `p2` and the rail between them. With `trackBodyId` the rail joints
+   * attach to that body (a moving track: the owner slides relative to it — it must contain
+   * both points, joint containment), otherwise they are free and `addSlider` grounds them
+   * (a world-fixed track). `p1` is clamped into the owner. With `riderJointId` an existing
+   * joint of the owner becomes the rider instead of a new one (the start is then that joint's
+   * position — the first click landed on it). Returns null for a degenerate travel, a
+   * missing body, a track that is the owner itself or doesn't reach both points, or a rider
+   * joint that isn't the owner's / already rides a rail.
+   */
+  createSlider(
+    ownerBodyId: number,
+    p1: Vec2,
+    p2: Vec2,
+    trackBodyId: number | null = null,
+    riderJointId: number | null = null
+  ): { slider: SliderConstraint; rider: Joint; railA: Joint; railB: Joint } | null {
+    const owner = this.getBody(ownerBodyId);
+    if (!owner) return null;
+    let existing: Joint | undefined;
+    if (riderJointId !== null) {
+      existing = this.getJoint(riderJointId);
+      if (!existing || existing.bodyId !== owner.id || this.sliderOfRider(existing.id)) return null;
+    }
+    const start = existing ? this.jointWorld(existing) : this.clampIntoBody(owner, p1);
+    if (dist(start, p2) < 1e-9) return null;
+    let track: Body | undefined;
+    if (trackBodyId !== null) {
+      track = this.getBody(trackBodyId);
+      if (!track || track.id === owner.id) return null;
+      if (!this.pointInBody(track, start) || !this.pointInBody(track, p2)) return null;
+    }
+    const rider = existing ?? this.addJoint(owner.id, start);
+    const railA = track ? this.addJoint(track.id, start) : this.addFreeJoint(start);
+    const railB = track ? this.addJoint(track.id, p2) : this.addFreeJoint(p2);
+    const slider = this.addSlider(railA.id, railB.id);
+    this.attachSliderRider(slider.id, rider.id, true);
+    this.setSliderStartRider(slider.id, rider.id);
+    return { slider, rider, railA, railB };
   }
 
   /**
@@ -2565,11 +2651,26 @@ export class Scene {
     const place = vec(a.x + dir.x * t, a.y + dir.y * t);
     const rider = this.addFreeJoint(place);
     this.attachSliderRider(sliderId, rider.id);
+    return this.addLinearActuatorOn(sliderId, rider.id);
+  }
+
+  /**
+   * Create a linear actuator that drives an *existing* rider of `sliderId` (v20: the A tool
+   * prefers a rail's own rider — a two-click slider's carriage — over minting a free one).
+   * The rider may be a body joint; in animation its anchor target then drives the body.
+   * Returns null when the joint isn't a rider of that slider or is already driven.
+   */
+  addLinearActuatorOn(sliderId: number, riderId: number): LinearActuatorConstraint | null {
+    const slider = this.constraints.find(
+      (c): c is SliderConstraint => c.id === sliderId && c.kind === "slider"
+    );
+    if (!slider || !slider.riders.includes(riderId)) return null;
+    if (this.constraints.some((c) => c.kind === "linearActuator" && c.riderId === riderId)) return null;
     const c: LinearActuatorConstraint = {
       kind: "linearActuator",
       id: this.id(),
       sliderId,
-      riderId: rider.id,
+      riderId,
       speed: DEFAULT_LINEAR_ACTUATOR_SPEED,
       profile: "triangle",
     };
@@ -3171,15 +3272,31 @@ export class Scene {
   }
 
   /** Nearest joint within `radius` world units of the point, or undefined. */
-  jointAt(p: Vec2, radius: number): Joint | undefined {
+  /**
+   * Nearest joint within `radius`. Coincident joints (a two-click slider's rider sits exactly
+   * on its rail's start joint) are told apart by `prefer`: `"rail"` (default — draw mode,
+   * where the endpoints are what gets edited and the rider follows) picks the rail joint,
+   * `"rider"` (sim drags, the Slider tool's lock toggle) the rider — a grounded rail joint
+   * can't drive anything.
+   */
+  jointAt(p: Vec2, radius: number, prefer: "rail" | "rider" = "rail"): Joint | undefined {
     let best: Joint | undefined;
     let bestD = radius;
+    let railJoints: Set<number> | null = null; // built lazily — only ties need it
     for (const j of this.joints) {
       const d = dist(this.jointWorld(j), p);
-      if (d <= bestD) {
-        bestD = d;
-        best = j;
+      if (d > bestD) continue;
+      if (best && bestD - d < COINCIDENT_EPS) {
+        railJoints ??= new Set(
+          this.constraints.flatMap((c) => (c.kind === "slider" ? [c.railA, c.railB] : []))
+        );
+        const bestIsRail = railJoints.has(best.id);
+        const jIsRail = railJoints.has(j.id);
+        // Keep the current best when it already matches the preference and the challenger doesn't.
+        if (bestIsRail !== jIsRail && bestIsRail === (prefer === "rail")) continue;
       }
+      bestD = d;
+      best = j;
     }
     return best;
   }
@@ -3221,6 +3338,40 @@ export class Scene {
     for (const c of this.constraints) {
       if (c.kind === "ground" && owned.has(c.joint)) c.anchor = add(c.anchor, delta);
     }
+    // The body's own slider tracks ride along (their ground anchors follow in moveJoint).
+    for (const id of this.ownedTrackJoints(bodyId)) this.moveJoint(id, delta);
+  }
+
+  /**
+   * The world-fixed slider tracks a body *owns* (v20): the free, grounded, not group-locked
+   * rail joints of every slider whose riders all live on `bodyId`. Such a track is the
+   * body's own slider (a two-click slider on empty space), so a rigid edit of the body in
+   * draw mode — drag, rotate, mirror, a sketch-driven move — carries the endpoints along
+   * (`moveBody` / `rotateBody` / `mirrorBody`), and a copy of the body brings them
+   * (`extractSelection`). A track shared by riders on several bodies, or one living on
+   * another body (a moving track), is nobody's and stays put. Simulation never moves
+   * bodies through these methods, so the track is fixed there as it should be.
+   */
+  ownedTrackJoints(bodyId: number): number[] {
+    const out: number[] = [];
+    for (const c of this.constraints) {
+      if (c.kind !== "slider" || c.riders.length === 0) continue;
+      if (!c.riders.every((r) => this.getJoint(r)?.bodyId === bodyId)) continue;
+      const ja = this.getJoint(c.railA);
+      const jb = this.getJoint(c.railB);
+      if (!ja || !jb || ja.bodyId !== null || jb.bodyId !== null) continue;
+      if (this.groupOfJoint(ja.id) || this.groupOfJoint(jb.id)) continue;
+      for (const id of [ja.id, jb.id]) if (!out.includes(id)) out.push(id);
+    }
+    return out;
+  }
+
+  /** `ownedTrackJoints` over several bodies, as a set — to skip those joints when a
+   *  multi-selection moves them explicitly as well. */
+  ownedTrackJointsOf(bodyIds: Iterable<number>): Set<number> {
+    const out = new Set<number>();
+    for (const id of bodyIds) for (const j of this.ownedTrackJoints(id)) out.add(j);
+    return out;
   }
 
   /**
@@ -3243,6 +3394,7 @@ export class Scene {
       }
     }
     this.shiftJoint(j, delta);
+    this.settleStartRiders(id); // a moved arrow start brings its carriage home (v20)
   }
 
   /** The control vertex (outer, or of any hole) exactly coincident with `p`, or null. */
@@ -3297,6 +3449,12 @@ export class Scene {
         c.anchor = add(pivot, rotate(sub(c.anchor, pivot), delta));
       }
     }
+    // The body's own slider tracks turn about the same pivot.
+    for (const id of this.ownedTrackJoints(bodyId)) {
+      const j = this.getJoint(id)!;
+      const w = this.jointWorld(j);
+      this.moveJoint(id, sub(add(pivot, rotate(sub(w, pivot), delta)), w));
+    }
   }
 
   /**
@@ -3333,6 +3491,12 @@ export class Scene {
     const owned = new Set(attached.map((j) => j.id));
     for (const con of this.constraints) {
       if (con.kind === "ground" && owned.has(con.joint)) con.anchor = reflect(con.anchor);
+    }
+    // The body's own slider tracks reflect across the same line.
+    for (const id of this.ownedTrackJoints(bodyId)) {
+      const j = this.getJoint(id)!;
+      const w = this.jointWorld(j);
+      this.moveJoint(id, sub(reflect(w), w));
     }
     // Bake the reflected world geometry back in at angle 0 (a reflection isn't a rotation,
     // so the prior angle no longer applies), then let rebuildBody re-derive shape/mass and
@@ -3427,6 +3591,9 @@ export class Scene {
     const reflectDelta = (p: Vec2): Vec2 =>
       axis === "h" ? vec(2 * (c - p.x), 0) : vec(0, 2 * (c - p.y));
     const instanceIds = new Set<number>();
+    // Free joints that are a mirrored body's own slider track are carried by that body's
+    // mirrorBody + moveBody below — never reflect them a second time here.
+    const carried = this.ownedTrackJointsOf(bodies.map((b) => b.id));
     for (const b of bodies) {
       const inst = this.instanceOfBody(b.id);
       if (inst) {
@@ -3437,6 +3604,7 @@ export class Scene {
       this.moveBody(b.id, reflectDelta(b.pos)); // ...then reflect the centroid itself
     }
     for (const j of joints) {
+      if (carried.has(j.id)) continue;
       const inst = this.instanceOfJoint(j.id);
       if (inst) {
         instanceIds.add(inst.id);
@@ -3651,7 +3819,9 @@ export class Scene {
       .map((id) => this.getBody(id))
       .filter((b): b is Body => b !== undefined);
     const bodyIdSet = new Set(bodies.map((b) => b.id));
-    const freeJoints = [...new Set(freeJointIds)]
+    // A body's own slider tracks (free rail joints of sliders ridden only by it) are part
+    // of the body for copying: they come along with their grounds and the slider itself.
+    const freeJoints = [...new Set([...freeJointIds, ...this.ownedTrackJointsOf(bodyIdSet)])]
       .map((id) => this.getJoint(id))
       .filter((j): j is Joint => j !== undefined && j.bodyId === null);
     const attached = this.joints.filter((j) => j.bodyId !== null && bodyIdSet.has(j.bodyId));
@@ -3695,6 +3865,7 @@ export class Scene {
           railB: c.railB,
           riders: c.riders.filter((r) => owned.has(r)),
           locked: c.locked.filter((r) => owned.has(r)),
+          startRiders: (c.startRiders ?? []).filter((r) => owned.has(r)),
         });
       } else if (c.kind === "pin" && owned.has(c.jointA) && owned.has(c.jointB)) {
         pins.push({ a: c.jointA, b: c.jointB, rigid: c.rigid === true });
@@ -3869,7 +4040,9 @@ export class Scene {
       sliderIdMap.set(s.tmp, sl.id);
       for (const r of s.riders) {
         const nr = idMap.get(r);
-        if (nr !== undefined) this.attachSliderRider(sl.id, nr, (s.locked ?? []).includes(r));
+        if (nr === undefined) continue;
+        this.attachSliderRider(sl.id, nr, (s.locked ?? []).includes(r));
+        if (s.startRiders?.includes(r)) this.setSliderStartRider(sl.id, nr);
       }
     }
     for (const p of clip.pins) {
@@ -4053,6 +4226,7 @@ export class Scene {
           railB: c.railB,
           riders: c.riders.filter((r) => owned.has(r)),
           locked: c.locked.filter((r) => owned.has(r)),
+          startRiders: (c.startRiders ?? []).filter((r) => owned.has(r)),
         });
       } else if (c.kind === "motor" && c.bodyId === bodyId && owned.has(c.pivotJointId) && owned.has(c.crankJointId)) {
         motors.push({ pivot: c.pivotJointId, crank: c.crankJointId, speed: c.speed });
@@ -4168,7 +4342,9 @@ export class Scene {
       sliderMap.set(s.tmp, sl.id);
       for (const r of s.riders) {
         const nr = idMap.get(r);
-        if (nr !== undefined) this.attachSliderRider(sl.id, nr, s.locked.includes(r));
+        if (nr === undefined) continue;
+        this.attachSliderRider(sl.id, nr, s.locked.includes(r));
+        if (s.startRiders?.includes(r)) this.setSliderStartRider(sl.id, nr);
       }
     }
     for (const m of clip.motors) {
@@ -5013,18 +5189,24 @@ export class Scene {
         const locked = (dc.locked ?? [])
           .map((r) => jointIdMap.get(r))
           .filter((x): x is number => x !== undefined && riders.includes(x));
+        const startRiders = (dc.startRiders ?? [])
+          .map((r) => jointIdMap.get(r))
+          .filter((x): x is number => x !== undefined && riders.includes(x));
         const sc = oldSceneCon(dc.id);
         if (sc && sc.kind === "slider") {
           sc.railA = a;
           sc.railB = b;
           sc.riders = riders;
           sc.locked = locked;
+          if (startRiders.length > 0) sc.startRiders = startRiders;
+          else delete sc.startRiders;
           keep(dc.id, sc.id);
         } else {
           // Created directly (not via addSlider): a def's world-fixed track means
           // "fixed to the chassis", so its free rail joints must NOT be auto-grounded
           // here — they're group-locked chassis points instead.
           const ns: SliderConstraint = { kind: "slider", id: this.id(), railA: a, railB: b, riders, locked };
+          if (startRiders.length > 0) ns.startRiders = startRiders;
           this.constraints.push(ns);
           keep(dc.id, ns.id);
         }
@@ -5192,6 +5374,87 @@ export class Scene {
     this.pruneConstraints(new Set([id]));
     this.pruneGroups();
     this.pruneInstances();
+  }
+
+  // --- user-level deletion: a slider goes as a whole (v20) -----------------------------
+  // The raw removers above (`removeBody` / `removeJoint` / `removeConstraint`) are also
+  // used internally (split / combine, aborted drafts, component expansion) and must stay
+  // surgical. The `delete*` methods are what the UI's Delete key calls: deleting any part
+  // of a slider — its rail, a rail joint, its rider, or the owner body — takes the whole
+  // construct with it, minus any joint that still serves something else.
+
+  /**
+   * Whether a joint does anything besides taking part in slider `sliderId`: pins, motors,
+   * other sliders, an actuator on another slider, a permanent group, or a pattern. Grounds
+   * don't count (a world-fixed track's own anchoring), nor does an actuator on this slider.
+   */
+  private jointHasOtherRoles(jointId: number, sliderId: number): boolean {
+    if (this.groupOfJoint(jointId) || this.patternOfJoint(jointId)) return true;
+    return this.constraints.some((c) => {
+      switch (c.kind) {
+        case "ground":
+          return false;
+        case "pin":
+          return c.jointA === jointId || c.jointB === jointId;
+        case "motor":
+          return c.pivotJointId === jointId || c.crankJointId === jointId;
+        case "linearActuator":
+          return c.riderId === jointId && c.sliderId !== sliderId;
+        case "slider":
+          return (
+            c.id !== sliderId &&
+            (c.railA === jointId || c.railB === jointId || c.riders.includes(jointId))
+          );
+      }
+    });
+  }
+
+  /**
+   * Joints to take down along with `removed` so no slider is left in pieces: when a rail
+   * joint goes, the slider's other rail joint and its riders go too; when a slider loses
+   * its last rider, its rail joints go. Only role-free joints (`jointHasOtherRoles`).
+   */
+  private sliderOrphans(removed: ReadonlySet<number>): number[] {
+    const out: number[] = [];
+    for (const c of this.constraints) {
+      if (c.kind !== "slider") continue;
+      const railGone = removed.has(c.railA) || removed.has(c.railB);
+      const ridersGone = c.riders.length > 0 && c.riders.every((r) => removed.has(r));
+      if (!railGone && !ridersGone) continue;
+      for (const id of [c.railA, c.railB, ...c.riders]) {
+        if (removed.has(id) || out.includes(id) || !this.getJoint(id)) continue;
+        if (!this.jointHasOtherRoles(id, c.id)) out.push(id);
+      }
+    }
+    return out;
+  }
+
+  /** Delete a slider with everything it is made of: the rail, its rail joints and riders (role-free ones). */
+  deleteSlider(sliderId: number): void {
+    const c = this.constraints.find(
+      (x): x is SliderConstraint => x.id === sliderId && x.kind === "slider"
+    );
+    if (!c) return;
+    const doomed = [c.railA, c.railB, ...c.riders].filter(
+      (id) => this.getJoint(id) && !this.jointHasOtherRoles(id, c.id)
+    );
+    this.removeConstraint(c.id);
+    for (const id of doomed) this.removeJoint(id);
+  }
+
+  /** Delete a joint the user picked, taking any slider it leaves in pieces along (see `sliderOrphans`). */
+  deleteJoint(id: number): void {
+    const orphans = this.sliderOrphans(new Set([id]));
+    this.removeJoint(id);
+    for (const o of orphans) if (this.getJoint(o)) this.removeJoint(o);
+  }
+
+  /** Delete a body the user picked; a slider whose riders all lived on it loses its track too. */
+  deleteBody(id: number): void {
+    const removed = new Set(this.joints.filter((j) => j.bodyId === id).map((j) => j.id));
+    const orphans = this.sliderOrphans(removed);
+    this.removeBody(id);
+    for (const o of orphans) if (this.getJoint(o)) this.removeJoint(o);
   }
 
   /**
@@ -5379,7 +5642,10 @@ export class Scene {
           ? [s.slider]
           : [];
         const locked = Array.isArray(s.locked) ? s.locked.filter((r) => riders.includes(r)) : [];
-        return { kind: "slider", id: s.id, railA: s.railA, railB: s.railB, riders, locked };
+        const startRiders = Array.isArray(s.startRiders) ? s.startRiders.filter((r) => riders.includes(r)) : [];
+        const out: SliderConstraint = { kind: "slider", id: s.id, railA: s.railA, railB: s.railB, riders, locked };
+        if (startRiders.length > 0) out.startRiders = startRiders;
+        return out;
       });
     // Measurements arrived in v7; older files simply have none.
     this.measurements = Array.isArray(data.measurements)
@@ -5535,9 +5801,12 @@ function pruneConstraint(c: Constraint, removed: Set<number>): Constraint | null
   if (removed.has(c.railA) || removed.has(c.railB)) return null;
   const riders = c.riders.filter((r) => !removed.has(r));
   const locked = c.locked.filter((r) => !removed.has(r));
-  return riders.length === c.riders.length && locked.length === c.locked.length
-    ? c
-    : { ...c, riders, locked };
+  const startRiders = c.startRiders?.filter((r) => !removed.has(r));
+  if (riders.length === c.riders.length && locked.length === c.locked.length) return c;
+  const out: SliderConstraint = { ...c, riders, locked };
+  if (startRiders && startRiders.length > 0) out.startRiders = startRiders;
+  else delete out.startRiders;
+  return out;
 }
 
 // --- component cascade helpers ----------------------------------------------

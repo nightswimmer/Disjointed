@@ -74,10 +74,10 @@
           <button data-tool="ground" class="tool-btn icon-btn" title="Ground a joint (fixed position, free rotation) or a body / group (fixed entirely); click again to unground (G)" aria-label="Ground tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="4" r="1.6"/><line x1="10" y1="5.6" x2="10" y2="10"/><line x1="4" y1="10" x2="16" y2="10"/><line x1="6" y1="10" x2="4" y2="14"/><line x1="9" y1="10" x2="7" y2="14"/><line x1="12" y1="10" x2="10" y2="14"/><line x1="15" y1="10" x2="13" y2="14"/></svg>
           </button>
-          <button data-tool="rail" class="tool-btn icon-btn" title="Draw a rail — click two joints on the same body (a moving rail) or two free joints (a fixed track); joints and sliders ride along it (K)" aria-label="Rail tool">
+          <button data-tool="rail" class="tool-btn icon-btn" title="Draw a rail — click two joints on the same body (a moving rail) or two free joints (a fixed track); joints placed on it ride along as pin-in-slots (K)" aria-label="Rail tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
           </button>
-          <button data-tool="slider" class="tool-btn icon-btn" title="Add a slider to a rail — travels along the rail without rotating (attaches to the body under the cursor); click an existing rider to toggle its rotation lock (S)" aria-label="Slider tool">
+          <button data-tool="slider" class="tool-btn icon-btn" title="Slider — click a body where the travel starts (that body moves), then click where it ends: the body slides along the arrow without rotating. Over another body the track rides that body, else it is fixed in the world. Click an existing rail to add a slider there, or a rider to toggle its rotation lock (S)" aria-label="Slider tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><rect x="6.5" y="6.5" width="7" height="7" rx="1.2" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="1.3" fill="currentColor" stroke="none"/></svg>
           </button>
           <button data-tool="guide" class="tool-btn icon-btn" title="Construction guideline — click two points to place an infinite line; points land on joints / corners / edges, and snapping prefers guidelines over the grid (L)" aria-label="Guideline tool">
@@ -110,7 +110,7 @@
           </button>
         </div>
         <div class="group" id="actuator-group">
-          <button data-tool="linearActuator" class="tool-btn icon-btn" title="Create a linear actuator on a rail — auto-travels back and forth in animation (A)" aria-label="Linear actuator tool">
+          <button data-tool="linearActuator" class="tool-btn icon-btn" title="Linear actuator — click a slider or rail to make it self-driving: its carriage travels back and forth in animation (A)" aria-label="Linear actuator tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="2.3" fill="currentColor" stroke="none"/><path d="M6 10l-2-1.6M6 10l-2 1.6" /><path d="M14 10l2-1.6M14 10l2 1.6" /></svg>
           </button>
           <button data-tool="motor" class="tool-btn icon-btn" title="Create a motor on a body — pick pivot then crank pin; spins in animation (M)" aria-label="Motor tool">
