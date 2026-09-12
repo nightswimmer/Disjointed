@@ -22,6 +22,7 @@ import {
   Body,
   RoundMode,
   SelectionClip,
+  FeatureClip,
   ComponentInstance,
   ComponentOccurrence,
   InstanceTransform,
@@ -259,11 +260,27 @@ let savedPoses: Map<number, { pos: Vec2; angle: number }> | null = null;
 /** Last selection copied with Ctrl+C: plain material as a `SelectionClip`, plus any
  *  copied component instances as placements (pasting creates new instances of the same
  *  definitions); pasted at the cursor with Ctrl+V. */
-let clipboard: {
-  clip: SelectionClip | null;
-  instances: { defId: number; t: InstanceTransform }[];
-  center: Vec2;
-} | null = null;
+let clipboard:
+  | {
+      kind: "selection";
+      clip: SelectionClip | null;
+      instances: { defId: number; t: InstanceTransform }[];
+      center: Vec2;
+    }
+  // Features of one body (whole holes + joints, with what's internal to them), pasted
+  // into the selected body with Ctrl+V.
+  | { kind: "features"; clip: FeatureClip }
+  | null = null;
+/**
+ * Feature selection within the singly-selected body (draw mode): control vertices —
+ * outer outline (`hole` null) or a hole's — plus attached joints, all of `bodyId`. Pattern
+ * members resolve to their seed's matching feature (members are derived geometry), so the
+ * set names seeds only. Built by a Shift+drag box from empty space (Ctrl+Shift extends);
+ * members move together (drag any of them), delete together, and copy as a `FeatureClip`.
+ */
+let featureSel: { bodyId: number; verts: { hole: number | null; index: number }[]; joints: number[] } | null = null;
+/** In-progress feature box (world corners); `additive` = Ctrl+Shift (extends the set). */
+let featureBox: { start: Vec2; end: Vec2; additive: boolean; moved: boolean } | null = null;
 /**
  * Active rotate (rotate tool): turning `bodyIds` (plus any multi-selected free `jointIds`)
  * about a fixed `pivot`. `grabAngle` is the first body's angle at grab; `prevPointer` /
@@ -498,6 +515,20 @@ type LeftDrag =
       osnap?: DragObjSnap;
       align?: DragAlign;
     }
+  // Feature-selection move: the selected control vertices + joints of one body shift by
+  // the same delta; `anchor` is the grabbed feature (a vertex or joint ref) — the snap
+  // anchor, the object-snap reference and what implicit constraints align.
+  | {
+      kind: "features";
+      bodyId: number;
+      verts: { hole: number | null; index: number }[];
+      joints: number[];
+      anchor: MeasureRef;
+      grabOffset: Vec2;
+      moved: boolean;
+      osnap?: DragObjSnap;
+      align?: DragAlign;
+    }
   // Rigid (Shift) drag: the grabbed selection moves like in simulation — the solver drives
   // it each frame, grounds hold, and the rest of the scene is frozen (`freeze`).
   | { kind: "rigid"; driver: Driver; freeze: SolveFreeze; moved: boolean };
@@ -524,6 +555,10 @@ function dragAnchorWorld(d: LeftDrag): Vec2 {
     return "jointId" in d.anchor
       ? scene.jointWorld(scene.getJoint(d.anchor.jointId)!)
       : add(scene.getBody(d.anchor.bodyId)!.pos, d.anchor.offset);
+  }
+  if (d.kind === "features") {
+    const r = scene.resolveMeasureRef(d.anchor);
+    return r?.kind === "point" ? r.p : vec(0, 0);
   }
   if (d.kind === "rigid") return d.driver.target; // solver-driven; no snap anchor
   if (d.kind === "guide") return scene.getGuide(d.id)!.a;
@@ -659,7 +694,7 @@ function dragMembers(d: LeftDrag): { bodies: Set<number>; joints: Set<number> } 
   else if (d.kind === "multi") {
     d.bodies.forEach((id) => bodies.add(id));
     d.joints.forEach((id) => joints.add(id));
-  }
+  } else if (d.kind === "features") d.joints.forEach((id) => joints.add(id));
   return { bodies, joints };
 }
 
@@ -672,15 +707,25 @@ function dragMembers(d: LeftDrag): { bodies: Set<number>; joints: Set<number> } 
 function dragSnapExclusions(d: LeftDrag): {
   bodies: Set<number>;
   joints: Set<number>;
-  vertex?: { bodyId: number; hole: number | null; index: number };
+  vertex?: { bodyId: number; keys: Set<string> };
 } {
   const excl = dragMembers(d);
-  if (d.kind !== "vertex") return excl;
-  const vw = dragAnchorWorld(d);
+  if (d.kind !== "vertex" && d.kind !== "features") return excl;
+  // A vertex reshape / feature-set drag: the moving vertices (and the joints stuck to
+  // them) are excluded from the targets; see objSnapTargets for the edges they end.
+  const body = scene.getBody(d.bodyId);
+  if (!body) return excl;
+  const verts = d.kind === "vertex" ? [{ hole: d.hole, index: d.index }] : d.verts;
+  const worlds = verts.map((v) => outlineControlWorld(body, v.hole)[v.index]).filter((p): p is Vec2 => !!p);
   for (const j of scene.joints) {
-    if (j.bodyId === d.bodyId && dist(scene.jointWorld(j), vw) < VERTEX_LINK_EPS) excl.joints.add(j.id);
+    if (j.bodyId === d.bodyId && worlds.some((w) => dist(scene.jointWorld(j), w) < VERTEX_LINK_EPS)) excl.joints.add(j.id);
   }
-  return { ...excl, vertex: { bodyId: d.bodyId, hole: d.hole, index: d.index } };
+  return { ...excl, vertex: { bodyId: d.bodyId, keys: new Set(verts.map((v) => vertKey(v.hole, v.index))) } };
+}
+
+/** Key naming one control vertex of a body (outer outline or hole `hole`) in an exclusion set. */
+function vertKey(hole: number | null, index: number): string {
+  return `${hole ?? "o"}:${index}`;
 }
 
 /** An object-snap target feature: its geometry, and the reference it stands for as a
@@ -698,30 +743,30 @@ type SnapLine = { a: Vec2; b: Vec2; infinite: boolean; ref: MeasureRef | null };
 function objSnapTargets(
   excludeBodies: Set<number>,
   excludeJoints: Set<number>,
-  excludeVertex?: { bodyId: number; hole: number | null; index: number }
+  excludeVertex?: { bodyId: number; keys: Set<string> }
 ): { points: SnapPoint[]; lines: SnapLine[] } {
   const points: SnapPoint[] = [];
   const lines: SnapLine[] = [];
   for (const body of scene.bodies) {
     if (excludeBodies.has(body.id)) continue;
-    // A vertex reshape drag: its own body's other features are fair targets (a hole
-    // centre onto a corner, say), but not the vertex itself, the two edges it ends (and
-    // their midpoints), or the centroid — all of which move with it and would stick.
-    const ex = excludeVertex?.bodyId === body.id ? excludeVertex : null;
+    // A vertex reshape / feature-set drag: its own body's other features are fair
+    // targets (a hole centre onto a corner, say), but not the moving vertices, the edges
+    // they end (and their midpoints), or the centroid — all of which move and would stick.
+    const ex = excludeVertex?.bodyId === body.id ? excludeVertex.keys : null;
     if (!ex) points.push({ p: body.pos, ref: null });
     for (const { verts, hole } of bodyControlLoops(body)) {
       const n = verts.length;
-      const exI = ex && ex.hole === hole ? ex.index : -1;
+      const exAt = (i: number): boolean => !!ex && ex.has(vertKey(hole, i));
       for (let i = 0; i < n; i++) {
         const v = verts[i];
-        if (i !== exI) {
+        if (!exAt(i)) {
           points.push({
             p: v,
             ref: hole === null ? { kind: "vertex", bodyId: body.id, index: i } : { kind: "vertex", bodyId: body.id, index: i, hole },
           });
         }
         if (n < 2) continue;
-        if (i === exI || (i + 1) % n === exI) continue;
+        if (exAt(i) || exAt((i + 1) % n)) continue;
         const w = verts[(i + 1) % n];
         points.push({ p: scale(add(v, w), 0.5), ref: null });
         lines.push({
@@ -1054,7 +1099,7 @@ function moveDragged(d: LeftDrag, delta: Vec2): void {
   else if (d.kind === "multi") {
     for (const id of d.bodies) scene.moveBody(id, delta);
     for (const id of d.joints) scene.moveJoint(id, delta);
-  }
+  } else if (d.kind === "features") moveFeatures(d, delta);
 }
 
 /**
@@ -1529,7 +1574,7 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
+  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · with a body selected, Shift+drag a box from empty space to select several of its corners / holes / joints (Ctrl+Shift adds) — drag any of them to move the set, Delete removes it, Ctrl+C copies its holes + joints (with their constraints) and Ctrl+V pastes them into the selected body at the cursor · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   hole: "Round hole: press inside a body and drag out the radius. Polygon hole: click inside a body to start a cut-out, then click more vertices (all inside that body); click the first vertex (or press Enter) to close it.",
   split: "Click a point on a body's outline (edge or corner) to start the cut, click inside to route it, then click the outline again to split the body in two along the path.",
@@ -1902,6 +1947,8 @@ function resetTransient(): void {
   selection = null;
   multiSel = null;
   boxSelect = null;
+  featureSel = null;
+  featureBox = null;
   driver = null;
   rotateDrag = null;
   pendingInsert = null;
@@ -3605,6 +3652,10 @@ function dragAnchorVars(): Set<string> | undefined {
         for (const id of leftDrag.bodies) keys.push(...anchorVarsForBody(scene, id));
         for (const id of leftDrag.joints) keys.push(...anchorVarsForJoint(scene, id));
         break;
+      case "features":
+        for (const v of leftDrag.verts) keys.push(anchorVarForVertex(leftDrag.bodyId, v.index, v.hole));
+        for (const id of leftDrag.joints) keys.push(...anchorVarsForJoint(scene, id));
+        break;
       case "guide":
         keys.push(...anchorVarsForGuide(leftDrag.id));
         break;
@@ -4090,6 +4141,10 @@ function selectedBodyEdgeAt(p: Vec2): { index: number; point: Vec2; hole: number
 /** Delete the currently selected element and its dependent features. Instance material
  *  deletes as whole instances (their records go with their elements). */
 function deleteSelection(): void {
+  if (featureSel) {
+    deleteFeatures(); // the selected corners / holes / joints only — the body stays
+    return;
+  }
   if (multiSel) {
     const instIds = new Set<number>();
     for (const id of multiSel.bodies) {
@@ -4136,11 +4191,253 @@ function deleteSelection(): void {
   markDirty();
 }
 
+// --- feature selection (Shift+drag box with a body selected) ---------------------------
+/**
+ * Whether a Shift+press at `p` starts a feature box: a single plain body is selected and
+ * the press lands on empty space — not on a handle, joint or body (those keep their
+ * reshape / rigid-drag meanings).
+ */
+function featureBoxStartAt(p: Vec2): boolean {
+  if (mode !== "draw" || tool !== null || multiSel || selection?.kind !== "body") return false;
+  if (scene.instanceOfBody(selection.id)) return false;
+  return (
+    !selectedBodyNodeAt(p) &&
+    !selectedBodyFilletHandleAt(p) &&
+    !scene.jointAt(p, pickRadius()) &&
+    !scene.bodyAt(p)
+  );
+}
+
+/** The feature selection `verts` + `joints` of `bodyId` name, with pattern members
+ *  resolved to their seed's matching feature and duplicates dropped (null when empty). */
+function normalizeFeatureSel(
+  bodyId: number,
+  verts: { hole: number | null; index: number }[],
+  joints: number[]
+): typeof featureSel {
+  const vmap = new Map<string, { hole: number | null; index: number }>();
+  for (const v of verts) {
+    const hole = v.hole === null ? null : scene.patternSeedHole(bodyId, v.hole);
+    vmap.set(vertKey(hole, v.index), { hole, index: v.index });
+  }
+  const jset = new Set<number>();
+  for (const id of joints) {
+    const pj = scene.patternOfJoint(id);
+    jset.add(pj?.role === "member" && pj.pattern.seed.kind === "joint" ? pj.pattern.seed.jointId : id);
+  }
+  return vmap.size + jset.size ? { bodyId, verts: [...vmap.values()], joints: [...jset] } : null;
+}
+
+/**
+ * Feature box result: the selected body's control vertices (outer outline + holes) and
+ * attached joints inside the rectangle — pattern members count as their seed's feature.
+ * `additive` (Ctrl+Shift) extends the current feature selection of the same body.
+ */
+function applyFeatureBox(additive: boolean): void {
+  if (!featureBox || selection?.kind !== "body") return;
+  const body = scene.getBody(selection.id);
+  if (!body) return;
+  const x0 = Math.min(featureBox.start.x, featureBox.end.x);
+  const x1 = Math.max(featureBox.start.x, featureBox.end.x);
+  const y0 = Math.min(featureBox.start.y, featureBox.end.y);
+  const y1 = Math.max(featureBox.start.y, featureBox.end.y);
+  const inside = (p: Vec2) => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+  const keep = additive && featureSel?.bodyId === body.id ? featureSel : null;
+  const verts = [...(keep?.verts ?? [])];
+  const joints = [...(keep?.joints ?? [])];
+  scene.bodyControlWorld(body).forEach((p, i) => {
+    if (inside(p)) verts.push({ hole: null, index: i });
+  });
+  body.holes?.forEach((_, hi) => {
+    scene.bodyHoleControlWorld(body, hi).forEach((p, i) => {
+      if (inside(p)) verts.push({ hole: hi, index: i });
+    });
+  });
+  for (const j of scene.joints) {
+    if (j.bodyId === body.id && inside(scene.jointWorld(j))) joints.push(j.id);
+  }
+  featureSel = normalizeFeatureSel(body.id, verts, joints);
+}
+
+/**
+ * Keep the feature selection consistent with the scene (every frame): it lives only
+ * while its body is the single selection in draw mode, and members that no longer exist
+ * (a deleted joint, a removed vertex, an undo) are pruned — empty → cleared.
+ */
+function pruneFeatureSel(): void {
+  if (!featureSel) return;
+  const body =
+    mode === "draw" && selection?.kind === "body" && selection.id === featureSel.bodyId
+      ? scene.getBody(featureSel.bodyId)
+      : undefined;
+  if (!body) {
+    featureSel = null;
+    return;
+  }
+  const count = (hole: number | null): number =>
+    hole === null ? body.controlLocal.length : body.holes?.[hole]?.controlLocal.length ?? 0;
+  const verts = featureSel.verts.filter((v) => v.index < count(v.hole));
+  const joints = featureSel.joints.filter((id) => scene.getJoint(id)?.bodyId === body.id);
+  if (verts.length + joints.length === 0) featureSel = null;
+  else if (verts.length !== featureSel.verts.length || joints.length !== featureSel.joints.length) {
+    featureSel = { bodyId: body.id, verts, joints };
+  }
+}
+
+/**
+ * The selected feature under `p` — a handle of a selected vertex (a member's handle
+ * stands for its seed's), or a selected joint — as the reference a drag of the whole
+ * set would anchor on. Null when the press is on nothing selected (a plain drag then).
+ */
+function featureHitAt(p: Vec2): MeasureRef | null {
+  if (!featureSel) return null;
+  const bodyId = featureSel.bodyId;
+  const node = selectedBodyNodeAt(p);
+  if (node) {
+    const hole = node.hole === null ? null : scene.patternSeedHole(bodyId, node.hole);
+    if (!featureSel.verts.some((v) => v.hole === hole && v.index === node.index)) return null;
+    return hole === null ? { kind: "vertex", bodyId, index: node.index } : { kind: "vertex", bodyId, index: node.index, hole };
+  }
+  const j = scene.jointAt(p, pickRadius());
+  if (j && j.bodyId === bodyId) {
+    const pj = scene.patternOfJoint(j.id);
+    const id = pj?.role === "member" && pj.pattern.seed.kind === "joint" ? pj.pattern.seed.jointId : j.id;
+    if (featureSel.joints.includes(id)) return { kind: "joint", jointId: id };
+  }
+  return null;
+}
+
+/** Begin dragging the feature selection by its selected feature `ref` grabbed at `grab`:
+ *  that feature is the snap anchor, the object-snap reference and the alignment reference. */
+function startFeatureDrag(grab: Vec2, ref: MeasureRef): void {
+  if (!featureSel) return;
+  const at = scene.resolveMeasureRef(ref);
+  if (at?.kind !== "point") return;
+  leftDrag = {
+    kind: "features",
+    bodyId: featureSel.bodyId,
+    verts: [...featureSel.verts],
+    joints: [...featureSel.joints],
+    anchor: ref,
+    grabOffset: sub(grab, at.p),
+    moved: false,
+    osnap: objSnapEnabled ? { ref, hit: null, hitInfinite: false } : undefined,
+    align: newDragAlign(ref),
+  };
+  canvas.style.cursor = "move";
+}
+
+/**
+ * Move a feature-set drag by `delta`: every selected vertex (a joint stuck to one rides
+ * along, as in a single vertex drag), then every selected joint not already carried
+ * that way — so nothing moves twice. Seed features carry their pattern's members.
+ */
+function moveFeatures(d: Extract<LeftDrag, { kind: "features" }>, delta: Vec2): void {
+  const body = scene.getBody(d.bodyId);
+  if (!body) return;
+  const worlds = d.verts.map((v) => outlineControlWorld(body, v.hole)[v.index]).filter((p): p is Vec2 => !!p);
+  const carried = new Set(
+    scene.joints
+      .filter((j) => j.bodyId === body.id && worlds.some((w) => dist(w, scene.jointWorld(j)) < VERTEX_LINK_EPS))
+      .map((j) => j.id)
+  );
+  for (const v of d.verts) scene.moveBodyVertex(d.bodyId, v.index, delta, v.hole);
+  for (const id of d.joints) if (!carried.has(id)) scene.moveJoint(id, delta);
+}
+
+/** Delete the feature selection: its joints and vertices (a hole left too small goes
+ *  whole); the outer outline keeps at least 3 corners. The body itself stays selected. */
+function deleteFeatures(): void {
+  if (!featureSel) return;
+  const { outerRefused } = scene.removeBodyFeatures(featureSel.bodyId, featureSel.verts, featureSel.joints);
+  if (outerRefused) notify("A body keeps at least 3 corners — the selected outline corners were left in place.");
+  featureSel = null;
+  markDirty();
+}
+
+/** Copy the feature selection to the clipboard: the holes whose every control vertex is
+ *  selected, plus the selected joints (with what's internal to them — see FeatureClip).
+ *  Outline corners stay with their body, so a corners-only selection copies nothing. */
+function copyFeatures(): void {
+  if (!featureSel) return;
+  const body = scene.getBody(featureSel.bodyId);
+  if (!body) return;
+  const holes: number[] = [];
+  body.holes?.forEach((h, hi) => {
+    const n = featureSel!.verts.filter((v) => v.hole === hi).length;
+    if (n >= h.controlLocal.length) holes.push(hi);
+  });
+  const clip = scene.extractFeatures(body.id, holes, featureSel.joints);
+  if (!clip) {
+    notify("Nothing copied: only whole holes and joints copy as features — outline corners stay with their body.", "info");
+    return;
+  }
+  clipboard = { kind: "features", clip };
+}
+
+/** Paste copied features into the selected body, the clip's centre landing at `drop`;
+ *  the pasted holes + joints become the new feature selection. */
+function pasteFeatures(clip: FeatureClip, drop: Vec2): void {
+  if (selection?.kind !== "body" || multiSel) {
+    notify("Select a body to paste the copied features into.", "info");
+    return;
+  }
+  if (scene.instanceOfBody(selection.id)) {
+    notify("Features can't be pasted into a component instance — edit the definition instead.");
+    return;
+  }
+  const res = scene.insertFeatures(selection.id, clip, drop);
+  if (!res) return;
+  if (res.holes.length + res.joints.length === 0) {
+    notify("Nothing pasted: the copied features don't fit inside the selected body at the cursor.");
+    return;
+  }
+  if (res.skipped > 0) {
+    notify(`${res.skipped} copied feature${res.skipped === 1 ? "" : "s"} didn't fit inside the body and ${res.skipped === 1 ? "was" : "were"} skipped.`, "info");
+  }
+  const body = scene.getBody(selection.id)!;
+  const verts: { hole: number | null; index: number }[] = [];
+  for (const hi of res.holes) body.holes?.[hi]?.controlLocal.forEach((_, i) => verts.push({ hole: hi, index: i }));
+  featureSel = normalizeFeatureSel(body.id, verts, res.joints);
+  markDirty();
+}
+
+/** Renderer view of the feature selection: the selected handles' positions (a seed's
+ *  handles mirrored on its pattern members, which move with it) + the selected joints. */
+function featureSelectedView(): RenderInput["featureSelected"] {
+  if (!featureSel || mode !== "draw" || tool !== null) return null;
+  const body = scene.getBody(featureSel.bodyId);
+  if (!body) return null;
+  const vertices: Vec2[] = [];
+  for (const v of featureSel.verts) {
+    const p = outlineControlWorld(body, v.hole)[v.index];
+    if (p) vertices.push(p);
+  }
+  const joints = [...featureSel.joints];
+  for (const p of scene.patterns) {
+    if (p.bodyId !== body.id) continue;
+    if (p.seed.kind === "hole") {
+      const seed = p.seed.hole;
+      const idx = featureSel.verts.filter((v) => v.hole === seed).map((v) => v.index);
+      if (idx.length === 0) continue;
+      for (const m of p.members) {
+        const verts = outlineControlWorld(body, m);
+        for (const i of idx) if (verts[i]) vertices.push(verts[i]);
+      }
+    } else if (featureSel.joints.includes(p.seed.jointId)) joints.push(...p.members);
+  }
+  return { vertices, joints };
+}
+
 /** Copy the selection (bodies / groups / free joints, plus whole component instances) to
  *  the clipboard. Instance material copies as instance *placements* — pasting creates new
  *  instances of the same definitions. */
 function copySelection(): void {
   if (mode !== "draw") return;
+  if (featureSel) {
+    copyFeatures();
+    return;
+  }
   const bodies = multiSel ? [...multiSel.bodies] : selection?.kind === "body" ? [selection.id] : [];
   const joints = multiSel ? [...multiSel.joints] : [];
   if (bodies.length === 0 && joints.length === 0) return;
@@ -4189,13 +4486,17 @@ function copySelection(): void {
     if (j) include(scene.jointWorld(j));
   }
   const center = Number.isFinite(minX) ? vec((minX + maxX) / 2, (minY + maxY) / 2) : vec(0, 0);
-  clipboard = { clip, instances, center };
+  clipboard = { kind: "selection", clip, instances, center };
 }
 
 /** Paste the clipboard so its centre lands at `at` (grid-snapped), then select the copy. */
 function pasteAt(at: Vec2 | null): void {
   if (mode !== "draw" || !clipboard) return;
   const drop = snap(at ?? screenToWorld(view, vec(canvas.clientWidth / 2, canvas.clientHeight / 2)));
+  if (clipboard.kind === "features") {
+    pasteFeatures(clipboard.clip, drop);
+    return;
+  }
   const offset = sub(drop, clipboard.center);
   const bodies = new Set<number>();
   const joints = new Set<number>();
@@ -5032,6 +5333,11 @@ canvas.addEventListener("mousedown", (e) => {
       // Ctrl/Cmd+click: toggle what's under the cursor in the multi-selection; on empty
       // space, start an additive box select instead.
       if (e.ctrlKey || e.metaKey) {
+        // Ctrl+Shift+drag from empty space extends the selected body's feature selection.
+        if (e.shiftKey && featureBoxStartAt(world)) {
+          featureBox = { start: world, end: world, additive: true, moved: false };
+          return;
+        }
         if (!toggleMultiAt(world)) {
           boxSelect = { start: world, end: world, additive: true, moved: false };
         }
@@ -5042,7 +5348,22 @@ canvas.addEventListener("mousedown", (e) => {
       // corner's radius; nearest wins).
       const node = selectedBodyNodeAt(world);
       const fh = selectedBodyFilletHandleAt(world);
-      if (fh && selection?.kind === "body" && (!node || dist(world, fh.at) < dist(world, node.at))) {
+      const onFillet = !!fh && selection?.kind === "body" && (!node || dist(world, fh.at) < dist(world, node.at));
+      // A press on a member of the feature selection drags the whole set (a radius
+      // handle still wins — it never moves geometry).
+      const fref = onFillet ? null : featureHitAt(world);
+      if (fref) {
+        startFeatureDrag(world, fref);
+        return;
+      }
+      // Shift+drag from empty space with a body selected: box-select its features
+      // (a Shift press on a body / joint stays the rigid drag below).
+      if (e.shiftKey && featureBoxStartAt(world)) {
+        featureBox = { start: world, end: world, additive: false, moved: false };
+        return;
+      }
+      featureSel = null; // any other press rebuilds the selection from what's under the cursor
+      if (onFillet && fh && selection?.kind === "body") {
         // A pattern member's handle edits the seed (members are derived from it).
         const hole = fh.hole === null ? null : scene.patternSeedHole(selection.id, fh.hole);
         leftDrag = { kind: "fillet", bodyId: selection.id, index: fh.index, hole, moved: false };
@@ -5206,6 +5527,12 @@ canvas.addEventListener("mousemove", (e) => {
     return;
   }
 
+  if (featureBox) {
+    featureBox.end = world;
+    if (dist(featureBox.start, world) * view.scale > 4) featureBox.moved = true;
+    return;
+  }
+
   if (boxSelect) {
     boxSelect.end = world;
     // Only count it as a box once the pointer has clearly moved (else it's a plain click).
@@ -5309,7 +5636,8 @@ canvas.addEventListener("mousemove", (e) => {
       // re-read live in dragAnchorWorld, so the delta always closes the real gap).
       for (const id of leftDrag.bodies) scene.moveBody(id, delta);
       for (const id of leftDrag.joints) scene.moveJoint(id, delta);
-    } else scene.moveJoint(leftDrag.id, delta);
+    } else if (leftDrag.kind === "features") moveFeatures(leftDrag, delta);
+    else scene.moveJoint(leftDrag.id, delta);
     leftDrag.moved = true;
     solveSketchLive(); // sketch dragging: constraints hold while the geometry follows
     if ("align" in leftDrag && leftDrag.align) {
@@ -5363,6 +5691,17 @@ window.addEventListener("mouseup", (e) => {
   if (e.button === 0 && holePress) finishHolePress();
   if (e.button === 2 && pan) {
     pan = null;
+    canvas.style.cursor = defaultCursor();
+  }
+  if (e.button === 0 && featureBox) {
+    // A dragged box selects the body's features inside it; a plain Shift+click on empty
+    // space deselects, as it always did (Ctrl+Shift+click on empty space is a no-op).
+    if (featureBox.moved) applyFeatureBox(featureBox.additive);
+    else if (!featureBox.additive) {
+      selection = null;
+      featureSel = null;
+    }
+    featureBox = null;
     canvas.style.cursor = defaultCursor();
   }
   if (e.button === 0 && boxSelect) {
@@ -5425,6 +5764,7 @@ canvas.addEventListener("mouseleave", () => {
 });
 
 canvas.addEventListener("dblclick", (e) => {
+  featureSel = null; // a node / edge edit shifts vertex indices — the feature selection can't follow
   // Freehand polygons still close on double-click; joint-built bodies finish by
   // clicking a previously-added node (handled in handleBodyClick).
   if (mode === "draw" && tool === "body" && jointDraftIds.length === 0) {
@@ -6203,6 +6543,7 @@ function frame(now?: number): void {
   const prevOutside = containmentErrors.size;
   containmentErrors = mode === "draw" ? new Set(scene.jointsOutsideBody()) : new Set();
   if (containmentErrors.size !== prevOutside) updateHint();
+  pruneFeatureSel(); // the feature selection follows the single body selection + live geometry
   render(ctx, {
     scene,
     view,
@@ -6229,7 +6570,12 @@ function frame(now?: number): void {
       mode === "draw" && multiSel
         ? { bodies: [...multiSel.bodies], joints: [...multiSel.joints] }
         : null,
-    marquee: boxSelect?.moved ? { a: boxSelect.start, b: boxSelect.end } : null,
+    marquee: boxSelect?.moved
+      ? { a: boxSelect.start, b: boxSelect.end }
+      : featureBox?.moved
+        ? { a: featureBox.start, b: featureBox.end }
+        : null,
+    featureSelected: featureSelectedView(),
     editVertices: editVerticesView(),
     filletHandles: filletHandlesView(),
     railDraft: railDraftView(),

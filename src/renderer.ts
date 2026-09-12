@@ -51,6 +51,10 @@ export interface RenderInput {
   multiSelected: { bodies: number[]; joints: number[] } | null;
   /** In-progress box selection: the rectangle's two world corners, or null. */
   marquee: { a: Vec2; b: Vec2 } | null;
+  /** Draw-mode feature selection within the selected body (Shift+drag box): the selected
+   *  control-vertex handles' positions (drawn filled in the selection accent) and the
+   *  selected joints' ids (ringed like a selected joint). */
+  featureSelected: { vertices: Vec2[]; joints: number[] } | null;
   /** Resolved measurements of the current mode (values update live in sim). */
   measurements: MeasureInfo[];
   /**
@@ -299,6 +303,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     input.selection?.kind === "body" ? input.selection.id : null;
   const multiBodies = new Set(input.multiSelected?.bodies ?? []);
   const multiJoints = new Set(input.multiSelected?.joints ?? []);
+  const featureJoints = new Set(input.featureSelected?.joints ?? []);
   const highlightBodies = new Set<number>();
   for (const occ of input.highlightOccurrences ?? []) for (const id of occ.bodyIds) highlightBodies.add(id);
   const drawBodyShape = (body: Body): void => {
@@ -663,7 +668,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     const p = scene.jointWorld(j);
     const isHover = input.hoverJoint === j.id;
     const isSelected =
-      input.activeJoints.includes(j.id) || j.id === selectedJointId || multiJoints.has(j.id);
+      input.activeJoints.includes(j.id) || j.id === selectedJointId || multiJoints.has(j.id) || featureJoints.has(j.id);
     const isDriver = input.driverJoint === j.id;
     const isBroken = brokenJoints.has(j.id);
     // Stranded outside its body's outline (draw mode) — same error red as a break,
@@ -774,6 +779,21 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.strokeStyle = theme.surface;
     ctx.fillStyle = theme.ink;
     for (const v of input.editVertices) {
+      ctx.beginPath();
+      ctx.rect(v.x - h, v.y - h, 2 * h, 2 * h);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  // Feature selection: the selected vertex handles redrawn filled in the selection
+  // accent (over the plain ink squares), slightly larger so they read as "selected".
+  if (input.featureSelected && input.featureSelected.vertices.length) {
+    const h = px(6);
+    ctx.lineWidth = px(2);
+    ctx.strokeStyle = theme.ink;
+    ctx.fillStyle = FEATURE_SEL_COLOR;
+    for (const v of input.featureSelected.vertices) {
       ctx.beginPath();
       ctx.rect(v.x - h, v.y - h, 2 * h, 2 * h);
       ctx.fill();
@@ -1049,6 +1069,8 @@ const GUIDE_COLOR = "#9aa0ac";
 const SKETCH_COLOR = "#b48cff";
 /** Object-snap highlights (dragged reference + snapped target): warm orange. */
 const OSNAP_COLOR = "#ff9f43";
+/** Fill of a feature-selected vertex handle (draw mode) — the pin blue, as a "selected" accent. */
+const FEATURE_SEL_COLOR = "#4f9dff";
 /** Rejected sketch edits flash the conflicting items in the error red. */
 const FLASH_COLOR = "#ff4d4d";
 

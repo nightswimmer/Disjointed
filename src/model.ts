@@ -731,6 +731,35 @@ export interface SelectionClip {
   }[];
 }
 
+
+/**
+ * A body's *features* on the clipboard (v20): holes and attached joints copied out of one
+ * body in world coordinates, plus everything fully internal to them — grounds, rails
+ * between copied joints (with copied riders), motors whose pivot + crank both travel,
+ * sketch constraints / driving dimensions whose references all lie on the copied
+ * features, and live patterns whose seed is copied (its members come along). Pasted into
+ * a (possibly different) body with `insertFeatures`. Session-only, never persisted.
+ * `tmp` ids are the source hole indices / joint ids; refs carry the source body's id
+ * and hole indices, remapped on paste.
+ */
+export interface FeatureClip {
+  /** Paste reference: the centre of the copied features' bounding box. */
+  center: Vec2;
+  holes: { tmp: number; control: Vec2[]; radius: number; radii?: (number | null)[]; round?: RoundMode }[];
+  joints: { tmp: number; world: Vec2 }[];
+  grounds: { joint: number; anchor: Vec2 }[];
+  sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[] }[];
+  motors: { pivot: number; crank: number; speed: number }[];
+  sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null }[];
+  dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
+  /** Layout vectors in **world** orientation (re-oriented into the target body on paste). */
+  patterns: {
+    tmp: number;
+    seed: { kind: "hole"; hole: number } | { kind: "joint"; joint: number };
+    layout: PatternLayout;
+    members: number[];
+  }[];
+}
 const FORMAT_VERSION = 19;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
@@ -3852,6 +3881,306 @@ export class Scene {
   /** Single-body convenience wrapper around `insertSelection`: returns the new body's id. */
   insertBody(clip: SelectionClip, at: Vec2): number | null {
     return this.insertSelection(clip, at)?.bodyIds[0] ?? null;
+  }
+
+  // --- feature clips (holes + joints of one body, copied between bodies) -------------
+
+  /**
+   * Snapshot features of `bodyId` — the holes `holes` (indices) and the attached joints
+   * `jointIds` — into a `FeatureClip` (see there for what travels). A copied pattern
+   * seed brings its whole array: the members join the copied set and the pattern is
+   * carried; a member copied without its seed is plain material. Null when nothing
+   * copyable was named.
+   */
+  extractFeatures(bodyId: number, holes: number[], jointIds: number[]): FeatureClip | null {
+    const body = this.getBody(bodyId);
+    if (!body) return null;
+    const holeSet = new Set(holes.filter((h) => h >= 0 && h < (body.holes?.length ?? 0)));
+    const owned = new Set(jointIds.filter((id) => this.getJoint(id)?.bodyId === bodyId));
+    const carried: Pattern[] = [];
+    for (const p of this.patterns) {
+      if (p.bodyId !== bodyId) continue;
+      const seedIn = p.seed.kind === "hole" ? holeSet.has(p.seed.hole) : owned.has(p.seed.jointId);
+      if (!seedIn) continue;
+      carried.push(p);
+      for (const m of p.members) (p.seed.kind === "hole" ? holeSet : owned).add(m);
+    }
+    if (holeSet.size + owned.size === 0) return null;
+    const clipHoles: FeatureClip["holes"] = [...holeSet]
+      .sort((a, b) => a - b)
+      .map((hi) => {
+        const h = body.holes![hi];
+        return {
+          tmp: hi,
+          control: this.bodyHoleControlWorld(body, hi).map(clone),
+          radius: h.radius,
+          radii: h.radii ? [...h.radii] : undefined,
+          round: h.round,
+        };
+      });
+    const clipJoints: FeatureClip["joints"] = [...owned].map((id) => ({
+      tmp: id,
+      world: clone(this.jointWorld(this.getJoint(id)!)),
+    }));
+    const bb = boundsOf([...clipHoles.flatMap((h) => h.control), ...clipJoints.map((j) => j.world)]);
+    const center = scale(add(bb.min, bb.max), 0.5);
+    const grounds: FeatureClip["grounds"] = [];
+    const sliders: FeatureClip["sliders"] = [];
+    const motors: FeatureClip["motors"] = [];
+    for (const c of this.constraints) {
+      if (c.kind === "ground" && owned.has(c.joint)) {
+        grounds.push({ joint: c.joint, anchor: clone(c.anchor) });
+      } else if (c.kind === "slider" && owned.has(c.railA) && owned.has(c.railB)) {
+        sliders.push({
+          tmp: c.id,
+          railA: c.railA,
+          railB: c.railB,
+          riders: c.riders.filter((r) => owned.has(r)),
+          locked: c.locked.filter((r) => owned.has(r)),
+        });
+      } else if (c.kind === "motor" && c.bodyId === bodyId && owned.has(c.pivotJointId) && owned.has(c.crankJointId)) {
+        motors.push({ pivot: c.pivotJointId, crank: c.crankJointId, speed: c.speed });
+      }
+    }
+    // A ref is internal when its element travels: a copied joint, a copied hole's
+    // vertex / edge, the rail of a copied slider, or a carried pattern's axis. The outer
+    // outline stays with the source body, so its corners / edges never travel.
+    const clippedSliders = new Set(sliders.map((s) => s.tmp));
+    const carriedIds = new Set(carried.map((p) => p.id));
+    const internal = (r: MeasureRef | null): boolean => {
+      if (!r) return true;
+      switch (r.kind) {
+        case "joint":
+          return owned.has(r.jointId);
+        case "vertex":
+        case "edge":
+          return r.bodyId === bodyId && r.hole !== undefined && holeSet.has(r.hole);
+        case "rail":
+          return clippedSliders.has(r.sliderId);
+        case "patternAxis":
+          return carriedIds.has(r.patternId);
+        case "bodyPoint":
+        case "guidePoint":
+        case "guideLine":
+          return false;
+      }
+    };
+    const sketch: FeatureClip["sketch"] = [];
+    for (const c of this.sketch) {
+      if (internal(c.refA) && internal(c.refB)) {
+        sketch.push({ kind: c.kind, refA: cloneMeasureRef(c.refA), refB: c.refB ? cloneMeasureRef(c.refB) : null });
+      }
+    }
+    const dims: FeatureClip["dims"] = [];
+    for (const m of this.measurements) {
+      if (m.mode !== "draw" || m.driving !== true || m.target === undefined) continue; // driving dims only (constraints)
+      if (internal(m.refA) && internal(m.refB)) {
+        dims.push({
+          refA: cloneMeasureRef(m.refA),
+          refB: cloneMeasureRef(m.refB),
+          labelOffset: clone(m.labelOffset),
+          axis: m.axis,
+          target: m.target,
+        });
+      }
+    }
+    return {
+      center,
+      holes: clipHoles,
+      joints: clipJoints,
+      grounds,
+      sliders,
+      motors,
+      sketch,
+      dims,
+      patterns: carried.map((p) => ({
+        tmp: p.id,
+        seed: p.seed.kind === "hole" ? { kind: "hole" as const, hole: p.seed.hole } : { kind: "joint" as const, joint: p.seed.jointId },
+        layout: rotateLayout(cloneLayout(p.layout), body.angle),
+        members: [...p.members],
+      })),
+    };
+  }
+
+  /**
+   * Paste a feature clip into `bodyId`, the clip's centre landing at `at`. A hole or
+   * joint that would fall outside the body's outline is skipped (counted in `skipped`);
+   * everything internal to the pasted features is recreated on them — a carried pattern
+   * only when its seed and every member fit (else they paste as plain material). No
+   * solve is needed: the paste is a pure translation of what the clip's constraints held.
+   * Returns the new holes' indices and joints' ids, or null when the body is missing.
+   */
+  insertFeatures(
+    bodyId: number,
+    clip: FeatureClip,
+    at: Vec2
+  ): { holes: number[]; joints: number[]; skipped: number } | null {
+    const body = this.getBody(bodyId);
+    if (!body) return null;
+    const offset = sub(at, clip.center);
+    const outer = this.bodyWorldVerts(body); // world geometry — unchanged by the inserts below
+    let skipped = 0;
+    const holeMap = new Map<number, number>(); // clip hole tmp (source index) → new hole index
+    for (const h of clip.holes) {
+      const control = h.control.map((p) => add(p, offset));
+      const loop = deriveHoleOutline(control, { controlLocal: control, radius: h.radius, radii: h.radii, round: h.round });
+      const idx = loop.every((p) => pointInPolygon(p, outer))
+        ? this.addBodyHole(bodyId, { control, radius: h.radius, radii: h.radii, round: h.round })
+        : null;
+      if (idx === null) skipped++;
+      else holeMap.set(h.tmp, idx);
+    }
+    const idMap = new Map<number, number>(); // joint tmp id → new joint id
+    for (const j of clip.joints) {
+      const w = add(j.world, offset);
+      if (!pointInPolygon(w, outer)) {
+        skipped++;
+        continue;
+      }
+      idMap.set(j.tmp, this.addJoint(bodyId, w).id);
+    }
+    for (const g of clip.grounds) {
+      const id = idMap.get(g.joint);
+      if (id !== undefined) this.addGround(id, add(g.anchor, offset));
+    }
+    const sliderMap = new Map<number, number>();
+    for (const s of clip.sliders) {
+      const a = idMap.get(s.railA);
+      const b = idMap.get(s.railB);
+      if (a === undefined || b === undefined) continue;
+      const sl = this.addSlider(a, b);
+      sliderMap.set(s.tmp, sl.id);
+      for (const r of s.riders) {
+        const nr = idMap.get(r);
+        if (nr !== undefined) this.attachSliderRider(sl.id, nr, s.locked.includes(r));
+      }
+    }
+    for (const m of clip.motors) {
+      const pivot = idMap.get(m.pivot);
+      const crank = idMap.get(m.crank);
+      if (pivot === undefined || crank === undefined) continue;
+      const mc = this.addMotor(bodyId, pivot, crank);
+      if (mc) mc.speed = m.speed;
+    }
+    const patternMap = new Map<number, number>();
+    for (const pc of clip.patterns) {
+      let seed: Pattern["seed"];
+      if (pc.seed.kind === "hole") {
+        const hi = holeMap.get(pc.seed.hole);
+        if (hi === undefined) continue;
+        seed = { kind: "hole", hole: hi };
+      } else {
+        const jid = idMap.get(pc.seed.joint);
+        if (jid === undefined) continue;
+        seed = { kind: "joint", jointId: jid };
+      }
+      const members = pc.members
+        .map((t) => (pc.seed.kind === "hole" ? holeMap : idMap).get(t))
+        .filter((x): x is number => x !== undefined);
+      if (members.length !== pc.members.length) continue; // a member didn't fit: the array stays plain
+      const p: Pattern = {
+        id: this.id(),
+        bodyId,
+        seed,
+        layout: rotateLayout(cloneLayout(pc.layout), -body.angle), // world → the target body's frame
+        members,
+      };
+      this.patterns.push(p);
+      patternMap.set(pc.tmp, p.id);
+      this.syncPattern(p);
+    }
+    const remapRef = (r: MeasureRef): MeasureRef | null => {
+      switch (r.kind) {
+        case "joint": {
+          const id = idMap.get(r.jointId);
+          return id === undefined ? null : { kind: "joint", jointId: id };
+        }
+        case "vertex":
+        case "edge": {
+          const hi = r.hole === undefined ? undefined : holeMap.get(r.hole);
+          return hi === undefined ? null : { kind: r.kind, bodyId, index: r.index, hole: hi };
+        }
+        case "rail": {
+          const id = sliderMap.get(r.sliderId);
+          return id === undefined ? null : { kind: "rail", sliderId: id };
+        }
+        case "patternAxis": {
+          const id = patternMap.get(r.patternId);
+          return id === undefined ? null : { kind: "patternAxis", patternId: id, axis: r.axis };
+        }
+        case "bodyPoint":
+        case "guidePoint":
+        case "guideLine":
+          return null;
+      }
+    };
+    for (const c of clip.sketch) {
+      const ra = remapRef(c.refA);
+      const rb = c.refB ? remapRef(c.refB) : null;
+      if (!ra || (c.refB && !rb)) continue;
+      this.addSketchConstraint(c.kind, ra, rb ?? undefined);
+    }
+    for (const d of clip.dims) {
+      const ra = remapRef(d.refA);
+      const rb = remapRef(d.refB);
+      if (!ra || !rb || !this.resolveMeasureRef(ra) || !this.resolveMeasureRef(rb)) continue;
+      const m: Measurement = {
+        id: this.id(),
+        mode: "draw",
+        refA: ra,
+        refB: rb,
+        labelOffset: clone(d.labelOffset),
+        axis: d.axis,
+        driving: true,
+        target: d.target,
+      };
+      this.measurements.push(m);
+      this.captureMeasurementSide(m); // a translated copy shows the side the source held
+    }
+    return { holes: [...holeMap.values()], joints: [...idMap.values()], skipped };
+  }
+
+  /**
+   * Delete several features of one body at once: the attached joints `jointIds` (the
+   * usual pattern rules apply — a member takes its whole array, a seed dissolves its
+   * pattern) and the control vertices `verts` (`hole` null = the outer outline). A hole
+   * left with fewer vertices than it needs goes whole (a member hole takes its array;
+   * a seed hole dissolves its pattern). The outer outline is left untouched when the
+   * removal would drop it below 3 corners — reported as `outerRefused`.
+   */
+  removeBodyFeatures(
+    bodyId: number,
+    verts: { hole: number | null; index: number }[],
+    jointIds: number[]
+  ): { outerRefused: boolean } {
+    let outerRefused = false;
+    for (const id of jointIds) if (this.getJoint(id)?.bodyId === bodyId) this.removeJoint(id);
+    const body = this.getBody(bodyId);
+    if (!body) return { outerRefused };
+    const groups = new Map<number | null, Set<number>>();
+    for (const v of verts) {
+      let g = groups.get(v.hole);
+      if (!g) groups.set(v.hole, (g = new Set()));
+      g.add(v.index);
+    }
+    const desc = (s: Set<number>, n: number): number[] => [...s].filter((i) => i >= 0 && i < n).sort((a, b) => b - a);
+    const outer = groups.get(null);
+    if (outer) {
+      const idx = desc(outer, body.controlLocal.length);
+      if (body.controlLocal.length - idx.length < 3) outerRefused = true;
+      else for (const i of idx) this.removeBodyVertex(bodyId, i, null);
+    }
+    // Holes from the highest index down: removing one whole shifts only the later ones.
+    const holeIdx = [...groups.keys()].filter((h): h is number => h !== null).sort((a, b) => b - a);
+    for (const hi of holeIdx) {
+      const h = body.holes?.[hi];
+      if (!h) continue;
+      const idx = desc(groups.get(hi)!, h.controlLocal.length);
+      const min = h.round === "offset" ? 1 : 3;
+      if (h.controlLocal.length - idx.length < min) this.removeBodyHole(bodyId, hi);
+      else for (const i of idx) this.removeBodyVertex(bodyId, i, hi);
+    }
+    return { outerRefused };
   }
 
   // --- components (definitions + materialized instances) ---------------------

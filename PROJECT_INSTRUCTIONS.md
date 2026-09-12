@@ -54,6 +54,23 @@ line carrying the constraint's badge; a rejected placement notifies instead of f
 silently. **Pattern members ride with their seed in the sketch solver** (rigid-offset
 couplings instead of an immovable rank), so a dimension / constraint on a member moves the
 patterned body as a whole rather than pinning it.
+**Feature selection** (draw mode, no format change): with one plain body selected,
+**Shift+drag a box from empty space** to select several of its *features* — control vertices
+of the outer outline and of its holes, plus attached joints (**Ctrl+Shift+drag adds**; a
+pattern member counts as its seed's matching feature, and the seed's highlight is mirrored on
+the members). Selected handles draw filled blue, selected joints get the selection ring.
+Pressing any selected feature **drags the whole set** by one delta (the grabbed feature is the
+grid / object-snap anchor and the implicit-constraint reference; every selected vertex and
+joint is anchored in the live sketch solve, stuck joints ride their corner once);
+**Delete** removes the set (a hole left with too few corners goes whole, the outer outline
+keeps ≥ 3 corners — refused with a toast otherwise); **Ctrl+C** copies the *whole* holes
+(every control vertex selected) + joints as a **`FeatureClip`** with everything internal to
+them (grounds, rails between copied joints, motors, sketch constraints, driving dimensions,
+live patterns whose seed is copied — members come along), and **Ctrl+V** pastes them **into
+the selected body** (a different one too) at the cursor; features that would land outside
+the target outline are skipped with a notice, and the pasted holes + joints become the new
+feature selection. Outline corners never copy (they belong to the source shape). Shift+drag
+on a body / joint is still the rigid drag; a plain Shift+click on empty space still deselects.
 **View navigation**: zoom range 0.05×–200×; a **fit-to-screen** button + `F` shortcut frames the
 whole mechanism (bodies, joints, ground anchors) centered with a margin; **Tab** toggles
 draw ↔ simulate mode.
@@ -1002,6 +1019,24 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
     `{ bodyIds, freeJointIds }` for re-selection. No re-solve is needed on paste: everything
     carried is translation-invariant. `extractBody(id)` / `insertBody(clip, at)` remain as
     single-body convenience wrappers.
+    **Feature clips** (holes + joints of *one* body, pasted into another):
+    `extractFeatures(bodyId, holes, jointIds)` snapshots a **`FeatureClip`** — the named
+    holes (world control polygon + rounding, `tmp` = source index) and attached joints, a
+    copied pattern seed pulling its members in and the pattern itself (layout in **world**
+    orientation), and everything fully internal: grounds, rails between copied joints (with
+    copied riders / locks), motors whose pivot + crank both travel, sketch constraints and
+    driving dims whose refs all lie on copied joints / hole vertices / edges / clipped rails /
+    carried pattern axes (outer-outline refs never travel); `center` = bbox centre.
+    `insertFeatures(bodyId, clip, at)` adds the holes (`addBodyHole`) and joints
+    (`addJoint`) translated so `center` lands at `at`, **skipping any whose outline / point
+    falls outside the target body** (`skipped` count), then recreates grounds → rails →
+    motors → patterns (layout re-oriented by `-body.angle`; only when the seed and every
+    member fit, else they stay plain) → constraints / dims via a ref remap; returns
+    `{ holes, joints, skipped }`. `removeBodyFeatures(bodyId, verts, jointIds)` deletes a
+    feature set at once: joints via `removeJoint` (pattern rules apply), then outer vertices
+    (refused whole — `outerRefused` — if fewer than 3 would remain), then holes from the
+    highest index down (a hole left below its minimum goes whole via `removeBodyHole`).
+    Tests: `scripts/features.ts`.
   - Helpers: hit-testing (`bodyAt`, `bodiesAt`, `jointAt`, `sliderAt`), `bodyControlWorld`
     (corner handles), `addFreeJoint`, `attachSliderRider`, `removeBody`/`removeJoint`/
     `removeConstraint` + `pruneConstraint`, pose snapshot/restore, role queries.
@@ -1608,6 +1643,32 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
     (reshape), and Shift+hover shows the sim `grab` cursor. `timedSolve` gained the
     optional `freeze` pass-through parameter. Breaks stay invisible in draw mode (the
     render input already gates them to sim).
+  - **Feature selection** (`featureSel: { bodyId, verts: { hole, index }[], joints } | null`,
+    draw mode, lives only while its body is the single `selection` — `pruneFeatureSel()` runs
+    every frame and also drops members that no longer exist): built by a **feature box**
+    (`featureBox` → `applyFeatureBox(additive)`), started by Shift+mousedown where
+    `featureBoxStartAt` says so (a plain non-instance body selected, press on empty space —
+    not a handle / joint / body, which keep reshape / rigid-drag) or Ctrl+Shift+mousedown
+    (additive; checked first in the Ctrl branch). `normalizeFeatureSel` maps pattern members
+    to their seed and dedupes. `featureHitAt(p)` (a selected handle — a member's stands for
+    its seed's — or a selected joint) wins over every other plain press except a nearer
+    fillet handle → `startFeatureDrag` (`LeftDrag` kind `"features"`: the hit ref is the
+    `anchor`, object-snap ref and `align` ref); `moveFeatures` moves every vertex via
+    `moveBodyVertex` then every joint not already carried by a moving corner;
+    `dragAnchorVars` anchors every selected vertex + joint; `dragSnapExclusions` now
+    excludes a **set** of vertices (`vertex: { bodyId, keys }`, `vertKey(hole, index)`) so
+    `objSnapTargets` drops the moving corners, their edges / midpoints and the centroid for
+    vertex and feature drags alike. Any other press clears `featureSel`; so do
+    `resetTransient` and the dblclick handler (node edits shift indices). Delete →
+    `deleteFeatures` (`scene.removeBodyFeatures`, toast when the outline floor refuses);
+    Ctrl+C → `copyFeatures` (holes with **every** vertex selected + joints →
+    `extractFeatures`; corners-only → info toast) into `clipboard`, now a tagged union
+    (`{ kind: "selection", … } | { kind: "features", clip: FeatureClip }`); Ctrl+V with a
+    features clipboard → `pasteFeatures` (needs a plain body selected; `insertFeatures` at
+    the cursor, skipped-count toast, result becomes the feature selection). Renderer input
+    `featureSelected: { vertices, joints }` (`featureSelectedView`, seed handles mirrored on
+    members): vertices redrawn as larger `FEATURE_SEL_COLOR` (pin blue) squares, joints
+    ringed like a selected joint; the feature box reuses the `marquee` input.
   - **Ground tool on bodies**: a Ground-tool click with no joint under the cursor toggles
     `scene.toggleBodyGround` on the body there — grounding/ungrounding it, or its whole
     permanent group. Joint grounding is unchanged and takes pick priority.
@@ -1901,6 +1962,16 @@ Select mode (default, no tool armed):
   Dragging any selected element **moves the whole selection together**; Delete removes it
   all; a plain click elsewhere (or Esc) clears it. A single ungrouped body collapses back
   to a normal selection.
+- **Feature selection** (parts of one body): with a single plain body selected,
+  **Shift+drag a box from empty space** to select the control vertices (outline + holes)
+  and attached joints inside it — **Ctrl+Shift+drag adds**; pattern members count as their
+  seed. Selected handles fill blue, selected joints get the ring. Drag any selected feature
+  to **move the set** (snaps / object-snaps / implicit constraints by the grabbed feature;
+  sketch constraints hold on the rest), **Delete** removes it (a hole left too small goes
+  whole; the outline keeps ≥ 3 corners), **Ctrl+C** copies its whole holes + joints with
+  their internal constraints / dims / patterns, **Ctrl+V** pastes them into the selected
+  body at the cursor (misfits skipped with a notice). Any other press, Esc, or selecting
+  something else clears it. Shift+drag on a body / joint stays the rigid drag.
 - **Permanent groups**: **Ctrl/Cmd+G** toggles grouping — with 2+ members multi-selected
   (bodies **and free joints**: joints become locked members that ride the group rigidly) it
   groups them permanently (grouping into an existing group merges); when the selection
@@ -1943,7 +2014,9 @@ Select mode (default, no tool armed):
   selection with its joints + every constraint internal to it — grounds, internal sliders,
   pins (including pins **between** the selected bodies), group membership, fully-internal
   sketch constraints and driving dimensions — **keeping colours**; the copy lands at the
-  cursor (grid-snapped) and is selected. **Mirror H/V** (toolbar, grouped with **Rotate**)
+  cursor (grid-snapped) and is selected. With a **feature selection** active, Ctrl+C copies
+  its whole holes + joints instead (a `FeatureClip`) and Ctrl+V pastes them into whichever
+  body is selected — see *Feature selection* above. **Mirror H/V** (toolbar, grouped with **Rotate**)
   reflects a single body in place about its centroid, or a multi-selection / group about
   the centre of its combined bounding box (constraint refs are remapped, so mirrored
   geometry keeps its constraints on the right corners/edges). **Send to back / Bring to
@@ -2429,6 +2502,18 @@ Persistence:
   reference (resolves to the dotted line, H accepted and held through a seed drag, parallel
   needs two lines, perpendicular axis ↔ edge, rigid unit = body, load keeps axis constraints,
   paste remaps them to the new pattern, dissolve prunes them).
+- **features.ts** — feature clips (38 checks). `extractFeatures`: a copied seed brings its
+  members and the pattern, ground / rail / horizontal constraint / driving dim travel, a
+  joints-only clip keeps the ground but drops the rail (other end missing) and the
+  constraints, nothing named → null. `insertFeatures` into another body: 4 holes + 2 joints
+  translated by the drop offset and attached to the target, ground at the pasted joint, rail
+  between the pasted joints, sketch constraint / driving dim (target kept) / pattern
+  (source spacing kept) recreated, source untouched, counts grow by exactly the pasted
+  amount; into a **rotated** target the pattern step stays world-oriented; a drop near a
+  small body's corner skips the misfits and a pattern missing a member pastes as plain
+  holes. `removeBodyFeatures`: joint + outer vertex + one hole vertex in one call, the
+  3-corner floor refuses the outline edit, holes left too small go whole, and deleting
+  vertices across three holes (one whole) handles the index shift.
 - **split-combine.ts** — Split + Combine (69 checks). Union primitive: overlapping squares
   → one 8-gon of the right area, shared edge → 4-vertex rectangle, corner touch → pinched,
   disjoint → two regions, two C shapes → a new hole, partially covered hole shrinks, input

@@ -146,13 +146,35 @@ group, it dissolves it. A group behaves as **one object**: clicking any member s
 group (shown with a dashed outline while selected), it drags, rotates, mirrors and copies as a
 unit — and in **Simulate mode it moves as a single rigid body**.
 
+**Select parts of a body.** With one body selected, **Shift+drag a box from empty space** to
+select several of its *features* at once: corners of the outline, holes (their corner handles —
+a round hole's centre), and the joints sitting on it (**Ctrl+Shift+drag adds** to the set; a
+pattern's members count as their seed, so the whole array is included). Selected corners fill
+blue and selected joints get the selection ring. Then:
+- **drag any selected corner or joint** to move them all together — the grabbed one snaps to
+  the grid / other objects and can place implicit constraints, exactly like a single corner
+  drag, and your sketch constraints keep holding on the rest of the body;
+- **Delete** removes them (a hole left with too few corners disappears whole; the outline
+  always keeps at least three corners);
+- **`Ctrl/Cmd+C`** copies the **whole holes** (every corner selected) **and joints** in the set
+  together with everything internal to them — grounds, a rail between two copied joints, a
+  motor whose pivot and crank are both copied, sketch constraints and driving dimensions
+  between them, and live patterns whose seed is copied — and **`Ctrl/Cmd+V`** pastes them
+  **into whichever body is selected**, at the cursor. That's how you carry a hole pattern or a
+  set of joints from one part to another (or duplicate them within the same part). Features
+  that would land outside the target's outline are skipped and you're told how many. Outline
+  corners never copy — they belong to the shape they're on.
+Shift+drag *on* a body or joint is still the rigid drag described above.
+
 **Editing utilities** (on the selection — a single body, or a multi-selection / group):
 - **Copy / Paste** (`Ctrl/Cmd+C` / `Ctrl/Cmd+V`, keyboard only) — duplicate the selection with
   its joints and every constraint internal to it: grounds, internal sliders, **pins between the
   selected bodies**, **group membership**, and its **sketch constraints and driving dimensions**.
   The copy **keeps the original colours**, lands at the cursor (grid-snapped when Snap is on) and
   becomes the selection — pasting a group gives you a new, working group. Anything reaching
-  outside the selection (e.g. a pin to an uncopied body) isn't reproduced.
+  outside the selection (e.g. a pin to an uncopied body) isn't reproduced. With a **feature
+  selection** active (see *Select parts of a body*), the same keys copy its holes + joints and
+  paste them into the selected body instead.
 - **Mirror H / V** — reflect a selected body left↔right or top↔bottom in place about its centroid;
   a multi-selection / group reflects about the centre of its combined bounding box. Constraints
   and dimensions follow their corners/edges through the flip. **Component instances mirror
