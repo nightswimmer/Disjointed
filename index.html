@@ -207,6 +207,9 @@
           <button id="fit-btn" class="icon-btn" title="Fit the mechanism to the screen (F)" aria-label="Fit to screen">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7"/><path d="M13 3h2.5A1.5 1.5 0 0 1 17 4.5V7"/><path d="M17 13v2.5a1.5 1.5 0 0 1-1.5 1.5H13"/><path d="M7 17H4.5A1.5 1.5 0 0 1 3 15.5V13"/><rect x="7" y="8" width="6" height="4" rx="1" fill="currentColor" fill-opacity="0.18"/></svg>
           </button>
+          <button id="rotate-view-btn" class="icon-btn" title="Rotate the view — drag the ring or a crosshair arm to turn the whole picture (snaps to 5°, Shift for any angle); type an exact angle under the centre; double-click the centre for 0° (Shift+R)" aria-label="Rotate the view">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><g transform="rotate(-30 10 10)"><line x1="10" y1="2" x2="10" y2="18"/><line x1="2" y1="10" x2="18" y2="10"/></g></svg>
+          </button>
         </div>
         <div class="group">
           <button id="save-btn" class="icon-btn" title="Save mechanism to a file (Ctrl+S) — Shift-click or Ctrl+Shift+S to save as a new file" aria-label="Save">
@@ -320,6 +323,10 @@
              Enter commits (drives the dimension); empty commits back to driven; Esc cancels. -->
         <input id="dim-edit" class="hidden" type="text" inputmode="decimal" autocomplete="off"
           aria-label="Dimension value" />
+        <!-- View-rotation dial readout / editor (Shift+R): shows the view angle in degrees,
+             Enter sets an exact value; hidden while the dial is closed. -->
+        <input id="view-angle-edit" class="hidden" type="text" inputmode="decimal" autocomplete="off"
+          aria-label="View rotation angle (degrees)" />
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

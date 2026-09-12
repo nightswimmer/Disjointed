@@ -11,7 +11,7 @@ import {
   SketchConstraintKind,
 } from "./model";
 import { Vec2, add, sub, vec, dist, distToSegment, normalize, scale, convexHull } from "./geometry";
-import { View } from "./view";
+import { View, viewMatrix, visibleWorldRect, worldToScreen, rotateToScreen } from "./view";
 import { ConstraintBreak } from "./solver";
 
 export interface RenderInput {
@@ -57,6 +57,12 @@ export interface RenderInput {
   multiSelected: { bodies: number[]; joints: number[] } | null;
   /** In-progress box selection: the rectangle's two world corners, or null. */
   marquee: { a: Vec2; b: Vec2 } | null;
+  /**
+   * View-rotation overlay (screen space, both modes): the dial's centre and radius in
+   * screen px, whether a drag is turning it, and whether the pointer is over its grabbable
+   * parts. The angle itself is `view.angle`; the numeric readout is a DOM input.
+   */
+  viewRotate: { centre: Vec2; radius: number; dragging: boolean; hot: boolean } | null;
   /** Draw-mode feature selection within the selected body (Shift+drag box): the selected
    *  control-vertex handles' positions (drawn filled in the selection accent) and the
    *  selected joints' ids (ringed like a selected joint). */
@@ -283,14 +289,12 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   // Clear in device space, then switch to the world transform for everything else.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  ctx.setTransform(dpr * s, 0, 0, dpr * s, dpr * view.tx, dpr * view.ty);
+  ctx.setTransform(...viewMatrix(view, dpr));
 
-  // Visible world rectangle (for the grid and infinite rails).
-  const left = -view.tx / s;
-  const top = -view.ty / s;
-  const right = (w - view.tx) / s;
-  const bottom = (h - view.ty) / s;
-  const viewRect = { left, top, right, bottom };
+  // Visible world rectangle (for the grid and infinite rails): the world-axis bounding
+  // box of the screen — a superset of what shows when the view is rotated.
+  const viewRect = visibleWorldRect(view, w, h);
+  const { left, top, right, bottom } = viewRect;
 
   if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
 
@@ -965,6 +969,100 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       if (focusJoints.has(j.id) || (j.bodyId !== null && highlightBodies.has(j.bodyId))) drawJoint(j);
     }
   }
+
+  // View-rotation dial: drawn last, in screen space, over everything.
+  if (input.viewRotate) drawViewRotateDial(ctx, input.viewRotate, view, dpr, theme);
+}
+
+const VIEW_ROTATE_COLOR = "#46c2cb";
+/**
+ * The view-rotation dial: a big ring ticked every 5° (longer every 45°), a full-size
+ * crosshair along the world x / y axes (so it reads as the picture's H / V) with X / Y
+ * labels at the arm ends, and a centre dot. The ring and the arms are the grab handles.
+ */
+function drawViewRotateDial(
+  ctx: CanvasRenderingContext2D,
+  d: { centre: Vec2; radius: number; dragging: boolean; hot: boolean },
+  view: View,
+  dpr: number,
+  theme: Theme
+): void {
+  const { centre: c, radius: r } = d;
+  const w = ctx.canvas.clientWidth;
+  const h = ctx.canvas.clientHeight;
+  const armLen = Math.hypot(w, h); // long enough to cross the whole canvas
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.lineCap = "round";
+  const strong = d.dragging || d.hot;
+
+  // Crosshair along the world axes.
+  const ex = rotateToScreen({ x: 1, y: 0 }, view.angle); // world +x on screen
+  const ey = rotateToScreen({ x: 0, y: 1 }, view.angle); // world +y on screen (down at 0°)
+  ctx.strokeStyle = VIEW_ROTATE_COLOR;
+  ctx.globalAlpha = strong ? 0.95 : 0.7;
+  ctx.lineWidth = strong ? 2 : 1.5;
+  ctx.beginPath();
+  ctx.moveTo(c.x - ex.x * armLen, c.y - ex.y * armLen);
+  ctx.lineTo(c.x + ex.x * armLen, c.y + ex.y * armLen);
+  ctx.moveTo(c.x - ey.x * armLen, c.y - ey.y * armLen);
+  ctx.lineTo(c.x + ey.x * armLen, c.y + ey.y * armLen);
+  ctx.stroke();
+
+  // Ring + ticks.
+  ctx.globalAlpha = strong ? 0.95 : 0.75;
+  ctx.lineWidth = strong ? 2.5 : 2;
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath();
+  for (let deg = 0; deg < 360; deg += 5) {
+    const a = (deg * Math.PI) / 180;
+    const len = deg % 90 === 0 ? 16 : deg % 45 === 0 ? 11 : 5;
+    const ux = Math.cos(a), uy = Math.sin(a);
+    ctx.moveTo(c.x + ux * r, c.y + uy * r);
+    ctx.lineTo(c.x + ux * (r - len), c.y + uy * (r - len));
+  }
+  ctx.stroke();
+
+  // Arm markers where the axes cross the ring: X and Y pills (upright), plus a small
+  // filled dot on the positive ends so the picture's orientation is unambiguous.
+  ctx.globalAlpha = 1;
+  ctx.font = "bold 12px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const label = (text: string, dir: Vec2, positive: boolean) => {
+    const px = c.x + dir.x * (r + 18);
+    const py = c.y + dir.y * (r + 18);
+    ctx.beginPath();
+    ctx.roundRect(px - 11, py - 9, 22, 18, 5);
+    ctx.fillStyle = theme.surface + "e6";
+    ctx.fill();
+    ctx.strokeStyle = VIEW_ROTATE_COLOR;
+    ctx.lineWidth = positive ? 1.6 : 1;
+    ctx.stroke();
+    ctx.fillStyle = VIEW_ROTATE_COLOR;
+    ctx.fillText(text, px, py + 0.5);
+  };
+  label("X", ex, true);
+  label("Y", ey, true);
+  label("-X", { x: -ex.x, y: -ex.y }, false);
+  label("-Y", { x: -ey.x, y: -ey.y }, false);
+  ctx.fillStyle = VIEW_ROTATE_COLOR;
+  for (const dir of [ex, ey]) {
+    ctx.beginPath();
+    ctx.arc(c.x + dir.x * r, c.y + dir.y * r, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Centre dot (the pivot).
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = VIEW_ROTATE_COLOR;
+  ctx.fill();
+  ctx.restore();
 }
 
 /** Focus pass veil: how far everything outside the highlighted instances fades
@@ -1128,8 +1226,7 @@ function drawLabelPill(
   color: string,
   bold: boolean
 ): void {
-  const sx = at.x * view.scale + view.tx;
-  const sy = at.y * view.scale + view.ty;
+  const { x: sx, y: sy } = worldToScreen(view, at);
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
@@ -1217,9 +1314,7 @@ function drawSketchBadge(
   alpha: number,
   bold: boolean
 ): void {
-  const s = view.scale;
-  const sx = at.x * s + view.tx;
-  const sy = at.y * s + view.ty;
+  const { x: sx, y: sy } = worldToScreen(view, at);
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.globalAlpha = alpha;
@@ -1393,8 +1488,7 @@ function drawMeasurement(
 
   // Value label: a pill + text drawn in screen space so it stays legible at any zoom.
   const text = measureText(info, paren, unit);
-  const sx = info.labelPos.x * s + view.tx;
-  const sy = info.labelPos.y * s + view.ty;
+  const { x: sx, y: sy } = worldToScreen(view, info.labelPos);
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.font = "12px ui-sans-serif, system-ui, sans-serif";

@@ -57,7 +57,7 @@ import {
 import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolated } from "./pose";
 import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
-import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt } from "./view";
+import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt, rotateViewTo, rotateToScreen, rotateToWorld } from "./view";
 
 type Mode = "draw" | "sim";
 type Tool =
@@ -178,7 +178,7 @@ interface TempDim {
 let tempDims: TempDim[][] = [];
 let tempDimSeq = -1;
 /** Camera saved per context depth, restored when exiting back to it. */
-const savedViews: { scale: number; tx: number; ty: number }[] = [];
+const savedViews: View[] = [];
 /** One-shot pending placement: the next canvas click drops an instance of this def. */
 let pendingInsert: number | null = null;
 
@@ -492,7 +492,18 @@ function snap(p: Vec2, excludeGuide?: number): Vec2 {
 }
 
 // --- camera ---------------------------------------------------------------
-const view: View = { scale: 1, tx: 0, ty: 0 };
+const view: View = { scale: 1, tx: 0, ty: 0, angle: 0 };
+/**
+ * View-rotation dial (Shift+R / toolbar, both modes): while open, a big ticked ring with
+ * a crosshair along the world axes sits over the canvas; dragging the ring or an arm
+ * turns the whole picture about the screen centre (snapping to 5° unless Shift is held),
+ * the input under the centre takes an exact angle, double-clicking the centre resets to
+ * 0°. `drag` holds the pointer's bearing and the view angle at the grab (the turn is the
+ * bearing's change, so nothing jumps on press). `hot`: the pointer is over a grab handle.
+ */
+let viewRotate: { drag: { startBearing: number; startAngle: number } | null; hot: boolean } | null = null;
+const viewAngleInput = document.getElementById("view-angle-edit") as HTMLInputElement;
+const rotateViewBtn = document.getElementById("rotate-view-btn") as HTMLButtonElement;
 /** Active right-button view pan. */
 let pan: { lastScreen: Vec2 } | null = null;
 /**
@@ -1604,6 +1615,7 @@ function resize(): void {
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.floor(canvas.clientWidth * dpr);
   canvas.height = Math.floor(canvas.clientHeight * dpr);
+  if (viewRotate) placeViewAngleInput(); // the dial sits at the canvas centre
 }
 window.addEventListener("resize", resize);
 
@@ -1615,7 +1627,10 @@ function fitView(): void {
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  const include = (p: Vec2) => {
+  // Bounds are taken in the screen-aligned frame (world turned by the view angle), so a
+  // rotated view fits the tilted picture rather than its world-axis box.
+  const include = (wp: Vec2) => {
+    const p = rotateToScreen(wp, view.angle);
     if (p.x < minX) minX = p.x;
     if (p.y < minY) minY = p.y;
     if (p.x > maxX) maxX = p.x;
@@ -1636,9 +1651,93 @@ function fitView(): void {
     Math.max(h - 2 * MARGIN, 40) / Math.max(maxY - minY, 1e-6)
   );
   view.scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, fit));
+  // The box centre is already in the screen-aligned frame: offset it directly.
   view.tx = w / 2 - ((minX + maxX) / 2) * view.scale;
   view.ty = h / 2 - ((minY + maxY) / 2) * view.scale;
 }
+
+// --- view rotation dial -----------------------------------------------------
+/** Snap step for the dial's drag (Shift bypasses it). */
+const VIEW_ROTATE_SNAP = (5 * Math.PI) / 180;
+/** Grab band around the ring and along the crosshair arms (screen px). */
+const VIEW_ROTATE_GRAB_PX = 14;
+
+function dialCentre(): Vec2 {
+  return vec(canvas.clientWidth / 2, canvas.clientHeight / 2);
+}
+function dialRadius(): number {
+  return Math.min(canvas.clientWidth, canvas.clientHeight) * 0.38;
+}
+/** The pointer (screen px) is on the dial's ring or on one of its crosshair arms. */
+function dialHit(s: Vec2): boolean {
+  const c = dialCentre();
+  const d = sub(s, c);
+  const onRing = Math.abs(Math.hypot(d.x, d.y) - dialRadius()) <= VIEW_ROTATE_GRAB_PX;
+  // Arms run along the world axes: the pointer's offset expressed in world axes has one
+  // component near zero when it sits on an arm.
+  const w = rotateToWorld(d, view.angle); // undo the view turn → world-axis components
+  const onArm = Math.abs(w.x) <= VIEW_ROTATE_GRAB_PX || Math.abs(w.y) <= VIEW_ROTATE_GRAB_PX;
+  return onRing || onArm;
+}
+/** The pointer's bearing about the dial centre, counter-clockwise on screen (radians). */
+function dialBearing(s: Vec2): number {
+  const c = dialCentre();
+  return -Math.atan2(s.y - c.y, s.x - c.x);
+}
+/** Turn the view to `angle` about the dial centre (the world point there stays put). */
+function setViewAngle(angle: number): void {
+  rotateViewTo(view, dialCentre(), wrapAngle(angle));
+  syncViewAngleInput();
+}
+/** Toggle the dial. Opening it leaves the armed tool / draft alone (the dial captures
+ *  the left button while it is up, so nothing underneath fires). */
+function setViewRotateOpen(open: boolean): void {
+  if (open === (viewRotate !== null)) return;
+  viewRotate = open ? { drag: null, hot: false } : null;
+  rotateViewBtn.classList.toggle("active", open);
+  viewAngleInput.classList.toggle("hidden", !open);
+  if (open) {
+    placeViewAngleInput();
+    syncViewAngleInput();
+  } else viewAngleInput.blur();
+  canvas.style.cursor = open ? "default" : defaultCursor();
+  updateHint();
+}
+/** The angle box sits just under the dial's centre dot. */
+function placeViewAngleInput(): void {
+  const c = dialCentre();
+  viewAngleInput.style.left = `${c.x}px`;
+  viewAngleInput.style.top = `${c.y + 30}px`;
+}
+/** The readout follows the view unless the user is typing in it. */
+function syncViewAngleInput(): void {
+  if (!viewRotate || document.activeElement === viewAngleInput) return;
+  const deg = (wrapAngle(view.angle) * 180) / Math.PI;
+  const rounded = Math.round(deg * 10) / 10;
+  viewAngleInput.value = `${Math.abs(rounded) < 0.05 ? 0 : rounded}°`;
+}
+function commitViewAngleInput(): void {
+  const raw = viewAngleInput.value.trim().replace(/[°º]/g, "").replace(",", ".");
+  const deg = Number(raw);
+  if (raw !== "" && Number.isFinite(deg)) setViewAngle((deg * Math.PI) / 180);
+  viewAngleInput.blur();
+  syncViewAngleInput();
+}
+viewAngleInput.addEventListener("keydown", (e) => {
+  e.stopPropagation(); // keep canvas shortcuts out of the field
+  if (e.key === "Enter") commitViewAngleInput();
+  else if (e.key === "Escape") {
+    viewAngleInput.blur();
+    syncViewAngleInput();
+  }
+});
+viewAngleInput.addEventListener("focus", () => {
+  viewAngleInput.value = viewAngleInput.value.replace(/[°º]/g, "");
+  viewAngleInput.select();
+});
+viewAngleInput.addEventListener("blur", () => {
+  if (viewRotate) commitViewAngleInput();
+});
 
 function eventScreen(e: MouseEvent): Vec2 {
   const rect = canvas.getBoundingClientRect();
@@ -1658,8 +1757,9 @@ function defaultCursor(): string {
 }
 
 // --- hint text -----------------------------------------------------------
-const HINTS: Record<Mode | Tool | "select", string> = {
+const HINTS: Record<Mode | Tool | "select" | "viewRotate", string> = {
   draw: "",
+  viewRotate: "Rotate the view: drag the ring or a crosshair arm to turn the whole picture (snaps to 5°, hold Shift for any angle) · type an exact angle in the box under the centre · double-click the centre for 0° · click elsewhere, Esc or Shift+R to close. The drawing itself does not change.",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
   select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · with a body selected, Shift+drag a box from empty space to select several of its corners / holes / joints (Ctrl+Shift adds) — drag any of them to move the set, Delete removes it, Ctrl+C copies its holes + joints (with their constraints) and Ctrl+V pastes them into the selected body at the cursor · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition (Ctrl+double-click shows the surrounding assembly faded in its frame — a context ghost to snap and dimension to; the breadcrumb eyes set how far out it reaches) · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
@@ -1705,7 +1805,8 @@ function containmentWarning(): string {
 
 function updateHint(): void {
   const base =
-    tool === "measure" ? HINTS.measure
+    viewRotate ? HINTS.viewRotate
+    : tool === "measure" ? HINTS.measure
     : mode === "sim" ? HINTS.sim
     : tool === null ? HINTS.select
     : isPatternTool(tool) ? patternHint()
@@ -1731,6 +1832,7 @@ document.getElementById("clear-btn")!.addEventListener("click", () => {
   updateCompPanel();
 });
 document.getElementById("fit-btn")!.addEventListener("click", fitView);
+rotateViewBtn.addEventListener("click", () => setViewRotateOpen(viewRotate === null));
 document.getElementById("save-btn")!.addEventListener("click", (e) => void saveToFile(e.shiftKey));
 document.getElementById("load-btn")!.addEventListener("click", () => void openFile());
 // Copy/paste are keyboard-only (Ctrl/Cmd+C / V); no toolbar buttons.
@@ -2647,6 +2749,7 @@ function applyLoadedScene(data: SceneData): void {
   view.scale = 1;
   view.tx = 0;
   view.ty = 0;
+  view.angle = 0;
   markDirty();
 }
 
@@ -2749,6 +2852,7 @@ function exitComponent(levels = 1): void {
       view.scale = v.scale;
       view.tx = v.tx;
       view.ty = v.ty;
+      view.angle = v.angle;
     }
   }
   // The cascade snapped instance poses back to their definitions — re-assert the pose
@@ -5995,6 +6099,16 @@ canvas.addEventListener("mousedown", (e) => {
   }
 
   if (e.button !== 0) return;
+  if (viewRotate) {
+    // The dial owns the left button: a grab on the ring / an arm starts turning the
+    // view, a press anywhere else closes the dial (and does nothing underneath).
+    const s = eventScreen(e);
+    if (dialHit(s)) {
+      viewRotate.drag = { startBearing: dialBearing(s), startAngle: view.angle };
+      canvas.style.cursor = "grabbing";
+    } else if (dist(s, dialCentre()) > 12) setViewRotateOpen(false);
+    return;
+  }
   if (mode === "draw") {
     if (placePendingInsert(world)) return; // pending component-instance placement
     if (tool === "rotate") {
@@ -6195,6 +6309,20 @@ canvas.addEventListener("mousemove", (e) => {
     return;
   }
 
+  if (viewRotate) {
+    const s = eventScreen(e);
+    if (viewRotate.drag) {
+      // The turn is the bearing's change since the grab; snap to 5° unless Shift is held.
+      let a = viewRotate.drag.startAngle + (dialBearing(s) - viewRotate.drag.startBearing);
+      if (!e.shiftKey) a = Math.round(a / VIEW_ROTATE_SNAP) * VIEW_ROTATE_SNAP;
+      setViewAngle(a);
+      return;
+    }
+    viewRotate.hot = dialHit(s);
+    canvas.style.cursor = viewRotate.hot ? "grab" : "default";
+    return;
+  }
+
   if (holePress) {
     // Round-hole gesture: once the pointer has clearly moved, the press is a circle drag
     // — the radius runs from the centre to the (grid-snapped) cursor, clamped so the
@@ -6380,6 +6508,10 @@ canvas.addEventListener("mousemove", (e) => {
 });
 
 window.addEventListener("mouseup", (e) => {
+  if (e.button === 0 && viewRotate?.drag) {
+    viewRotate.drag = null;
+    canvas.style.cursor = viewRotate.hot ? "grab" : "default";
+  }
   if (e.button === 0 && holePress) finishHolePress();
   if (e.button === 2 && pan) {
     pan = null;
@@ -6458,6 +6590,11 @@ canvas.addEventListener("mouseleave", () => {
 });
 
 canvas.addEventListener("dblclick", (e) => {
+  if (viewRotate) {
+    // Double-click the dial's centre to go back to 0°; elsewhere the dial swallows it.
+    if (dist(eventScreen(e), dialCentre()) <= 12) setViewAngle(0);
+    return;
+  }
   featureSel = null; // a node / edge edit shifts vertex indices — the feature selection can't follow
   // Freehand polygons still close on double-click; joint-built bodies finish by
   // clicking a previously-added node (handled in handleBodyClick).
@@ -6616,6 +6753,17 @@ window.addEventListener("keydown", (e) => {
     fitView();
     return;
   }
+  // Shift+R opens / closes the view-rotation dial (both modes; plain R is the Rotate tool).
+  if (e.key.toLowerCase() === "r" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    setViewRotateOpen(viewRotate === null);
+    return;
+  }
+  if (viewRotate && e.key === "0" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    setViewAngle(0);
+    return;
+  }
   // Undo / redo: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y.
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === "z") {
@@ -6651,6 +6799,10 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!exportPanel.classList.contains("hidden")) {
       setExportPanelVisible(false);
+      return;
+    }
+    if (viewRotate) {
+      setViewRotateOpen(false);
       return;
     }
     // Mid-drag with an armed alignment candidate: Esc only drops the candidate — the drag
@@ -7368,6 +7520,9 @@ function frame(now?: number): void {
       : featureBox?.moved
         ? { a: featureBox.start, b: featureBox.end }
         : null,
+    viewRotate: viewRotate
+      ? { centre: dialCentre(), radius: dialRadius(), dragging: viewRotate.drag !== null, hot: viewRotate.hot }
+      : null,
     featureSelected: featureSelectedView(),
     editVertices: editVerticesView(),
     filletHandles: filletHandlesView(),

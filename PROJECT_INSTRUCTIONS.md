@@ -160,6 +160,26 @@ hole corners, vertex-removal cascade).
 **View navigation**: zoom range 0.05×–200×; a **fit-to-screen** button + `F` shortcut frames the
 whole mechanism (bodies, joints, ground anchors) centered with a margin; **Tab** toggles
 draw ↔ simulate mode.
+**View rotation dial** (v22 UI, no format change; both modes): **Shift+R** or the toolbar
+button next to Fit opens a big ticked ring (every 5°, longer marks at 45° / 90°) with a
+full-canvas **crosshair along the world X / Y axes** (X / Y / -X / -Y pills at the arm
+ends, a dot at the centre) over the picture. Dragging the ring or an arm turns the **whole
+view about the screen centre** (the turn is the pointer bearing's change since the grab,
+so nothing jumps on press); the angle **always snaps to the nearest 5°**, **Shift** while
+dragging gives any angle; the **angle box under the centre** (a `#dim-edit`-styled input,
+`#view-angle-edit`) shows the angle live and takes an exact value on Enter / blur
+(degrees, counter-clockwise positive); **double-click the centre** or press **0** for 0°;
+Esc / Shift+R / the button / a click off the ring and arms closes it. Right-drag pan and
+wheel zoom keep working while the dial is up; the dial owns the left button, so the armed
+tool / draft underneath is untouched. The rotation is **purely visual**: `View.angle`
+(radians, CCW on screen) enters `screen = R(angle) · world · scale + t`; the document,
+its H / V constraints, grid and snapping stay in world axes (the grid turns with the
+drawing). Labels / pills / badges are drawn in screen space and stay upright; the dial
+itself is drawn last in screen space (`RenderInput.viewRotate`). `fitView` measures the
+bounds in the screen-aligned frame, so Fit frames the tilted picture. The angle is kept
+per component-editing level like the zoom (`savedViews: View[]`) and resets to 0 on load.
+Known compromise: the box-select marquee is drawn world-aligned, so it appears tilted
+while rotated (selection itself is unaffected). Tests: `scripts/view.ts` (30 checks).
 **UI polish**: the toolbar is compact icon buttons (32 px, 22 px glyphs) with tooltips; a
 dark/light **theme toggle** (persisted) themes both the chrome and the canvas; all warnings
 / errors / notices are **toast notifications** (`src/notify.ts` — `notify(msg, kind)`, the
@@ -1568,8 +1588,14 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
   `storeHandle(key, handle | null)` / `loadHandle(key)` persist handles across reloads in
   IndexedDB (`disjointed-fs` / `handles`); a restored handle keeps its `.name` but its
   permission may come back as "prompt".
-- **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
-  `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.05..20).
+- **view.ts** — camera transform `screen = R(angle) · world · scale + (tx, ty)` (`View.angle`
+  in radians, counter-clockwise on screen — the matrix is `[cos sin; -sin cos]` because
+  screen y points down); `screenToWorld`, `worldToScreen`, `rotateToScreen` /
+  `rotateToWorld` (rotation only), cursor-anchored `zoomAt` (scale clamped to
+  MIN_SCALE..MAX_SCALE = 0.05..200), pivot-anchored `rotateViewTo`, `wrapAngle`,
+  `viewMatrix(view, dpr)` (the six numbers for `ctx.setTransform`) and `visibleWorldRect`
+  (the world-axis bounding box of the screen — a superset of what shows when rotated; the
+  grid and infinite rails are drawn over it).
 - **renderer.ts** — **context ghost pass** (`ghostScenes: Scene[]`, v21): right after the
   grid + guides and under every live body, each ghost level draws via `drawGhostScene` —
   body outlines with holes (even-odd) in theme ink at `GHOST_FILL_ALPHA` / stroke
@@ -2309,8 +2335,20 @@ Navigation (both modes):
 - **Right-drag always pans** the view (anywhere). Moving elements is left-drag in select mode
   (above); there is no right-drag-to-move.
 - **Fit to screen** (`F`, or the toolbar button next to Save): frames the whole mechanism
-  (body outlines, joints, ground anchors) centered with a 60 px margin (`fitView` in main.ts);
+  (body outlines, joints, ground anchors) centered with a 60 px margin (`fitView` in main.ts;
+  bounds taken in the screen-aligned frame, so a rotated view fits the tilted picture);
   an empty scene recenters the world origin at 1×.
+- **Rotate the view** (`Shift+R`, or the toolbar button next to Fit; both modes): the
+  view-rotation dial (see "View rotation dial" in Current status). main.ts keeps
+  `viewRotate: { drag: { startBearing, startAngle } | null; hot } | null`; `dialCentre()` /
+  `dialRadius()` (canvas centre, 0.38 × the smaller canvas side), `dialHit(s)` (ring band or
+  arm band, `VIEW_ROTATE_GRAB_PX` = 14), `dialBearing(s)` (CCW bearing about the centre),
+  `setViewAngle(a)` (`rotateViewTo` about the dial centre + readout sync),
+  `setViewRotateOpen(open)` (button `active` state, shows / hides + places the angle input,
+  hint). Mousedown / mousemove / mouseup / dblclick test `viewRotate` first (after the
+  right-button pan), keydown handles Shift+R (before the tool keys — plain R stays the
+  Rotate tool), `0` while open, and Esc closes the dial before anything else. The snap is
+  `Math.round(a / 5°) · 5°` per move unless Shift is held.
 - **Tab** toggles draw ↔ simulate mode (preventDefault'd away from the browser's focus cycle;
   like every shortcut it's inert while an input field has focus).
 
@@ -2767,6 +2805,14 @@ Persistence:
   holes. `removeBodyFeatures`: joint + outer vertex + one hole vertex in one call, the
   3-corner floor refuses the outline edit, holes left too small go whole, and deleting
   vertices across three holes (one whole) handles the index shift.
+- **view.ts** — the view transform with rotation (30 checks): 0° behaves as before; +90°
+  sends world +x up the screen (CCW); `rotateToWorld` inverts `rotateToScreen`; screen ↔
+  world round trips at an arbitrary angle / scale / offset; lengths scale uniformly;
+  `viewMatrix` agrees with `worldToScreen`; `zoomAt` keeps the anchored world point and the
+  angle; `rotateViewTo` keeps the pivot's world point and the scale, turns an off-pivot
+  point on a circle by exactly the angle, and rotating back restores the view;
+  `visibleWorldRect` at 0° / 45° (span, centre, contains every screen corner); `wrapAngle`
+  lands in (-π, π]; the 5° drag snap rounds as the dial does.
 - **context-ghost.ts** — the context ghost (v21, 30 checks): a placed (rotated +
   translated) instance's ghost maps an external body's corners and a free joint by the
   inverse placement; the reference instance's bodies and record are stripped while an
@@ -3033,6 +3079,9 @@ Persistence:
   the saved scene headlessly and by driving the app in Chrome with Playwright.
 
 ## Backlog / next steps (not yet built)
+- **View rotation follow-ups**: a screen-aligned box-select marquee (it is drawn
+  world-aligned, so it looks tilted in a rotated view); a small persistent angle badge /
+  compass when the view is rotated with the dial closed; a hotkey to nudge the angle by 5°.
 - **Context-ghost follow-ups** (v21 scope decisions): no way to **switch the reference
   instance** once inside (re-enter through the other instance); a level entered from the
   component browser / an empty component has no placement (its eye stays dimmed); the

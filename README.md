@@ -539,7 +539,8 @@ items flash red).
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor (0.05× to 200×).
 - **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode; turn on **Object snap** to drag by a corner / edge / centre and snap it onto other objects).
-- **Fit to screen** (`F`, or the toolbar button) — frame the whole mechanism centered in the canvas.
+- **Fit to screen** (`F`, or the toolbar button) — frame the whole mechanism centered in the canvas (a rotated view fits the tilted picture).
+- **Rotate the view** (`Shift+R`, or the toolbar button next to Fit; both modes) — a big ticked ring with a crosshair along the world X / Y axes appears over the canvas. Drag the ring or an arm to turn the whole picture about the screen centre; the angle snaps to 5° steps, hold **Shift** while dragging for any angle. The box under the centre shows the angle and takes an exact value (type it and press Enter, like a dimension). Double-click the centre (or press `0`) for 0°; Esc, `Shift+R` or a click elsewhere closes the dial. Pan and zoom keep working while it is open. The rotation is only how you look at the drawing: the mechanism, its horizontal / vertical constraints and the grid stay in their own axes (the grid turns with the drawing), and labels stay upright.
 - **Tab** — switch between Draw and Simulate mode.
 - `Ctrl/Cmd+S` save, `Ctrl/Cmd+Shift+S` save as, `Ctrl/Cmd+O` open (see below).
 
