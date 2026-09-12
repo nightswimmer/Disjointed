@@ -121,27 +121,77 @@
         </p>
       </section>
 
-      <section class="topic" id="tool-body">
-        <h2>Body <span class="keys"><kbd>B</kbd></span></h2>
+      <section class="topic" id="roles">
+        <h2>Shape roles: Body, Cut, Reference <span class="keys"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></h2>
+        <figure class="ui" data-glyph-row="group:role-group"><figcaption>The role switch, at the start of the tool group.</figcaption></figure>
         <p>
-          Draw a rigid body as a polygon: click each corner, then click the first corner again or press <kbd>Enter</kbd>
-          to close. Clicks that land on existing joints or corners are remembered and turned into coincident constraints,
-          so a body drawn between two joints stays attached to them.
+          The shape tools (polyline, rectangle, circle, regular polygon, slot) draw plain geometry; the <strong>role</strong>
+          switch decides what a finished shape becomes. <strong>Body</strong>: a new rigid body. <strong>Cut</strong>: the
+          shape is subtracted from the body under it — a hole when it lies inside, a notch when it crosses the outline
+          (a cut that would sever a body is refused; use <a href="#tool-split">Split</a>). <strong>Reference</strong>:
+          construction geometry — dash-dot, snappable and measurable, never simulated or exported. Line, arc and text are
+          always reference geometry.
         </p>
         <p>
-          Start the body on existing <strong>free joints</strong> instead and it is built around them: the joints become
-          its joints, expanded outward by a small margin. Corners can be rounded afterwards with <kbd>[</kbd> and
-          <kbd>]</kbd>, or by dragging a corner's fillet handle; <kbd>Ctrl</kbd>-drag rounds every corner at once.
+          The role is sticky, so a row of holes is drawn without touching it again. The preview shows the role as you
+          draw (a tint for a body, hatching plus the highlighted target for a cut, dash-dot for a reference) and a small
+          badge beside the cursor names it. To flip <em>one</em> shape between Body and Cut, hold <kbd>Ctrl</kbd> on its
+          first click. A cut takes the <strong>selected body</strong> as its target when one is selected (select the
+          plate, then cut), otherwise the topmost body under the first click, otherwise the body the finished shape lies in
+          — so bodies may overlap freely and you still choose what gets cut.
         </p>
       </section>
 
-      <section class="topic" id="tool-hole">
-        <h2>Hole <span class="keys"><kbd>U</kbd></span></h2>
+      <section class="topic" id="tool-polyline">
+        <h2>Polyline <span class="keys"><kbd>B</kbd> body &middot; <kbd>U</kbd> cut</span></h2>
         <p>
-          Cut a hole in a body. Click inside the body to start, then more vertices, and close on the first vertex or with
-          <kbd>Enter</kbd>. For a round hole, press inside the body and <strong>drag</strong> out the radius instead. Holes
-          have the same corner handles and rounding as outlines, and a round hole can carry a diameter
-          <a href="#dimensions">dimension</a>.
+          Click each corner, then click the first corner again, double-click or press <kbd>Enter</kbd> to close. Clicks
+          that land on existing joints, corners or edges are remembered and turned into coincident constraints, so a body
+          drawn between two joints stays attached to them; near-horizontal / vertical edges are straightened.
+          <kbd>B</kbd> arms it in the Body role, <kbd>U</kbd> in the Cut role; in the Reference role a closed polyline
+          is a reference polygon and two points make a segment.
+        </p>
+        <p>
+          In the Body role, start on existing <strong>free joints</strong> instead and the body is built around them: the
+          joints become its joints, expanded outward by a margin you set with the last click. Corners can be rounded
+          afterwards with <kbd>[</kbd> and <kbd>]</kbd>, or by dragging a corner's fillet handle; <kbd>Ctrl</kbd>-drag
+          rounds every corner at once.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-rect">
+        <h2>Rectangle <span class="keys"><kbd>Shift</kbd>+<kbd>B</kbd></span></h2>
+        <p>
+          Click one corner, then the opposite corner — or press and drag. Hold <kbd>Shift</kbd> for a square,
+          <kbd>Alt</kbd> to draw from the centre. The four edges get horizontal / vertical constraints, so the rectangle
+          stays one under later edits.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-circle">
+        <h2>Circle <span class="keys"><kbd>Shift</kbd>+<kbd>C</kbd></span></h2>
+        <p>
+          Click the centre, then a point on the rim — or press and drag the radius out. As a body it is a disk (a
+          one-point rounded outline: move it by its centre node, resize it by its rim handle); as a cut, a round hole that
+          can carry a diameter <a href="#dimensions">dimension</a> and be repeated by a <a href="#el-pattern">pattern</a>;
+          as a reference, a circle whose centre snaps and measures.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-polygon">
+        <h2>Regular polygon <span class="keys"><kbd>Shift</kbd>+<kbd>P</kbd></span></h2>
+        <p>
+          Click the centre, then one corner — or press and drag. The number of sides is set in the toolbar field that
+          appears while the tool is armed, or with <kbd>&uarr;</kbd> / <kbd>&darr;</kbd>.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-slot">
+        <h2>Slot <span class="keys"><kbd>Shift</kbd>+<kbd>S</kbd></span></h2>
+        <p>
+          Click where the slot starts and where it ends — or press and drag — then move out to set its width and click.
+          A slot is a two-point rounded outline (a capsule): as a body a link with rounded ends, as a cut a slotted hole.
+          In the Reference role the two clicks make the axis segment.
         </p>
       </section>
 
@@ -226,7 +276,35 @@
         <p>
           Place an infinite construction line through two points. Points land on joints, corners and edges, and snapping
           prefers guidelines over the grid, so they are the quickest way to line things up. Drag a guideline's handles
-          to re-aim it.
+          to re-aim it. For finite reference geometry see the <a href="#tool-line">Line</a>, <a href="#tool-arc">Arc</a>
+          and shape tools in the <a href="#roles">Reference role</a>.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-line">
+        <h2>Line <span class="keys"><kbd>Shift</kbd>+<kbd>L</kbd></span></h2>
+        <p>
+          A reference segment: click two points, or press and drag. Points that land on joints, corners or other
+          reference points are held there by a coincident constraint. Its endpoints snap and measure, and the segment
+          takes horizontal / vertical / parallel / perpendicular / equal constraints like a body edge.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-arc">
+        <h2>Arc <span class="keys"><kbd>Shift</kbd>+<kbd>A</kbd></span></h2>
+        <p>
+          A reference arc: click its start and end points, then a point it should pass through. Its three points are
+          handles and references; placements snap onto the arc itself.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-text">
+        <h2>Text <span class="keys"><kbd>Shift</kbd>+<kbd>T</kbd></span></h2>
+        <p>
+          A label. Click where it goes, type, press <kbd>Enter</kbd>. Clicked on a body, the label is anchored to that
+          body and rides with it; on empty space it stays where it is. The height (in working units) is set in the
+          toolbar field while the tool is armed. Double-click a label to edit it, drag it to move it, select and
+          <kbd>Delete</kbd> to remove it. Labels are drawing aids: never simulated or exported.
         </p>
       </section>
 
@@ -538,13 +616,14 @@
       <!-- ============================================================ -->
       <h1 class="chapter">On the canvas</h1>
 
-      <section class="topic" id="el-body" data-glyph="tool-body">
+      <section class="topic" id="el-body" data-glyph="tool-polyline">
         <h2>Body</h2>
         <p>
           A rigid part of the mechanism: a filled outline in its own colour. Bodies never bend or stretch; they move
           as a whole, carried by their joints. Click one to select it and reveal its <a href="#el-handles">shape
           handles</a>; drag it to move it (in Simulate mode, dragging drives the mechanism instead). Drawn with the
-          <a href="#tool-body">Body tool</a>, recoloured with the <a href="#body-colour">colour swatch</a>.
+          <a href="#tool-polyline">shape tools</a> in the <a href="#roles">Body role</a>, recoloured with the
+          <a href="#body-colour">colour swatch</a>.
         </p>
         <figure data-svg="img/legend.svg">
           <figcaption>Left to right, top row: a free joint, a body with a plain joint, two bars pinned together, a grounded joint, two plates welded. Bottom row: a guideline, a dimension, a horizontal-constraint badge.</figcaption>
@@ -568,12 +647,13 @@
         </p>
       </section>
 
-      <section class="topic" id="el-hole" data-glyph="tool-hole">
+      <section class="topic" id="el-hole" data-glyph="tool-circle">
         <h2>Hole</h2>
         <p>
           A cut-out in a body. Holes have the same corner handles and rounding as the outline and are exported with
           it as inner contours. Round holes can carry a diameter <a href="#el-dimension">dimension</a> and be
-          repeated by a <a href="#el-pattern">pattern</a>. Cut with the <a href="#tool-hole">Hole tool</a>.
+          repeated by a <a href="#el-pattern">pattern</a>. Cut with any shape tool in the <a href="#roles">Cut
+          role</a> (a shape crossing the outline makes a notch instead).
         </p>
         <figure data-svg="img/plate-selected.svg">
           <figcaption>A selected plate with two round holes.</figcaption>
@@ -606,7 +686,7 @@
         <p>
           A joint that belongs to no body. Use one as a fixed anchor by <a href="#tool-ground">grounding</a> it, as an
           end of a fixed <a href="#el-rail">track</a>, or as a corner to build a body around with the
-          <a href="#tool-body">Body tool</a>.
+          <a href="#tool-polyline">Polyline tool</a>.
         </p>
       </section>
 
@@ -686,11 +766,15 @@
       </section>
 
       <section class="topic" id="el-guide" data-glyph="tool-guide">
-        <h2>Guideline</h2>
+        <h2>Reference geometry</h2>
         <p>
-          An infinite construction line with a small handle at each defining point. It takes part in snapping and
-          constraints but is not part of the mechanism and never exports. Drag a handle to re-aim it; select and
-          delete it like anything else. Placed with the <a href="#tool-guide">Guideline tool</a>.
+          Dash-dot construction elements with a crosshair handle at each defining point: infinite
+          <a href="#tool-guide">guidelines</a>, <a href="#tool-line">segments</a> and polylines, circles,
+          <a href="#tool-arc">arcs</a> and <a href="#tool-text">text labels</a>. They take part in snapping, measurements
+          and constraints but are not part of the mechanism, are hidden in Simulate mode and never export. Drag a handle
+          to reshape one (a selected circle shows a rim handle to resize it), drag elsewhere on it to move it whole;
+          select and <kbd>Delete</kbd> to remove it. Placed with the reference tools, or any shape tool in the
+          <a href="#roles">Reference role</a>.
         </p>
       </section>
 
@@ -762,7 +846,9 @@
         <h2>Keyboard shortcuts</h2>
         <ul>
           <li><kbd>Tab</kbd> Draw / Simulate &middot; <kbd>Space</kbd> run animation &middot; <kbd>F</kbd> fit view &middot; <kbd>Shift</kbd>+<kbd>R</kbd> rotate view &middot; <kbd>Esc</kbd> cancel</li>
-          <li>Tools: <kbd>B</kbd> body &middot; <kbd>U</kbd> hole &middot; <kbd>X</kbd> split &middot; <kbd>N</kbd> combine &middot; <kbd>J</kbd> joint &middot; <kbd>W</kbd> weld &middot; <kbd>C</kbd> connect &middot; <kbd>G</kbd> ground &middot; <kbd>K</kbd> rail &middot; <kbd>S</kbd> slider &middot; <kbd>L</kbd> guideline &middot; <kbd>R</kbd> rotate &middot; <kbd>I</kbd> linear pattern &middot; <kbd>Q</kbd> circular pattern &middot; <kbd>A</kbd> actuator &middot; <kbd>M</kbd> motor &middot; <kbd>D</kbd> measure</li>
+          <li>Roles: <kbd>1</kbd> body &middot; <kbd>2</kbd> cut &middot; <kbd>3</kbd> reference &middot; <kbd>Ctrl</kbd>+click flips Body / Cut for one shape</li>
+          <li>Shapes: <kbd>B</kbd> polyline (body) &middot; <kbd>U</kbd> polyline (cut) &middot; <kbd>Shift</kbd>+<kbd>B</kbd> rectangle &middot; <kbd>Shift</kbd>+<kbd>C</kbd> circle &middot; <kbd>Shift</kbd>+<kbd>P</kbd> regular polygon &middot; <kbd>Shift</kbd>+<kbd>S</kbd> slot &middot; <kbd>Shift</kbd>+<kbd>L</kbd> line &middot; <kbd>Shift</kbd>+<kbd>A</kbd> arc &middot; <kbd>Shift</kbd>+<kbd>T</kbd> text</li>
+          <li>Tools: <kbd>X</kbd> split &middot; <kbd>N</kbd> combine &middot; <kbd>J</kbd> joint &middot; <kbd>W</kbd> weld &middot; <kbd>C</kbd> connect &middot; <kbd>G</kbd> ground &middot; <kbd>K</kbd> rail &middot; <kbd>S</kbd> slider &middot; <kbd>L</kbd> guideline &middot; <kbd>R</kbd> rotate &middot; <kbd>I</kbd> linear pattern &middot; <kbd>Q</kbd> circular pattern &middot; <kbd>A</kbd> actuator &middot; <kbd>M</kbd> motor &middot; <kbd>D</kbd> measure</li>
           <li>Constraints: <kbd>O</kbd> coincident &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>E</kbd> equal</li>
           <li>Editing: <kbd>Delete</kbd> &middot; <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd> undo, redo &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>V</kbd> copy, paste &middot; <kbd>Ctrl</kbd>+<kbd>G</kbd> group &middot; <kbd>[</kbd> / <kbd>]</kbd> corner radius &middot; <kbd>PageUp</kbd> / <kbd>PageDown</kbd> stacking</li>
           <li>Files: <kbd>Ctrl</kbd>+<kbd>S</kbd> save &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save as &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open</li>

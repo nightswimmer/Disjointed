@@ -309,7 +309,7 @@ const holeCentres = (s: Scene, bodyId: number): Vec2[] =>
 
   // Save / load round trip; a corrupt count is repaired by the sync.
   const data = JSON.parse(JSON.stringify(s2.serialize())) as SceneData;
-  check("format v19 with patterns", data.version === 19 && (data.patterns?.length ?? 0) === 2);
+  check("format v20 with patterns", data.version === 20 && (data.patterns?.length ?? 0) === 2);
   data.patterns![0].members = []; // stale member list
   const s3 = new Scene();
   s3.load(data);

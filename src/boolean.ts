@@ -1,5 +1,6 @@
 /**
- * Polygon union for the Combine tool (and segment helpers shared with Split).
+ * Polygon booleans: union for the Combine tool, difference for the shape tools' Cut
+ * role (and segment helpers shared with Split).
  *
  * The union works on a planar straight-line graph: every input edge is split where it
  * crosses, touches or overlaps another one, coincident vertices are merged, and each
@@ -126,6 +127,24 @@ export function simplifyCollinear(loop: Vec2[], eps: number): Vec2[] {
  * collinear boundary vertices removed. `null` when the inputs give no area at all.
  */
 export function unionRegions(inputs: PolyRegion[]): UnionResult | null {
+  return booleanRegions(inputs, (p) => inputs.some((r) => inRegion(p, r)));
+}
+
+/**
+ * Difference: `subject` minus every `cutter` (the Cut role of the shape tools). Same
+ * result shape as the union — several pieces when a cut severs the subject, `null`
+ * when nothing is left.
+ */
+export function differenceRegions(subject: PolyRegion, cutters: PolyRegion[]): UnionResult | null {
+  return booleanRegions([subject, ...cutters], (p) => inRegion(p, subject) && !cutters.some((r) => inRegion(p, r)));
+}
+
+/**
+ * The shared planar-graph boolean: every input loop's edges are split where they meet,
+ * and an edge survives when `filled` differs between its two sides (material on the
+ * left → kept as is, on the right → reversed). `filled` is the set operation.
+ */
+function booleanRegions(inputs: PolyRegion[], filled: (p: Vec2) => boolean): UnionResult | null {
   // --- scale-relative tolerances ---
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const r of inputs) {
@@ -215,7 +234,6 @@ export function unionRegions(inputs: PolyRegion[]): UnionResult | null {
     }
   }
   const P = pool.points;
-  const filled = (p: Vec2): boolean => inputs.some((r) => inRegion(p, r));
 
   // --- classify: keep edges with material on exactly one side, directed material-left ---
   const directed: { from: number; to: number; used: boolean }[] = [];

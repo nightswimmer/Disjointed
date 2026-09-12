@@ -45,6 +45,83 @@ reload; the title shows `• name` while modified), with a timestamped download 
 fallback elsewhere; **auto-backup** (clock button) writes `<name>-backup-<time>.json` into a
 user-chosen folder N minutes after the first change since the last backup / save, pruning to
 the last K, with a change-armed countdown shown in its panel.
+**Shape tools + roles (Body / Cut / Reference) — serialization v20, 2026-09-13.** The Body,
+Hole and (partly) Guideline tools became **role-neutral shape tools** plus a sticky **role
+switch** at the start of the tool group (`.role-btn`s in `#role-group`; keys `1` / `2` / `3`;
+`shapeRole` in main.ts, `effectiveRole()` = the one-shot `roleOverride` — **Ctrl on a shape's
+first click flips Body ↔ Cut** — else the sticky role; line / arc / text force Reference).
+Shape tools (`SHAPE_TOOLS`): **polyline** (`B` = arm it in the Body role, `U` = Cut role; the
+old freehand draft + body-from-joints in the Body role), **rect** (Shift+B; two corners or
+press-and-drag, Shift = square, Alt = from the centre), **circle** (Shift+C; centre + rim or
+drag), **polygon** (Shift+P; centre + corner, side count in the `#poly-sides` toolbar field or
+↑ / ↓), **slot** (Shift+S; two ends, then a click for the width), **line** (Shift+L; a finite
+reference segment), **arc** (Shift+A; start, end, then a through point), **text** (Shift+T; a
+label typed into the `#text-edit` inline input; clicked on a body it is **anchored** to it and
+rides with it; height from the `#text-size` field; double-click a label to edit it). The
+two-point tools take a **press-and-drag** too (`shapePress`: the press is the first point once
+the pointer has moved > `SHAPE_DRAG_PX`, the release the second; Ctrl is read at the press).
+Points land through `guidePlacementAt` (exact on joints / corners / guide points → recorded
+pick → coincident auto-constraint; projected onto edges / rails; else `snap`). **Commit by
+role** (`commitMaterial` / `commitReference`): Body → `addBody` (a circle is a one-point
+offset disk, a slot a two-point offset capsule; rect / polygon / polyline get H/V
+auto-constraints + coincidents for picked points); **Cut** → `Scene.cutBody(target, spec)`,
+target = the **selected body** (kept through `setTool` when the role is Cut) else the topmost
+body under the first click else the body the finished shape's centroid / a vertex lies in —
+a refused cut toasts the reason and leaves the tool armed; Reference → `addGuidePoly` /
+`addGuideCircle` / `addGuideArc` / `addGuideText` (picked points get coincidents), the new
+guide selected. Preview: `RenderInput.shapeDraft` (role, fill, sampled outline, points, aux
+segments, text, cut target) drawn role-styled — body tint, **Cut** = `CUT_COLOR` dashes over
+diagonal hatching (clip) with the target body highlighted like a hover, Reference = dash-dot
+with crosshairs — plus a **role badge** beside the cursor (screen space) whenever a shape tool
+is armed. **`Scene.cutBody`** (model.ts): the cutter's sampled loop (`deriveHoleOutline` of the
+spec, so a disk spec samples its rim); a cutter entirely inside an existing hole is refused
+("nothing to remove"); **fast path** — cutter inside the outer outline and clear of every hole
+(`loopsMeet`: no crossing / touching) → `addBodyHole(spec)` (exact spec, disks stay
+parametric, patterns untouched); **general path** — `differenceRegions(editableOutline,
+cutter)` (new in boolean.ts, sharing the planar-graph core with `unionRegions` via
+`booleanRegions(inputs, filled)`), refused when the result is empty ("would remove the whole
+body"), has > 1 region ("would split — use Split"), or is pinched; otherwise the body's
+patterns dissolve and **`applyRegion`** (extracted from `combineBodies`, now shared) gives the
+body the new outline: unchanged corners keep their radii (new ones sharp — overrides of 0
+when the default is rounded), untouched holes keep their exact specs, vertex / edge refs remap
+by world geometry, `bodyPoint` refs re-anchor, stale refs drop. Offset-mode bodies are baked
+first; a rounded cutter crossing the outline arrives sampled. **Reference geometry** (model.ts
+`Guide` is now a union): `line` (infinite, the old record — ≤ v19 files carry no `kind`, the
+loader back-fills it), `poly` (`pts`, `closed`: segment / chain / polygon), `circle` (`c`, `r`),
+`arc` (`a`, `m`, `b` through-points; `guideArc` → `arcThrough`), `text` (`p`, `text`, `size`,
+optional `bodyId` — then `p` is body-local; `guideTextWorld` / `guideTextBox`, width
+estimated `TEXT_ADVANCE = 0.58 × size` per char for hit tests). Points are named by
+`which` strings — `guidePointKeys` (solver-capable: line a/b, poly "0"…"n−1", circle "c",
+arc a/m/b; text none), `guideHandleKeys` (adds the circle rim "r" and the text anchor "p",
+drag-only), `guidePointIsRef`, `guidePointWorld`, `moveGuidePoint(id, which, p)` (rim →
+resize), `moveGuide` (translate all; anchored text in its body's frame), `guideLines(g)` →
+`GuideLine[]` (infinite line, or polyline edges `edge: i`), hit tests `guideAt` (any drawn
+part: line / edge / rim / arc / label box), `guideLineAt` (line refs: `{ guide, edge }`),
+`guidePointAt` (handles). `MeasureRef.guidePoint.which` is a `string`; `guideLine` gained an
+optional `edge` (a polyline edge resolves as a **finite** line; only `kind: "line"` guides
+resolve `infinite`). `addSketchConstraint` rejects `equal` only on infinite lines
+(`refIsInfiniteLine`) — polyline edges have a length. `pruneGuides` drops labels whose body is
+gone (`removeBody`, load). sketch.ts: guide vars are generic `g:<id>:<which>` via
+`guidePointWorld` / `moveGuidePoint`; `lineVarKeys` handles polyline edges (wrapping when
+closed); tied-guide propagation uses `allGuideVars`; **`anchorVarsForGuide(scene, id)`** now
+takes the scene. main.ts: `snap` projects onto guide lines / edges (finite edges only within
+their span) and radially onto circle / arc rims; `objSnapTargets` offers every reference point
+and line; `constraintPointRefAt` / `measureRefAt` skip drag-only handles; whole-guide drags
+anchor on `guideAnchorWorld` (first handle). renderer.ts: `drawGuide` per kind (crosshairs on
+defining points, a selected circle shows its square rim handle, labels via `drawGuideText`
+rotated by the body's angle); `drawShapeDraft`, `drawRoleBadge`. svgcontext.ts gained
+`translate` / `rotate` / a no-op `clip` (the manual recorder). index.html: role switch,
+9 shape-tool buttons, `#shape-props` (`#poly-sides-label`, `#text-size-label` — hidden by the
+id-based `.hidden` rules in style.css), `#text-edit`. helpmap / manual: topics `roles`,
+`tool-polyline`, `tool-rect`, `tool-circle`, `tool-polygon`, `tool-slot`, `tool-line`,
+`tool-arc`, `tool-text` (tool-body / tool-hole removed; el-guide is now "Reference
+geometry"). Tests: new `scripts/shapes.ts` (difference primitive, cut fast path / notch /
+refusals / kept hole specs / ref survival, one- and two-point offset bodies, `arcThrough` /
+`distToArc` / `regularPolygon`, every reference kind incl. anchored labels, hit tests, edge
+refs, ties, equal on a segment vs an infinite line, v20 round-trip, legacy kind-less guides,
+corrupt records dropped); grounded-bodies / patterns / dxf tests assert v20. Verified in the
+browser by a Playwright script driving every shape in every role (not kept in the repo).
+Deferred phases and follow-ups are listed in **HANDOFF.md**.
 **Context ghost — editing a definition inside its assembly + temporary context dimensions**
 (v21 UI, no format change): **Ctrl+double-click a component instance** opens its definition
 with the **whole enclosing assembly drawn faded in the definition's own frame** — the
@@ -1226,8 +1303,10 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
     drawing and picking together. Group-aware (any id expands to its whole group), moved
     bodies keep their relative order, returns whether the order actually changed. Array
     order already survives `serialize()`/`load()`, so persistence is free (no format bump).
-  - **Construction guidelines** (`guides: Guide[]`, a `Guide = { id, a, b }` — two world
-    points defining an **infinite** line; drawing aids only, never simulated): `addGuide`
+  - **Construction guidelines** (`guides: Guide[]`; since v20 `Guide` is a **union** of
+    `line` / `poly` / `circle` / `arc` / `text` — see the *Shape tools + roles* entry in
+    Current status for the generalized API; the rest of this paragraph describes the
+    original infinite-line kind, `{ id, kind: "line", a, b }`): `addGuide`
     (rejects spans < `GUIDE_MIN_SPAN`), `removeGuide` (cascades — prunes measurements and
     sketch constraints referencing the guide), `moveGuide` (translates both points, angle
     kept), `moveGuidePoint` (re-aims; refuses collapsing onto the twin point), hit tests
@@ -1612,8 +1691,10 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
   Tarjan **bridge / biconnected-component decomposition** classifying bodies into loop cores
   (must be solved together) vs propagatable tree branches, with articulation bodies joining
   blocks. Labels are `#id`-based (bodies have no user-facing name).
-- **boolean.ts** — **polygon union** for the Combine tool (plus `segmentsCross` /
-  `pointOnSegment` used by Split's validation). `unionRegions(regions)` takes filled regions
+- **boolean.ts** — **polygon union** for the Combine tool and **difference** for the shape
+  tools' Cut role (`differenceRegions(subject, cutters)`; both are thin wrappers over
+  `booleanRegions(inputs, filled)` — the set operation is the `filled(p)` predicate), plus
+  `segmentsCross` / `pointOnSegment` used by Split's validation. `unionRegions(regions)` takes filled regions
   (outer loop + holes, any orientation) and builds a planar straight-line graph: every edge is
   split where it crosses / touches / collinearly overlaps another (O(n²) pairwise, fine for
   control polygons), vertices closer than a scale-relative eps are merged (hash grid), and
@@ -1819,6 +1900,10 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
     grid-snap + containment fallback as the Joint tool) and welds them together with
     rigid pins (`addPin(a, b, true)`). A single body / empty space does nothing (a lone
     joint has nothing to weld to). Selects the resulting joint.
+  - **Shape tools + roles** (v20): see the *Shape tools + roles* entry in Current status
+    (`SHAPE_TOOLS`, `shapeRole` / `roleOverride` / `effectiveRole`, `shapePts` / `shapeSnaps`
+    / `shapeTarget` / `shapePress`, `handlePolylineClick` / `handleShapeClick` /
+    `commitMaterial` / `commitReference`, `shapeDraftView`, the `#text-edit` editor).
   - **Guideline tool** (`L`, draw mode; the actuator's shortcut moved to `A`): two clicks
     through `guidePlacementAt` — exactly on a picked point element (joint / body corner /
     guide point; recorded and turned into an **auto-coincident** via `tryAddConstraint`),
@@ -2853,6 +2938,16 @@ Persistence:
   open pin from the selection to the frozen world snaps closed (assemble-on-drag); an open
   pin **between two frozen bodies** is neither closed nor reported as a break — and the
   same pin without a freeze is closed by a normal solve (the skip is freeze-only).
+- **shapes.ts** — shape tools' model layer (v20): the difference primitive (inner hole,
+  notch, severing bar → 2 regions, full cover → null, hole merge), `cutBody` fast path (disk
+  stays parametric, polygon hole exact, refused inside a hole), notch (8 corners, original
+  radii kept / new corners sharp, joint + measurement survive), refusals (split, remove all)
+  leaving the body intact, kept hole specs, merge into an overlapped hole, one- / two-point
+  offset bodies (disk / slot areas), `arcThrough` / `distToArc` / `regularPolygon`, every
+  reference kind (dedupe, rejections, anchored label rides + dies with its body, point /
+  handle keys, hit tests, edge refs finite, ties move the guide, equal on a segment but not
+  an infinite line), v20 round-trip of all kinds, legacy kind-less guides → lines, corrupt /
+  orphaned records dropped on load.
 - **guides.ts** — construction guidelines end-to-end (57 checks): CRUD + moves (whole-line
   translate preserves the angle; endpoint re-aim; collapse-onto-twin refused), hit tests
   (infinite line, defining points), serialize/load v11 round-trip + pre-v11 files + id
@@ -3172,6 +3267,14 @@ Persistence:
   the saved scene headlessly and by driving the app in Chrome with Playwright.
 
 ## Backlog / next steps (not yet built)
+- **Shape tools — later phases** (agreed roadmap, details in **HANDOFF.md**): arcs on
+  body / hole outlines via per-edge bulges (then Arc edges, curved slots, exact arc export,
+  the DXF importer keeping non-tangent arcs) and ellipses (an edge *kind*); regions from
+  closed chains of reference segments (click a region → body / cut); cut / engraved text via
+  an outline font + a stencil face. Smaller: role conversions (reference → body, hole → body,
+  body as cutter), multi-body cuts, patterns surviving a general-path cut, exact arcs on a
+  rounded cutter's notch, text angle / font / alignment, point-on-circle / tangent /
+  concentric constraints, gesture illustrations for the new tools in the manual.
 - **Help / manual follow-ups** (v22 is the infrastructure + a first-draft text): richer topic
   text where the current paragraphs are thin; **gesture-sequence illustrations** (before / mid
   / after shots for each tool, via `run` steps in `scripts/manual/shots.ts`); tutorial-step

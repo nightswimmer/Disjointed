@@ -46,6 +46,9 @@ export const ID_TOPICS: Record<string, string> = {
   "actuator-speed": "tool-linearActuator",
   "actuator-profile": "tool-linearActuator",
   "motor-speed": "tool-motor",
+  "poly-sides": "tool-polygon",
+  "text-size": "tool-text",
+  "text-edit": "tool-text",
   "anim-iter-ctrl": "solver-tuning",
   "cleanup-max-ctrl": "solver-tuning",
   "struct-tol-ctrl": "solver-tuning",
@@ -74,6 +77,8 @@ export const GROUP_TOPICS: Record<string, string> = {
   "component-group": "components",
   "actuator-props": "tool-linearActuator",
   "motor-props": "tool-motor",
+  "role-group": "roles",
+  "shape-props": "tools",
 };
 
 /** One ancestor on the way up from the clicked element (DOM-free description). */

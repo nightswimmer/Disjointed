@@ -45,6 +45,7 @@ import {
   cascadeComponentChange,
   reexpandData,
   PatternSeed,
+  Guide,
 } from "./model";
 import { buildContextGhost, GhostSource } from "./context";
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
@@ -56,16 +57,23 @@ import {
 } from "./sketch";
 import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolated } from "./pose";
 import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
-import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
+import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine, distToArc, regularPolygon, arcThrough, sampleArc } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt, rotateViewTo, rotateToScreen, rotateToWorld } from "./view";
 import { installHelp } from "./help";
 import { CanvasTopic } from "./helpmap";
 
 type Mode = "draw" | "sim";
 type Tool =
-  | "body" | "hole" | "split" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate" | "guide"
+  | ShapeTool | "split" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate" | "guide"
   | "linearActuator" | "motor" | "measure" | "patternLinear" | "patternCircular"
   | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
+/** The shape tools: role-neutral geometry that the armed role turns into a body, a cut or a reference. */
+const SHAPE_TOOLS = ["polyline", "rect", "circle", "polygon", "slot", "line", "arc", "text"] as const;
+type ShapeTool = (typeof SHAPE_TOOLS)[number];
+/** What a finished shape becomes. */
+type ShapeRole = "body" | "cut" | "reference";
+/** Shape tools whose product is always reference geometry (no material role). */
+const REFERENCE_ONLY: ReadonlySet<string> = new Set(["line", "arc", "text"]);
 /** An existing element picked in normal/select mode. */
 type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "guide" | "pattern" | "tempDim"; id: number };
 
@@ -247,31 +255,48 @@ function syncColorPicker(): void {
 let mode: Mode = "draw";
 /** Armed draw tool, or null for normal/select mode. Tools disarm after one use. */
 let tool: Tool | null = null;
-let draftBody: Vec2[] = []; // freehand polygon vertices (body tool, empty-space start)
+let draftBody: Vec2[] = []; // polyline tool: freehand vertices placed so far
 /**
  * Per freehand draft vertex: the existing point (joint / body corner) the click landed
  * on, or null. On finish, each recorded pick becomes a coincident auto-constraint
  * between the new body's corner and that point (the vertex is placed exactly on it).
  */
 let draftBodySnaps: (MeasureRef | null)[] = [];
-/** Hole tool: freehand cut-out vertices, and the body being cut (set by the first click). */
-let holeDraft: Vec2[] = [];
-let holeDraftBodyId: number | null = null;
+// --- shape tools ----------------------------------------------------------------
+/** The sticky role every finished shape takes (toolbar switch / 1 / 2 / 3). */
+let shapeRole: ShapeRole = "body";
+/** One-shot role for the shape being drawn (Ctrl on its first click flips Body ↔ Cut). */
+let roleOverride: ShapeRole | null = null;
+/** Point-defined shape tools (rect / circle / polygon / slot / line / arc): the points placed so far + their picks. */
+let shapePts: Vec2[] = [];
+let shapeSnaps: (MeasureRef | null)[] = [];
+/** Cut role: the body the shape will be subtracted from (picked at the first click), or null until known. */
+let shapeTarget: number | null = null;
 /**
- * Hole tool, round-hole gesture: the press that may become a circle drag (body picked,
- * snapped centre, and the screen point pressed), then the circle being dragged out
- * (radius clamped to `maxR`, the largest disk that fits the body around that centre).
- * A press released without dragging falls back to the polygon path (first vertex).
+ * Two-point shape tools, press-and-drag gesture: the press that may become a drag
+ * (screen point pressed, where the first point would land, its pick). Once the pointer
+ * has clearly moved the press is the first point and the release the second; a press
+ * released in place just places the first point (the click flow).
  */
-let holePress: { bodyId: number; centre: Vec2; screen: Vec2; maxR: number } | null = null;
+let shapePress: { screen: Vec2; at: Vec2; pick: MeasureRef | null; ctrl: boolean; dragging: boolean } | null = null;
+/** Modifier keys as of the last mouse event (Shift squares a rectangle, Alt draws it from the centre, Ctrl flips the role). */
+let mods = { shift: false, alt: false, ctrl: false };
+/** Regular polygon tool: side count (toolbar field, ↑ / ↓). */
+let polySides = 6;
+/** Text tool: label height in world units (toolbar field). */
+let textSize = 10;
+const shapePropsGroup = document.getElementById("shape-props") as HTMLDivElement;
+const polySidesLabel = document.getElementById("poly-sides-label") as HTMLLabelElement;
+const polySidesInput = document.getElementById("poly-sides") as HTMLInputElement;
+const textSizeLabel = document.getElementById("text-size-label") as HTMLLabelElement;
+const textSizeInput = document.getElementById("text-size") as HTMLInputElement;
 // --- pattern tools ------------------------------------------------------------
 /** What the armed pattern tool is replicating (a hole or an attached joint), or null before the pick. */
 let patternSeed: PatternSeed | null = null;
 /** Linear tool: the row just created, still armed for an optional second direction (a grid). */
 let patternDraft: number | null = null;
-let holeCircle: { c: Vec2; r: number } | null = null;
-/** Screen-pixel travel before a hole-tool press counts as a circle drag. */
-const HOLE_DRAG_PX = 4;
+/** Screen-pixel travel before a shape-tool press counts as a drag (vs a click). */
+const SHAPE_DRAG_PX = 4;
 /** Split tool: the cut path so far (first point on the body's outline) and the body being cut. */
 let splitDraft: Vec2[] = [];
 let splitBodyId: number | null = null;
@@ -473,13 +498,29 @@ function snap(p: Vec2, excludeGuide?: number): Vec2 {
   if (!snapEnabled) return p;
   const r = GUIDE_SNAP_PX / view.scale;
   const near: { o: Vec2; d: Vec2; dist: number; proj: Vec2 }[] = [];
+  const curved: { dist: number; proj: Vec2 }[] = [];
   for (const g of scene.guides) {
     if (g.id === excludeGuide) continue;
-    const d = normalize(sub(g.b, g.a));
-    if (d.x === 0 && d.y === 0) continue;
-    const proj = add(g.a, scale(d, dot(sub(p, g.a), d)));
-    const dd = dist(p, proj);
-    if (dd <= r) near.push({ o: g.a, d, dist: dd, proj });
+    // Lines and polyline edges: project onto the line (a finite edge only within its span).
+    for (const l of scene.guideLines(g)) {
+      const d = normalize(sub(l.b, l.a));
+      if (d.x === 0 && d.y === 0) continue;
+      const t = dot(sub(p, l.a), d);
+      if (!l.infinite && (t < 0 || t > dist(l.a, l.b))) continue;
+      const proj = add(l.a, scale(d, t));
+      const dd = dist(p, proj);
+      if (dd <= r) near.push({ o: l.a, d, dist: dd, proj });
+    }
+    // Circles and arcs: project radially onto the rim (an arc only along its sweep).
+    if (g.kind === "circle" || g.kind === "arc") {
+      const arc = g.kind === "circle" ? { c: g.c, r: g.r, a0: 0, sweep: Math.PI * 2 } : scene.guideArc(g);
+      if (!arc) continue;
+      const dc = dist(p, arc.c);
+      if (dc < 1e-9 || Math.abs(dc - arc.r) > r) continue;
+      const proj = add(arc.c, scale(normalize(sub(p, arc.c)), arc.r));
+      if (g.kind === "arc" && distToArc(proj, arc) > 1e-6) continue;
+      curved.push({ dist: Math.abs(dc - arc.r), proj });
+    }
   }
   if (near.length > 0) {
     near.sort((x, y) => x.dist - y.dist);
@@ -492,6 +533,10 @@ function snap(p: Vec2, excludeGuide?: number): Vec2 {
       if (dist(p, q) <= r) return q;
     }
     return near[0].proj;
+  }
+  if (curved.length > 0) {
+    curved.sort((x, y) => x.dist - y.dist);
+    return curved[0].proj;
   }
   return vec(Math.round(p.x / gridStep) * gridStep, Math.round(p.y / gridStep) * gridStep);
 }
@@ -563,7 +608,7 @@ type LeftDrag =
   // Whole-guideline move (angle preserved; anchored on its point `a`)…
   | { kind: "guide"; id: number; grabOffset: Vec2; moved: boolean }
   // …or one of its two defining points (re-aims the line).
-  | { kind: "guidePoint"; id: number; which: "a" | "b"; grabOffset: Vec2; moved: boolean }
+  | { kind: "guidePoint"; id: number; which: string; grabOffset: Vec2; moved: boolean }
   // Whole multi-selection move: `anchor` names the snap-anchor landmark (nearest
   // centroid / corner / free joint to the grab). Its world position is re-read live
   // each move — a stored position would go stale if a sketch solve nudged a member,
@@ -628,8 +673,8 @@ function dragAnchorWorld(d: LeftDrag): Vec2 {
     return r?.kind === "point" ? r.p : vec(0, 0);
   }
   if (d.kind === "rigid") return d.driver.target; // solver-driven; no snap anchor
-  if (d.kind === "guide") return scene.getGuide(d.id)!.a;
-  if (d.kind === "guidePoint") return scene.getGuide(d.id)![d.which];
+  if (d.kind === "guide") return guideAnchorWorld(scene.getGuide(d.id)!);
+  if (d.kind === "guidePoint") return scene.guidePointWorld(scene.getGuide(d.id)!, d.which) ?? vec(0, 0);
   // Fillet drags map the cursor to a radius directly (never snapped); the corner anchors.
   if (d.kind === "fillet") {
     const body = scene.getBody(d.bodyId)!;
@@ -895,9 +940,11 @@ function objSnapTargetsOf(
     });
   }
   for (const g of s.guides) {
-    points.push({ p: g.a, ref: { kind: "guidePoint", guideId: g.id, which: "a" } });
-    points.push({ p: g.b, ref: { kind: "guidePoint", guideId: g.id, which: "b" } });
-    lines.push({ a: g.a, b: g.b, infinite: true, ref: { kind: "guideLine", guideId: g.id } });
+    for (const which of s.guidePointKeys(g)) {
+      const q = s.guidePointWorld(g, which);
+      if (q) points.push({ p: q, ref: { kind: "guidePoint", guideId: g.id, which } });
+    }
+    for (const l of s.guideLines(g)) lines.push({ a: l.a, b: l.b, infinite: l.infinite, ref: guideLineRef(g.id, l.edge) });
   }
   return { points, lines };
 }
@@ -1767,8 +1814,14 @@ const HINTS: Record<Mode | Tool | "select" | "viewRotate", string> = {
   viewRotate: "Rotate the view: drag the ring or a crosshair arm to turn the whole picture (snaps to 5°, hold Shift for any angle) · type an exact angle in the box under the centre · double-click the centre for 0° · click elsewhere, Esc or Shift+R to close. The drawing itself does not change.",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
   select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · with a body selected, Shift+drag a box from empty space to select several of its corners / holes / joints (Ctrl+Shift adds) — drag any of them to move the set, Delete removes it, Ctrl+C copies its holes + joints (with their constraints) and Ctrl+V pastes them into the selected body at the cursor · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition (Ctrl+double-click shows the surrounding assembly faded in its frame — a context ghost to snap and dimension to; the breadcrumb eyes set how far out it reaches) · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
-  body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
-  hole: "Round hole: press inside a body and drag out the radius. Polygon hole: click inside a body to start a cut-out, then click more vertices (all inside that body); click the first vertex (or press Enter) to close it.",
+  polyline: "Click each corner; click the first corner again, double-click or press Enter to finish. Body role: start on existing joints to build a body around them (click a picked joint again to finish, then move out to set the margin and click).",
+  rect: "Click one corner, then the opposite corner — or press and drag. Shift for a square, Alt to draw from the centre.",
+  circle: "Click the centre, then a point on the rim — or press and drag the radius out.",
+  polygon: "Click the centre, then one corner — or press and drag. Sides: the toolbar field, or ↑ / ↓ while the tool is armed.",
+  slot: "Click where the slot starts and where it ends — or press and drag — then move out to set its width and click. (Reference role: the axis segment.)",
+  line: "Click two points for a reference segment — or press and drag. Points land on joints, corners and edges (a coincident holds them there).",
+  arc: "Click the arc's start and end points, then a point it should pass through.",
+  text: "Click where the label goes (on a body: the label rides with it), type the text and press Enter. Size: the toolbar field. Double-click a label later to edit it.",
   split: "Click a point on a body's outline (edge or corner) to start the cut, click inside to route it, then click the outline again to split the body in two along the path.",
   patternLinear: "Click a hole or a joint on a body to repeat it along a line.", // live stage hint: patternHint()
   patternCircular: "Click a hole or a joint on a body to repeat it around a centre.",
@@ -1815,6 +1868,7 @@ function updateHint(): void {
     : mode === "sim" ? HINTS.sim
     : tool === null ? HINTS.select
     : isPatternTool(tool) ? patternHint()
+    : isShapeTool(tool) ? shapeHint()
     : HINTS[tool];
   hintEl.textContent = containmentWarning() + base;
 }
@@ -1825,6 +1879,18 @@ document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((btn) => {
 });
 document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((btn) => {
   btn.addEventListener("click", () => setTool(btn.dataset.tool as Tool));
+});
+document.querySelectorAll<HTMLButtonElement>(".role-btn").forEach((btn) => {
+  btn.addEventListener("click", () => setRole(btn.dataset.role as ShapeRole));
+});
+polySidesInput.addEventListener("change", () => {
+  const n = parseInt(polySidesInput.value, 10);
+  setPolySides(Number.isFinite(n) ? n : polySides);
+});
+textSizeInput.addEventListener("change", () => {
+  const v = Number(textSizeInput.value);
+  if (Number.isFinite(v) && v > 0) textSize = v;
+  else textSizeInput.value = String(textSize);
 });
 document.getElementById("clear-btn")!.addEventListener("click", () => {
   if (mode === "sim") return;
@@ -2088,7 +2154,11 @@ function setTool(next: Tool): void {
   // Rotate operates on the current selection, so keep an existing body selection (lets
   // you grab one of its control nodes as the pivot right away) — or multi-selection /
   // group (so R then drag rotates the whole set) — when arming it.
-  const keepSel = next === "rotate" && selection?.kind === "body" ? selection : null;
+  // A shape tool armed in the Cut role keeps a selected body too: it is the cut's target.
+  const keepSel =
+    (next === "rotate" || (isShapeTool(next) && effectiveRole(next) === "cut")) && selection?.kind === "body"
+      ? selection
+      : null;
   const keepMulti = next === "rotate" ? multiSel : null;
   // Pattern works selection-first too: an already selected joint becomes the seed.
   const seedJoint = isPatternTool(next) && selection?.kind === "joint" ? selection.id : null;
@@ -2100,6 +2170,7 @@ function setTool(next: Tool): void {
   document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((b) =>
     b.classList.toggle("active", b.dataset.tool === tool)
   );
+  syncRoleButtons();
   updateHint();
 }
 
@@ -2110,17 +2181,16 @@ function disarmTool(): void {
   document
     .querySelectorAll<HTMLButtonElement>(".tool-btn")
     .forEach((b) => b.classList.remove("active"));
+  syncRoleButtons();
   updateHint();
 }
 
 function resetTransient(): void {
   closeDimEditor();
+  closeTextEditor();
   draftBody = [];
   draftBodySnaps = [];
-  holeDraft = [];
-  holeDraftBodyId = null;
-  holePress = null;
-  holeCircle = null;
+  clearShapeDraft();
   patternSeed = null;
   patternDraft = null;
   splitDraft = [];
@@ -3259,14 +3329,15 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
     }
     case "guidePoint": {
       const g = scene.getGuide(liveRef.guideId);
-      if (!g) return reject();
-      scene.moveGuidePoint(liveRef.guideId, liveRef.which, add(liveRef.which === "a" ? g.a : g.b, delta));
+      const q = g ? scene.guidePointWorld(g, liveRef.which) : null;
+      if (!g || !q) return reject();
+      scene.moveGuidePoint(liveRef.guideId, liveRef.which, add(q, delta));
       anchors.add(anchorVarForGuidePoint(liveRef.guideId, liveRef.which));
       break;
     }
     case "guideLine":
       scene.moveGuide(liveRef.guideId, delta);
-      for (const k of anchorVarsForGuide(liveRef.guideId)) anchors.add(k);
+      for (const k of anchorVarsForGuide(scene, liveRef.guideId)) anchors.add(k);
       break;
     default:
       return reject(); // a pattern axis is derived geometry — edit the pattern instead
@@ -3698,12 +3769,19 @@ function handleDrawClick(p: Vec2): void {
   // The body tool spans many clicks, so it disarms itself in finishBody().
   let placed = false;
   switch (tool) {
-    case "body":
-      handleBodyClick(p);
+    case "polyline":
+      // Spans many clicks; disarms itself in finishPolyline() / finalizeJointBody().
+      handlePolylineClick(p);
       break;
-    case "hole":
-      // Spans many clicks like the body tool; disarms itself in finishHole().
-      handleHoleClick(p);
+    case "rect":
+    case "circle":
+    case "polygon":
+    case "slot":
+    case "line":
+    case "arc":
+    case "text":
+      // Two or three clicks (or a press-and-drag); commit in the effective role.
+      handleShapeClick(p);
       break;
     case "split":
       // Spans many clicks too; disarms itself when the cut lands back on the outline.
@@ -4066,8 +4144,13 @@ function constraintPointRefAt(p: Vec2, excludeGuide?: number): MeasureRef | null
   const v = bodyVertexRefAt(p);
   if (v) return v;
   const gp = scene.guidePointAt(p, pickRadius(), excludeGuide);
-  if (gp) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
+  if (gp && scene.guidePointIsRef(gp.guide, gp.which)) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
   return null;
+}
+
+/** A line reference onto a guide: the infinite line (edge null) or a polyline edge. */
+function guideLineRef(guideId: number, edge: number | null): MeasureRef {
+  return edge === null ? { kind: "guideLine", guideId } : { kind: "guideLine", guideId, edge };
 }
 
 /** Topmost body control vertex — outer outline or hole — within pick range, as a ref. */
@@ -4123,8 +4206,8 @@ function constraintLineRefAt(p: Vec2): MeasureRef | null {
   if (edge) return edge;
   const pax = patternAxisRefAt(p);
   if (pax) return pax;
-  const gl = scene.guideAt(p, pickRadius());
-  if (gl) return { kind: "guideLine", guideId: gl.id };
+  const gl = scene.guideLineAt(p, pickRadius());
+  if (gl) return guideLineRef(gl.guide.id, gl.edge);
   return null;
 }
 
@@ -4330,7 +4413,7 @@ function dragAnchorVars(): Set<string> | undefined {
         for (const id of leftDrag.joints) keys.push(...anchorVarsForJoint(scene, id));
         break;
       case "guide":
-        keys.push(...anchorVarsForGuide(leftDrag.id));
+        keys.push(...anchorVarsForGuide(scene, leftDrag.id));
         break;
       case "guidePoint":
         keys.push(anchorVarForGuidePoint(leftDrag.id, leftDrag.which));
@@ -4512,7 +4595,7 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   // Guides are draw-mode-only aids (invisible in sim), so only draw-mode picks see them.
   if (mode === "draw") {
     const gp = scene.guidePointAt(p, pickRadius());
-    if (gp) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
+    if (gp && scene.guidePointIsRef(gp.guide, gp.which)) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
   }
   const s = scene.sliderAt(p, pickRadius());
   if (s) return { kind: "rail", sliderId: s.id };
@@ -4521,8 +4604,8 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   if (mode === "draw") {
     const pax = patternAxisRefAt(p);
     if (pax) return pax;
-    const gl = scene.guideAt(p, pickRadius());
-    if (gl) return { kind: "guideLine", guideId: gl.id };
+    const gl = scene.guideLineAt(p, pickRadius());
+    if (gl) return guideLineRef(gl.guide.id, gl.edge);
   }
   const body = scene.bodyAt(p);
   if (body) {
@@ -5411,12 +5494,148 @@ function snapAngle(a: number): number {
   return Math.abs(wrapAngle(a - nearest)) < ROTATE_SNAP_TOL ? nearest : a;
 }
 
+// --- shape tools (polyline / rectangle / circle / regular polygon / slot / line / arc / text) ---
+// Every shape tool draws role-neutral geometry; the armed **role** decides what the
+// finished shape becomes: a Body, a Cut out of the body under it, or Reference
+// geometry. Line, arc and text are reference-only. The role is sticky (toolbar switch,
+// 1 / 2 / 3); Ctrl on a shape's first click flips Body ↔ Cut for that one shape.
+
+/** Whether `t` is a shape tool (draws geometry the role interprets). */
+const isShapeTool = (t: Tool | null): t is ShapeTool =>
+  t !== null && (SHAPE_TOOLS as readonly string[]).includes(t);
+
+/** The role the next finished shape takes: reference-only tools force Reference. */
+function effectiveRole(t: Tool | null = tool): ShapeRole {
+  if (t !== null && REFERENCE_ONLY.has(t)) return "reference";
+  return roleOverride ?? shapeRole;
+}
+
+function setRole(r: ShapeRole): void {
+  shapeRole = r;
+  roleOverride = null;
+  syncRoleButtons();
+  updateHint();
+}
+
+/** Toolbar role switch: shows the effective role (dimmed when a reference-only tool forces it). */
+function syncRoleButtons(): void {
+  const eff = effectiveRole();
+  const forced = tool !== null && REFERENCE_ONLY.has(tool);
+  document.querySelectorAll<HTMLButtonElement>(".role-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.role === eff);
+    b.classList.toggle("forced", forced);
+  });
+  shapePropsGroup.classList.toggle("hidden", tool !== "polygon" && tool !== "text");
+  polySidesLabel.classList.toggle("hidden", tool !== "polygon");
+  textSizeLabel.classList.toggle("hidden", tool !== "text");
+}
+
+function setPolySides(n: number): void {
+  polySides = Math.max(3, Math.min(64, Math.round(n)));
+  polySidesInput.value = String(polySides);
+}
+
+/** Hint for the armed shape tool, prefixed by the role it will apply. */
+function shapeHint(): string {
+  const r = effectiveRole();
+  const what = r === "body" ? "Body" : r === "cut" ? "Cut" : "Reference";
+  const how = REFERENCE_ONLY.has(tool!)
+    ? " (always reference geometry)"
+    : " — 1 / 2 / 3 or the toolbar switch the role; Ctrl on the first click flips Body ↔ Cut for this one shape";
+  return `${what}${how} · ${HINTS[tool!]}`;
+}
+
 /**
- * Body tool click. The first click decides the mode: on an existing joint → build a
- * body from joints; on empty space → freehand polygon. While building from joints,
- * each click adds a joint; once expanding, a click finalizes with the current margin.
+ * First click of a shape: capture the one-shot role override (Ctrl) and, for a Cut,
+ * the target body — the selected body if one is selected (select the plate, then cut),
+ * else the topmost body under the click; a cut started on empty space finds its body
+ * when it closes (the body containing the shape).
  */
-function handleBodyClick(p: Vec2): void {
+function beginShape(first: Vec2, ctrl = mods.ctrl): void {
+  const forced = tool !== null && REFERENCE_ONLY.has(tool);
+  roleOverride = ctrl && !forced ? (shapeRole === "cut" ? "body" : "cut") : null;
+  shapeTarget = null;
+  if (effectiveRole() === "cut") {
+    const sel = selection?.kind === "body" && !multiSel ? scene.getBody(selection.id) : undefined;
+    shapeTarget = (sel ?? scene.bodyAt(first))?.id ?? null;
+  }
+}
+
+/** Where a shape point lands (exactly on a picked point / projected onto a picked line / snapped). */
+function shapePointAt(p: Vec2): { at: Vec2; pick: MeasureRef | null } {
+  return guidePlacementAt(p);
+}
+
+/** A closed material shape as the Body / Cut roles consume it (a `HoleSpec`-shaped control polygon). */
+type ShapeSpec = { control: Vec2[]; radius: number; round: RoundMode };
+
+/**
+ * Finish a closed shape in a material role. Body: a new body (freehand colour, clicked
+ * points coincident with what they landed on, near-H/V edges constrained). Cut: the
+ * shape is subtracted from the target body (see `Scene.cutBody`). Returns whether the
+ * shape was consumed — a refused cut explains why and leaves the tool armed.
+ */
+function commitMaterial(spec: ShapeSpec, snaps: (MeasureRef | null)[] = [], hv = true): boolean {
+  const r = effectiveRole();
+  if (r === "body") {
+    const body = scene.addBody(spec.control, spec.radius, spec.round);
+    body.color = defaultBodyColor;
+    for (let i = 0; i < snaps.length && i < spec.control.length; i++) {
+      const ref = snaps[i];
+      if (ref) tryAddConstraint(scene, "coincident", { kind: "vertex", bodyId: body.id, index: i }, ref);
+    }
+    if (hv && spec.round === "fillet") autoConstrainBody(scene, body.id);
+    markDirty();
+    disarmTool();
+    return true;
+  }
+  // Cut: the target picked at the first click, else the body the shape lies in.
+  let target = shapeTarget !== null ? scene.getBody(shapeTarget) : undefined;
+  if (!target) {
+    const loop = spec.round === "offset" ? roundedConvexBody(spec.control, spec.radius) : spec.control;
+    const centre = scale(loop.reduce((acc, q) => add(acc, q), vec(0, 0)), 1 / Math.max(1, loop.length));
+    target = scene.bodyAt(centre) ?? loop.map((q) => scene.bodyAt(q)).find((b) => b !== undefined);
+  }
+  if (!target) {
+    notify("Nothing to cut here — draw the shape over a body (or select the body first).");
+    return false;
+  }
+  const res = scene.cutBody(target.id, spec);
+  if (!res.ok) {
+    notify(res.reason);
+    return false;
+  }
+  markDirty();
+  disarmTool();
+  selection = { kind: "body", id: target.id }; // show the new hole's / notch's handles right away
+  return true;
+}
+
+/** Finish a reference guide: select it and disarm. */
+function commitReference(g: Guide | null): boolean {
+  if (!g) return false;
+  markDirty();
+  disarmTool();
+  selection = { kind: "guide", id: g.id };
+  return true;
+}
+
+/** Clear the multi-point shape draft (the tool stays armed). */
+function clearShapeDraft(): void {
+  shapePts = [];
+  shapeSnaps = [];
+  shapePress = null;
+  shapeTarget = null;
+  roleOverride = null;
+}
+
+/**
+ * Polyline tool click. Body role, first click on an existing joint (or a rail) → build
+ * a body from joints (each click adds a joint; clicking one already picked starts the
+ * outward-margin phase; a click then finalizes). Otherwise: freehand vertices, closed by
+ * clicking the first one, double-clicking or Enter.
+ */
+function handlePolylineClick(p: Vec2): void {
   if (jointDraftExpanding) {
     finalizeJointBody(p);
     return;
@@ -5449,14 +5668,21 @@ function handleBodyClick(p: Vec2): void {
     return;
   }
   if (draftBody.length > 0) {
-    addBodyPoint(p); // already drawing a freehand polygon
+    addPolylinePoint(p); // already drawing a freehand polyline
     return;
   }
-  // Fresh start: a joint (or a slider rail) begins joint-build mode; empty space begins a
-  // freehand polygon.
-  const j = scene.jointAt(p, pickRadius());
-  if (j) jointDraftIds = [j.id];
-  else if (!addSliderRiderToDraft(p)) addBodyPoint(p);
+  // Fresh start.
+  beginShape(p);
+  if (effectiveRole() === "body") {
+    // A joint (or a slider rail) begins joint-build mode; anything else a freehand polygon.
+    const j = scene.jointAt(p, pickRadius());
+    if (j) {
+      jointDraftIds = [j.id];
+      return;
+    }
+    if (addSliderRiderToDraft(p)) return;
+  }
+  addPolylinePoint(p);
 }
 
 /**
@@ -5489,141 +5715,292 @@ function finalizeJointBody(p: Vec2): void {
   disarmTool();
 }
 
-function addBodyPoint(p: Vec2): void {
+function addPolylinePoint(p: Vec2): void {
   if (draftBody.length >= 3 && dist(p, draftBody[0]) < CLOSE_RADIUS / view.scale) {
-    finishBody();
+    finishPolyline();
     return;
   }
   // A click on an existing point (a joint or another body's corner) lands the vertex
   // exactly there and records the pick — finishing the draft turns it into a coincident
-  // auto-constraint. Otherwise freehand vertices land on the grid when snap is on.
-  const pick = constraintPointRefAt(p);
-  const picked = pick ? scene.resolveMeasureRef(pick) : null;
-  const at = picked && picked.kind === "point" ? picked.p : snap(p);
+  // auto-constraint; a click near an edge / rail projects onto it. Otherwise freehand
+  // vertices land on the grid when snap is on.
+  const { at, pick } = shapePointAt(p);
   // Ignore near-duplicate points (also de-dupes the 2nd click of a double-click).
   const last = draftBody[draftBody.length - 1];
   if (last && dist(at, last) < 4 / view.scale) return;
   draftBody.push(at);
-  draftBodySnaps.push(picked && picked.kind === "point" ? pick : null);
+  draftBodySnaps.push(pick);
 }
 
-function finishBody(): void {
-  if (draftBody.length >= 3) {
-    const body = scene.addBody(draftBody);
-    body.color = defaultBodyColor;
-    // Auto-constraints: clicked-on existing points become coincident; near-horizontal /
-    // near-vertical edges get H/V (each solved in as it's added; unsatisfiable ones are
-    // skipped). Control-vertex order matches the draft order, so indices line up.
-    for (let i = 0; i < draftBodySnaps.length; i++) {
-      const ref = draftBodySnaps[i];
-      if (ref) {
-        tryAddConstraint(scene, "coincident", { kind: "vertex", bodyId: body.id, index: i }, ref);
-      }
-    }
-    autoConstrainBody(scene, body.id);
+/**
+ * Close the polyline. Body / Cut: a polygon (≥ 3 points). Reference: a closed polygon
+ * with ≥ 3 points, a plain segment with 2. Fewer points just clear the draft.
+ */
+function finishPolyline(): void {
+  const pts = draftBody;
+  const snaps = draftBodySnaps;
+  const r = effectiveRole();
+  const done =
+    r === "reference"
+      ? pts.length >= 2 && commitReferencePoly(pts, pts.length >= 3, snaps)
+      : pts.length >= 3 && commitMaterial({ control: pts, radius: 0, round: "fillet" }, snaps);
+  if (!done) {
     draftBody = [];
     draftBodySnaps = [];
-    markDirty();
-    disarmTool();
-    return;
+    clearShapeDraft();
   }
-  draftBody = [];
-  draftBodySnaps = [];
+}
+
+/** A reference polyline / polygon whose clicked points stick to what they landed on. */
+function commitReferencePoly(pts: Vec2[], closed: boolean, snaps: (MeasureRef | null)[]): boolean {
+  const g = scene.addGuidePoly(pts, closed);
+  if (!g) return false;
+  for (let i = 0; i < snaps.length && i < pts.length; i++) {
+    const ref = snaps[i];
+    if (ref) tryAddConstraint(scene, "coincident", { kind: "guidePoint", guideId: g.id, which: String(i) }, ref);
+  }
+  return commitReference(g);
+}
+
+/** Rectangle corners from a first corner and the opposite one: Shift squares it, Alt draws from the centre. */
+function rectCorners(a: Vec2, b: Vec2): Vec2[] {
+  let d = sub(b, a);
+  if (mods.shift) {
+    const m = Math.max(Math.abs(d.x), Math.abs(d.y));
+    d = vec((d.x < 0 ? -1 : 1) * m, (d.y < 0 ? -1 : 1) * m);
+  }
+  if (mods.alt) return [sub(a, d), vec(a.x + d.x, a.y - d.y), add(a, d), vec(a.x - d.x, a.y + d.y)];
+  return [a, vec(a.x + d.x, a.y), add(a, d), vec(a.x, a.y + d.y)];
+}
+
+/** `n` points around a circle (preview / reference sampling). */
+function circlePoints(c: Vec2, r: number, n = 64): Vec2[] {
+  const out: Vec2[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * Math.PI * 2;
+    out.push(vec(c.x + r * Math.cos(t), c.y + r * Math.sin(t)));
+  }
+  return out;
+}
+
+/** Slot width from the cursor: twice its distance to the axis a–b (at least the joint-body minimum). */
+function slotWidthAt(a: Vec2, b: Vec2, p: Vec2): number {
+  return Math.max(JOINT_BODY_MIN_MARGIN * 2, 2 * distToLine(p, a, normalize(sub(b, a))));
 }
 
 /**
- * Hole tool: the first click picks the body to cut (topmost under the cursor) and
- * starts a freehand cut-out polygon; later clicks add vertices, each kept inside that
- * body. Clicking the first vertex (or Enter) closes the hole.
+ * Click for the point-defined shape tools (rectangle, circle, regular polygon, slot,
+ * line, arc, text). The first click starts the shape (see `beginShape`); the last one
+ * commits it in the effective role. Points land like polyline vertices.
  */
-function handleHoleClick(p: Vec2): void {
-  if (holeDraftBodyId === null) {
-    const body = scene.bodyAt(p);
-    if (!body) return; // a hole needs a body — keep the tool armed
-    if (scene.instanceOfBody(body.id)) {
-      notify("This body belongs to a component instance — edit the definition to cut a hole in it.");
-      disarmTool();
+function handleShapeClick(p: Vec2): void {
+  if (tool === "text") {
+    if (textEdit) return; // typing already
+    const { at } = shapePointAt(p);
+    const bodyId = scene.bodyAt(p)?.id ?? null;
+    // Deferred past the mousedown's default action, which would blur the field straight away.
+    setTimeout(() => { if (tool === "text" && !textEdit) openTextEditor(at, bodyId, null); }, 0);
+    return;
+  }
+  const { at, pick } = shapePointAt(p);
+  if (shapePts.length === 0) {
+    beginShape(p);
+    shapePts = [at];
+    shapeSnaps = [pick];
+    return;
+  }
+  const a = shapePts[0];
+  const tiny = 4 / view.scale;
+  switch (tool) {
+    case "rect": {
+      const corners = rectCorners(a, at);
+      if (Math.abs(at.x - a.x) < tiny || Math.abs(at.y - a.y) < tiny) return; // degenerate — wait
+      if (effectiveRole() === "reference") commitReferencePoly(corners, true, [shapeSnaps[0]]);
+      else commitMaterial({ control: corners, radius: 0, round: "fillet" }, mods.alt ? [] : [shapeSnaps[0]]);
       return;
     }
-    holeDraftBodyId = body.id;
-  }
-  if (holeDraft.length >= 3 && dist(p, holeDraft[0]) < CLOSE_RADIUS / view.scale) {
-    finishHole();
-    return;
-  }
-  const body = scene.getBody(holeDraftBodyId);
-  if (!body) { disarmTool(); return; }
-  // Snap to the grid — unless snapping would land outside the body being cut, in which
-  // case the exact click point is used; a click outside the body is ignored entirely.
-  let at = snap(p);
-  if (!scene.pointInBody(body, at)) at = p;
-  if (!scene.pointInBody(body, at)) return;
-  // Ignore near-duplicate points (also de-dupes the 2nd click of a double-click).
-  const last = holeDraft[holeDraft.length - 1];
-  if (last && dist(at, last) < 4 / view.scale) return;
-  holeDraft.push(at);
-}
-
-/**
- * Hole tool press with nothing drawn yet: pick the body (topmost under the cursor; an
- * instance body is refused) and remember the snapped centre. A drag from here sizes a
- * round hole (mousemove); a plain release adds the polygon's first vertex instead.
- * The centre object-snaps (a hole centred on a joint or a corner) with the usual
- * containment fallback: a snap that would leave the body uses the exact press point.
- */
-function startHolePress(p: Vec2, screen: Vec2): void {
-  const body = scene.bodyAt(p);
-  if (!body) return; // a hole needs a body — keep the tool armed
-  if (scene.instanceOfBody(body.id)) {
-    notify("This body belongs to a component instance — edit the definition to cut a hole in it.");
-    disarmTool();
-    return;
-  }
-  let centre = placeSnap(p);
-  if (!scene.pointInBody(body, centre)) centre = p;
-  holePress = { bodyId: body.id, centre, screen, maxR: scene.bodyInscribedRadius(body, centre) };
-  holeCircle = null;
-}
-
-/**
- * Release of a hole-tool press: a dragged circle becomes a parametric disk hole (one
- * offset-mode control point + radius — resizable by its rim handle, movable by its
- * centre node, dimensionable by diameter); an undragged press starts the polygon.
- */
-function finishHolePress(): void {
-  const press = holePress;
-  const circle = holeCircle;
-  holePress = null;
-  holeCircle = null;
-  if (!press) return;
-  const body = scene.getBody(press.bodyId);
-  if (!body) return;
-  if (circle) {
-    // Too small to be a hole (a twitch): drop it, keep the tool armed.
-    if (circle.r < HOLE_DRAG_PX / view.scale) return;
-    if (scene.addBodyHole(body.id, { control: [circle.c], radius: circle.r, round: "offset" }) !== null) {
-      markDirty();
-      disarmTool();
-      selection = { kind: "body", id: body.id }; // show the new hole's handles right away
+    case "circle": {
+      const r = dist(a, at);
+      if (r < tiny) return;
+      if (effectiveRole() === "reference") commitReference(scene.addGuideCircle(a, r));
+      else commitMaterial({ control: [a], radius: r, round: "offset" });
+      return;
     }
-    return;
+    case "polygon": {
+      if (dist(a, at) < tiny) return;
+      const pts = regularPolygon(a, at, polySides);
+      if (effectiveRole() === "reference") commitReferencePoly(pts, true, [shapeSnaps[0]]);
+      else commitMaterial({ control: pts, radius: 0, round: "fillet" }, [shapeSnaps[0]]);
+      return;
+    }
+    case "line": {
+      if (dist(a, at) < tiny) return;
+      commitReferencePoly([a, at], false, [shapeSnaps[0], pick]);
+      return;
+    }
+    case "slot": {
+      if (shapePts.length === 1) {
+        if (dist(a, at) < tiny) return;
+        shapePts.push(at);
+        shapeSnaps.push(pick);
+        // Reference role: the slot's axis is the reference (no width to set).
+        if (effectiveRole() === "reference") commitReferencePoly([a, at], false, shapeSnaps);
+        return;
+      }
+      const b = shapePts[1];
+      const w = slotWidthAt(a, b, p);
+      commitMaterial({ control: [a, b], radius: w / 2, round: "offset" }, shapeSnaps, false);
+      return;
+    }
+    case "arc": {
+      if (shapePts.length === 1) {
+        if (dist(a, at) < tiny) return;
+        shapePts.push(at);
+        shapeSnaps.push(pick);
+        return;
+      }
+      const g = scene.addGuideArc(a, at, shapePts[1]);
+      if (!g) return; // collinear — wait for a point off the chord
+      for (const [which, ref] of [["a", shapeSnaps[0]], ["b", shapeSnaps[1]], ["m", pick]] as const) {
+        if (ref) tryAddConstraint(scene, "coincident", { kind: "guidePoint", guideId: g.id, which }, ref);
+      }
+      commitReference(g);
+      return;
+    }
   }
-  holeDraftBodyId = body.id;
-  holeDraft.push(press.centre);
 }
 
-/** Close the hole draft: cut it into its body as an editable radius-0 hole outline. */
-function finishHole(): void {
-  const bodyId = holeDraftBodyId;
-  if (bodyId !== null && holeDraft.length >= 3 && scene.addBodyHole(bodyId, holeDraft) !== null) {
-    markDirty();
-    disarmTool();
-    selection = { kind: "body", id: bodyId }; // show the new hole's handles right away
+/** Two-point tools also take a press-and-drag: the press is the first point once the
+ *  pointer has clearly moved, the release the second (see mousedown / mousemove / mouseup). */
+const isDragShapeTool = (t: Tool | null): boolean =>
+  t === "rect" || t === "circle" || t === "polygon" || t === "slot" || t === "line";
+
+/** The shape preview for the renderer, in the effective role's style (see RenderInput.shapeDraft). */
+function shapeDraftView(): RenderInput["shapeDraft"] {
+  if (mode !== "draw" || !isShapeTool(tool)) return null;
+  const d: NonNullable<RenderInput["shapeDraft"]> = {
+    role: effectiveRole(),
+    fill: defaultBodyColor,
+    outline: [],
+    closed: false,
+    points: [],
+    aux: [],
+    text: null,
+    target: shapeTarget,
+  };
+  const cur = cursor ? shapePointAt(cursor).at : null;
+  const a = shapePts[0];
+  switch (tool) {
+    case "polyline":
+      if (draftBody.length) {
+        d.outline = cur ? [...draftBody, cur] : [...draftBody];
+        d.points = [...draftBody];
+      }
+      break;
+    case "rect":
+      if (a && cur) {
+        d.outline = rectCorners(a, cur);
+        d.closed = true;
+        d.points = [a];
+      }
+      break;
+    case "circle":
+      if (a && cur) {
+        d.outline = circlePoints(a, dist(a, cur));
+        d.closed = true;
+        d.aux = [[a, cur]];
+        d.points = [a];
+      }
+      break;
+    case "polygon":
+      if (a && cur) {
+        d.outline = regularPolygon(a, cur, polySides);
+        d.closed = true;
+        d.aux = [[a, cur]];
+        d.points = [a];
+      }
+      break;
+    case "slot":
+      if (a && shapePts.length === 1 && cur) {
+        d.outline = [a, cur];
+        d.points = [a];
+      } else if (shapePts.length >= 2 && cursor) {
+        const b = shapePts[1];
+        d.outline = roundedConvexBody([a, b], slotWidthAt(a, b, cursor) / 2);
+        d.closed = true;
+        d.aux = [[a, b]];
+        d.points = [a, b];
+      }
+      break;
+    case "line":
+      if (a && cur) {
+        d.outline = [a, cur];
+        d.points = [a];
+      }
+      break;
+    case "arc":
+      if (a && shapePts.length === 1 && cur) {
+        d.outline = [a, cur];
+        d.points = [a];
+      } else if (shapePts.length >= 2 && cur) {
+        const b = shapePts[1];
+        const arc = arcThrough(a, cur, b);
+        d.outline = arc ? sampleArc(arc, 48) : [a, cur, b];
+        d.aux = [[a, b]];
+        d.points = [a, b];
+      }
+      break;
+    case "text":
+      break;
+  }
+  return d;
+}
+
+// --- text labels: inline editor -------------------------------------------------------
+const textEditInput = document.getElementById("text-edit") as HTMLInputElement;
+/** The label being typed: where it goes (and the body it rides), or the existing label being edited. */
+let textEdit: { at: Vec2; bodyId: number | null; guideId: number | null } | null = null;
+
+function openTextEditor(at: Vec2, bodyId: number | null, guideId: number | null, initial = ""): void {
+  closeDimEditor();
+  textEdit = { at, bodyId, guideId };
+  const sp = worldToScreen(view, at);
+  textEditInput.style.left = `${sp.x}px`;
+  textEditInput.style.top = `${sp.y}px`;
+  textEditInput.value = initial;
+  textEditInput.classList.remove("hidden");
+  textEditInput.focus();
+  textEditInput.select();
+}
+
+function closeTextEditor(): void {
+  textEdit = null;
+  textEditInput.classList.add("hidden");
+  textEditInput.blur();
+}
+
+/** Enter / blur: create the label (Text tool) or rewrite the edited one. Empty text does nothing. */
+function commitTextEditor(): void {
+  const te = textEdit;
+  const raw = textEditInput.value;
+  closeTextEditor(); // nulls textEdit first, so the blur listener doesn't re-commit
+  if (!te) return;
+  if (te.guideId !== null) {
+    if (raw.trim() && scene.setGuideText(te.guideId, raw)) markDirty();
     return;
   }
-  holeDraft = [];
-  holeDraftBodyId = null;
+  if (!raw.trim()) return; // nothing typed — the tool stays armed
+  commitReference(scene.addGuideText(te.at, raw, textSize, te.bodyId));
 }
+
+textEditInput.addEventListener("keydown", (e) => {
+  e.stopPropagation(); // keep canvas shortcuts (tools, Delete…) out of the text field
+  if (e.key === "Enter") commitTextEditor();
+  else if (e.key === "Escape") closeTextEditor();
+});
+textEditInput.addEventListener("blur", () => {
+  if (textEdit) commitTextEditor();
+});
 
 // --- pattern tools ---------------------------------------------------------------
 const PATTERN_DEFAULT_LINEAR_COUNT = 3;
@@ -6094,6 +6471,7 @@ function combineSelection(): void {
 canvas.addEventListener("mousedown", (e) => {
   const world = eventWorld(e);
   cursor = world;
+  mods = { shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey };
 
   if (e.button === 2) {
     // Right button always pans the view.
@@ -6248,11 +6626,11 @@ canvas.addEventListener("mousedown", (e) => {
               kind: "guidePoint",
               id: g.id,
               which: gp.which,
-              grabOffset: sub(world, g[gp.which]),
+              grabOffset: sub(world, scene.guidePointWorld(g, gp.which)!),
               moved: false,
             };
           } else {
-            leftDrag = { kind: "guide", id: g.id, grabOffset: sub(world, g.a), moved: false };
+            leftDrag = { kind: "guide", id: g.id, grabOffset: sub(world, guideAnchorWorld(g)), moved: false };
           }
           canvas.style.cursor = "move";
         } else if (multiHitAt(world)) {
@@ -6263,10 +6641,11 @@ canvas.addEventListener("mousedown", (e) => {
           boxSelect = { start: world, end: world, additive: false, moved: false };
         }
       }
-    } else if (tool === "hole" && holeDraft.length === 0) {
-      // Hole tool, nothing drawn yet: the press may become a round-hole drag (centre →
-      // rim), so the polygon's first vertex waits for the release (see mouseup).
-      startHolePress(world, eventScreen(e));
+    } else if (isDragShapeTool(tool) && shapePts.length === 0) {
+      // Two-point shape tool, nothing placed yet: the press may become a drag (first
+      // point → second point), so the first point waits for the release (see mouseup).
+      const { at, pick } = shapePointAt(world);
+      shapePress = { screen: eventScreen(e), at, pick, ctrl: mods.ctrl, dragging: false };
     } else {
       handleDrawClick(world);
     }
@@ -6305,6 +6684,7 @@ canvas.addEventListener("mousedown", (e) => {
 canvas.addEventListener("mousemove", (e) => {
   const world = eventWorld(e);
   cursor = world;
+  mods = { shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey };
 
   if (pan) {
     const s = eventScreen(e);
@@ -6328,13 +6708,14 @@ canvas.addEventListener("mousemove", (e) => {
     return;
   }
 
-  if (holePress) {
-    // Round-hole gesture: once the pointer has clearly moved, the press is a circle drag
-    // — the radius runs from the centre to the (grid-snapped) cursor, clamped so the
-    // disk stays inside the body's material.
-    if (holeCircle || dist(eventScreen(e), holePress.screen) > HOLE_DRAG_PX) {
-      const r = Math.min(holePress.maxR, dist(holePress.centre, snap(world)));
-      holeCircle = { c: holePress.centre, r };
+  if (shapePress) {
+    // Press-and-drag shape: once the pointer has clearly moved, the press is the first
+    // point (the preview then follows the cursor as the second).
+    if (!shapePress.dragging && dist(eventScreen(e), shapePress.screen) > SHAPE_DRAG_PX) {
+      shapePress.dragging = true;
+      beginShape(shapePress.at, shapePress.ctrl);
+      shapePts = [shapePress.at];
+      shapeSnaps = [shapePress.pick];
     }
     return;
   }
@@ -6517,7 +6898,17 @@ window.addEventListener("mouseup", (e) => {
     viewRotate.drag = null;
     canvas.style.cursor = viewRotate.hot ? "grab" : "default";
   }
-  if (e.button === 0 && holePress) finishHolePress();
+  if (e.button === 0 && shapePress) {
+    const press = shapePress;
+    shapePress = null;
+    if (press.dragging) handleShapeClick(eventWorld(e)); // the release is the second point
+    else {
+      // A plain click: the first point, placed now (the click flow continues on the next click).
+      beginShape(press.at, press.ctrl);
+      shapePts = [press.at];
+      shapeSnaps = [press.pick];
+    }
+  }
   if (e.button === 2 && pan) {
     pan = null;
     canvas.style.cursor = defaultCursor();
@@ -6603,13 +6994,8 @@ canvas.addEventListener("dblclick", (e) => {
   featureSel = null; // a node / edge edit shifts vertex indices — the feature selection can't follow
   // Freehand polygons still close on double-click; joint-built bodies finish by
   // clicking a previously-added node (handled in handleBodyClick).
-  if (mode === "draw" && tool === "body" && jointDraftIds.length === 0) {
-    finishBody();
-    return;
-  }
-  // A hole draft closes on double-click too (the second click was de-duped as a vertex).
-  if (mode === "draw" && tool === "hole") {
-    finishHole();
+  if (mode === "draw" && tool === "polyline" && jointDraftIds.length === 0) {
+    finishPolyline();
     return;
   }
   // Select mode: double-click a draw-mode dimension label to edit its value inline
@@ -6631,6 +7017,14 @@ canvas.addEventListener("dblclick", (e) => {
     if (ml) {
       leftDrag = null; // the double-click's mousedowns started a label drag — cancel it
       openDimEditor(ml);
+      return;
+    }
+    // Double-click a text label to edit its text in place.
+    const tg = scene.guideAt(eventWorld(e), pickRadius());
+    if (tg && tg.kind === "text") {
+      leftDrag = null;
+      const at = scene.guideTextWorld(tg);
+      if (at) openTextEditor(at.p, null, tg.id, tg.text);
       return;
     }
     // Double-click a component instance to open its definition for editing — through
@@ -6691,10 +7085,9 @@ canvas.addEventListener("dblclick", (e) => {
 });
 
 /** Draw-tool shortcuts: mostly the first letter of the tool's name (L = guideLine —
- *  G is Ground; the actuator moved to A when L was given to guidelines). */
+ *  G is Ground; the actuator moved to A when L was given to guidelines). B and U are
+ *  presets handled in the key handler: the polyline tool in the Body / Cut role. */
 const TOOL_KEYS: Record<string, Tool> = {
-  b: "body",
-  u: "hole", // cUt-out (H is the horizontal constraint)
   i: "patternLinear", // repeat a hole / joint along one or two directions (Instances)
   q: "patternCircular", // ...or around a centre
   x: "split", // cut a body in two along a drawn path
@@ -6715,6 +7108,16 @@ const TOOL_KEYS: Record<string, Tool> = {
   p: "parallel",
   t: "perpendicular",
   e: "equal",
+};
+/** Shift + letter: the point-defined shape tools (the plain letters were all taken). */
+const SHIFT_TOOL_KEYS: Record<string, Tool> = {
+  b: "rect", // Box
+  c: "circle",
+  p: "polygon",
+  s: "slot",
+  l: "line", // a finite segment (plain L is the infinite guideline)
+  a: "arc",
+  t: "text",
 };
 
 window.addEventListener("keydown", (e) => {
@@ -6841,12 +7244,20 @@ window.addEventListener("keydown", (e) => {
     if (idle && mode === "draw" && editPath.length > 0) exitComponent(1);
     return;
   }
-  if (e.key === "Enter" && mode === "draw" && tool === "body") {
-    finishBody();
+  if (e.key === "Enter" && mode === "draw" && tool === "polyline") {
+    finishPolyline();
     return;
   }
-  if (e.key === "Enter" && mode === "draw" && tool === "hole") {
-    finishHole();
+  // Shape roles: 1 Body, 2 Cut, 3 Reference (draw mode).
+  if (mode === "draw" && !mod && !e.altKey && (e.key === "1" || e.key === "2" || e.key === "3")) {
+    setRole(e.key === "1" ? "body" : e.key === "2" ? "cut" : "reference");
+    e.preventDefault();
+    return;
+  }
+  // Regular polygon: ↑ / ↓ change the side count while the tool is armed.
+  if (mode === "draw" && tool === "polygon" && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    setPolySides(polySides + (e.key === "ArrowUp" ? 1 : -1));
+    e.preventDefault();
     return;
   }
   if (e.key === "Enter" && mode === "draw" && isPatternTool(tool)) {
@@ -6905,7 +7316,23 @@ window.addEventListener("keydown", (e) => {
   }
   // Tool shortcuts (draw mode only; ignore browser/OS modifier combos).
   if (mode === "draw" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    const t = TOOL_KEYS[e.key.toLowerCase()];
+    const key = e.key.toLowerCase();
+    if (e.shiftKey) {
+      const st = SHIFT_TOOL_KEYS[key];
+      if (st) {
+        setTool(st);
+        e.preventDefault();
+      }
+      return;
+    }
+    if (key === "b" || key === "u") {
+      // Presets: B draws a body, U cuts (a polyline in the Body / Cut role).
+      setRole(key === "b" ? "body" : "cut");
+      setTool("polyline");
+      e.preventDefault();
+      return;
+    }
+    const t = TOOL_KEYS[key];
     if (t) {
       setTool(t);
       e.preventDefault();
@@ -7183,7 +7610,7 @@ function activeJoints(): number[] {
   if (tool === "connect") return selectedJoint !== null ? [selectedJoint] : [];
   if (tool === "rail") return railDraftIds;
   if (tool === "slider") return sliderDraft?.riderId !== null && sliderDraft?.riderId !== undefined ? [sliderDraft.riderId] : [];
-  if (tool === "body") return jointDraftIds;
+  if (tool === "polyline") return jointDraftIds;
   if (tool === "motor") return motorPivotDraft !== null ? [motorPivotDraft] : [];
   return [];
 }
@@ -7201,6 +7628,11 @@ function railDraftView(): { rail: Vec2[]; cursor: Vec2 } | null {
  *  centres) first, then the grid — the same landing as a Joint-tool placement. */
 function sliderEndAt(p: Vec2): Vec2 {
   return placeSnap(p);
+}
+
+/** The point a whole-guide drag is anchored on (its first handle). */
+function guideAnchorWorld(g: Guide): Vec2 {
+  return scene.guidePointWorld(g, scene.guideHandleKeys(g)[0]) ?? vec(0, 0);
 }
 
 /** Guide tool: the first defining point placed, with the live cursor (line preview,
@@ -7287,7 +7719,7 @@ function sketchRefKey(ref: MeasureRef): string {
     case "edge": return `e:${ref.bodyId}:${ref.index}${ref.hole !== undefined ? `:${ref.hole}` : ""}`;
     case "rail": return `r:${ref.sliderId}`;
     case "guidePoint": return `gp:${ref.guideId}:${ref.which}`;
-    case "guideLine": return `gl:${ref.guideId}`;
+    case "guideLine": return `gl:${ref.guideId}${ref.edge !== undefined ? `:${ref.edge}` : ""}`;
     case "patternAxis": return `px:${ref.patternId}:${ref.axis}`;
     default: return "?";
   }
@@ -7311,7 +7743,7 @@ function refHovered(ref: MeasureRef, p: Vec2): boolean {
   if (ref.kind === "guideLine" || ref.kind === "guidePoint") {
     const g = scene.getGuide(ref.guideId);
     if (!g) return false;
-    return distToLine(p, g.a, normalize(sub(g.b, g.a))) <= r || dist(g.a, p) <= r || dist(g.b, p) <= r;
+    return scene.guideAt(p, r)?.id === g.id || scene.guidePointAt(p, r)?.guide.id === g.id;
   }
   return false;
 }
@@ -7450,7 +7882,7 @@ function sketchDraftView(): { refs: ResolvedMeasureRef[]; hover: ResolvedMeasure
 
 /** Body-from-joints overlay: the picked-joint outline, plus the expanded preview when sizing. */
 function bodyJointDraftView(): { outline: Vec2[]; preview: Vec2[] | null } | null {
-  if (mode !== "draw" || tool !== "body" || jointDraftIds.length === 0) return null;
+  if (mode !== "draw" || tool !== "polyline" || jointDraftIds.length === 0) return null;
   const outline = jointDraftIds.map((id) => scene.jointWorld(scene.getJoint(id)!));
   let preview: Vec2[] | null = null;
   if (jointDraftExpanding && cursor) {
@@ -7514,17 +7946,10 @@ function renderInput(): RenderInput {
     scene,
     view,
     mode,
-    // The hole tool's cut-out draft previews through the same dashed-polyline channel;
-    // its round-hole drag previews as a dashed circle.
-    draftCircle: mode === "draw" && tool === "hole" ? holeCircle : null,
+    shapeDraft: shapeDraftView(),
     patternPreview: patternPreviewView(),
     patterns: patternViews(),
-    draftBody:
-      mode !== "draw" ? null
-      : tool === "body" ? draftBody
-      : tool === "hole" ? holeDraft
-      : tool === "split" ? splitDraft
-      : null,
+    draftBody: mode === "draw" && tool === "split" ? splitDraft : null,
     cursor,
     hoverJoint,
     hoverBody: mode === "draw" && tool === null ? hoverBody : null,

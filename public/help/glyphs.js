@@ -13,11 +13,20 @@ window.DISJOINTED_GLYPHS = {
  "autopause-btn": [
   "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"M10 3 L17 16 L3 16 Z\"></path><line x1=\"10\" y1=\"8\" x2=\"10\" y2=\"12.5\"></line><circle cx=\"10\" cy=\"14.5\" r=\"0.9\" fill=\"currentColor\" stroke=\"none\"></circle></svg>"
  ],
- "tool-body": [
-  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z\" fill=\"currentColor\" fill-opacity=\"0.18\"></path></svg>"
+ "tool-polyline": [
+  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"M3.5 15.5L7 5l4.5 6.5L16.5 4.5\"></path><circle cx=\"3.5\" cy=\"15.5\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle><circle cx=\"7\" cy=\"5\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle><circle cx=\"11.5\" cy=\"11.5\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle><circle cx=\"16.5\" cy=\"4.5\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle></svg>"
  ],
- "tool-hole": [
-  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z\" fill=\"currentColor\" fill-opacity=\"0.18\"></path><circle cx=\"9.5\" cy=\"9\" r=\"2.6\" stroke-dasharray=\"2.5 1.8\"></circle></svg>"
+ "tool-rect": [
+  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><rect x=\"3.5\" y=\"5\" width=\"13\" height=\"10\" rx=\"1\" fill=\"currentColor\" fill-opacity=\"0.18\"></rect></svg>"
+ ],
+ "tool-circle": [
+  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><circle cx=\"10\" cy=\"10\" r=\"6.5\" fill=\"currentColor\" fill-opacity=\"0.18\"></circle><circle cx=\"10\" cy=\"10\" r=\"0.9\" fill=\"currentColor\" stroke=\"none\"></circle></svg>"
+ ],
+ "tool-polygon": [
+  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"M10 3.5l5.6 3.25v6.5L10 16.5l-5.6-3.25v-6.5z\" fill=\"currentColor\" fill-opacity=\"0.18\"></path></svg>"
+ ],
+ "tool-slot": [
+  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><rect x=\"3\" y=\"7\" width=\"14\" height=\"6\" rx=\"3\" fill=\"currentColor\" fill-opacity=\"0.18\"></rect><circle cx=\"6\" cy=\"10\" r=\"0.9\" fill=\"currentColor\" stroke=\"none\"></circle><circle cx=\"14\" cy=\"10\" r=\"0.9\" fill=\"currentColor\" stroke=\"none\"></circle></svg>"
  ],
  "tool-patternLinear": [
   "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><circle cx=\"5\" cy=\"5\" r=\"2.2\" fill=\"currentColor\" fill-opacity=\"0.35\"></circle><circle cx=\"11\" cy=\"5\" r=\"2.2\" stroke-dasharray=\"2 1.6\"></circle><circle cx=\"17\" cy=\"5\" r=\"2.2\" stroke-dasharray=\"2 1.6\"></circle><circle cx=\"5\" cy=\"11\" r=\"2.2\" stroke-dasharray=\"2 1.6\"></circle><circle cx=\"5\" cy=\"17\" r=\"2.2\" stroke-dasharray=\"2 1.6\"></circle></svg>"
@@ -48,6 +57,15 @@ window.DISJOINTED_GLYPHS = {
  ],
  "tool-slider": [
   "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><line x1=\"3\" y1=\"10\" x2=\"17\" y2=\"10\"></line><line x1=\"3\" y1=\"7\" x2=\"3\" y2=\"13\"></line><line x1=\"17\" y1=\"7\" x2=\"17\" y2=\"13\"></line><rect x=\"6.5\" y=\"6.5\" width=\"7\" height=\"7\" rx=\"1.2\" fill=\"currentColor\" fill-opacity=\"0.18\"></rect><circle cx=\"10\" cy=\"10\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle></svg>"
+ ],
+ "tool-line": [
+  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><line x1=\"4\" y1=\"15.5\" x2=\"16\" y2=\"4.5\" stroke-dasharray=\"4 1.5 1 1.5\"></line><circle cx=\"4\" cy=\"15.5\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle><circle cx=\"16\" cy=\"4.5\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle></svg>"
+ ],
+ "tool-arc": [
+  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"M4 14.5A7.5 7.5 0 0 1 16 14.5\" stroke-dasharray=\"4 1.5 1 1.5\"></path><circle cx=\"4\" cy=\"14.5\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle><circle cx=\"16\" cy=\"14.5\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle><circle cx=\"10\" cy=\"6.9\" r=\"1.3\" fill=\"currentColor\" stroke=\"none\"></circle></svg>"
+ ],
+ "tool-text": [
+  "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"M5 5.5V4h10v1.5\"></path><path d=\"M10 4v12\"></path><path d=\"M7.5 16h5\"></path></svg>"
  ],
  "tool-guide": [
   "<svg viewBox=\"0 0 20 20\" aria-hidden=\"true\"><line x1=\"2.5\" y1=\"17.5\" x2=\"17.5\" y2=\"2.5\" stroke-dasharray=\"4 2\"></line><circle cx=\"7\" cy=\"13\" r=\"1.7\" fill=\"currentColor\" stroke=\"none\"></circle><circle cx=\"13\" cy=\"7\" r=\"1.7\" fill=\"currentColor\" stroke=\"none\"></circle></svg>"
@@ -155,8 +173,11 @@ window.DISJOINTED_GROUPS = {
   "autopause-btn"
  ],
  "tool-group": [
-  "tool-body",
-  "tool-hole",
+  "tool-polyline",
+  "tool-rect",
+  "tool-circle",
+  "tool-polygon",
+  "tool-slot",
   "tool-patternLinear",
   "tool-patternCircular",
   "tool-split",
@@ -167,6 +188,9 @@ window.DISJOINTED_GROUPS = {
   "tool-ground",
   "tool-rail",
   "tool-slider",
+  "tool-line",
+  "tool-arc",
+  "tool-text",
   "tool-guide"
  ],
  "edit-group": [

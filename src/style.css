@@ -300,6 +300,9 @@ input[type="number"] {
 #sketch-group.hidden,
 #actuator-props.hidden,
 #motor-props.hidden,
+#shape-props.hidden,
+#poly-sides-label.hidden,
+#text-size-label.hidden,
 #run-btn.hidden,
 #autopause-btn.hidden {
   display: none;
@@ -308,7 +311,8 @@ input[type="number"] {
 /* Inline dimension value editor: a small floating input over the double-clicked label.
    The view-rotation dial's angle box (under the dial centre) shares the look. */
 #dim-edit,
-#view-angle-edit {
+#view-angle-edit,
+#text-edit {
   position: absolute;
   width: 76px;
   padding: 4px 8px;
@@ -323,8 +327,54 @@ input[type="number"] {
   z-index: 5;
 }
 #dim-edit.hidden,
-#view-angle-edit.hidden {
+#view-angle-edit.hidden,
+#text-edit.hidden {
   display: none;
+}
+/* The label editor sits with its left edge on the anchor (text is baseline-left anchored). */
+#text-edit {
+  width: 180px;
+  text-align: left;
+  transform: translate(0, -50%);
+  border-color: #9aa0ac;
+}
+
+/* Shape role switch (Body / Cut / Reference): a segmented control like the actuator
+   profile toggle. `.forced` marks a reference-only tool holding it on Reference. */
+.role-toggle {
+  display: inline-flex;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-right: 4px;
+}
+.role-toggle button {
+  border: none;
+  border-radius: 0;
+  height: 32px;
+  padding: 0 9px;
+  font-size: 12px;
+  background: var(--control);
+  color: var(--text);
+}
+.role-toggle button + button {
+  border-left: 1px solid var(--panel-border);
+}
+.role-toggle button.active {
+  background: var(--accent-dim);
+  color: #fff;
+}
+.role-toggle button.active[data-role="cut"] {
+  background: #b9502e;
+}
+.role-toggle button.active[data-role="reference"] {
+  background: #6b7280;
+}
+.role-toggle button.forced {
+  opacity: 0.55;
+}
+.role-toggle button.forced.active {
+  opacity: 0.85;
 }
 
 /* Run-animation toggle: shows the play glyph when paused, pause glyph when running. */

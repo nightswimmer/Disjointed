@@ -44,11 +44,27 @@
           </label>
         </div>
         <div class="group" id="tool-group">
-          <button data-tool="body" class="tool-btn icon-btn" title="Draw a body (B)" aria-label="Body tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" fill="currentColor" fill-opacity="0.18"/></svg>
+          <!-- Shape role: what every shape tool's finished shape becomes. Sticky; 1 / 2 / 3;
+               Ctrl on a shape's first click flips Body ↔ Cut for that one shape. -->
+          <div class="role-toggle" id="role-group" role="group" aria-label="Shape role">
+            <button type="button" class="role-btn active" data-role="body" title="Body role — every shape you draw becomes a rigid body (1)">Body</button>
+            <button type="button" class="role-btn" data-role="cut" title="Cut role — every shape is subtracted from the body under it: a hole when it lies inside, a notch when it crosses the outline. Select the body first to choose the target (2)">Cut</button>
+            <button type="button" class="role-btn" data-role="reference" title="Reference role — every shape becomes construction geometry: dash-dot, snappable, measurable, never simulated or exported (3)">Ref</button>
+          </div>
+          <button data-tool="polyline" class="tool-btn icon-btn" title="Polyline — click the corners of a free shape; click the first corner again, double-click or press Enter to close. In the Body role, start on joints to build a body around them (B = body, U = cut)" aria-label="Polyline tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 15.5L7 5l4.5 6.5L16.5 4.5"/><circle cx="3.5" cy="15.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="7" cy="5" r="1.3" fill="currentColor" stroke="none"/><circle cx="11.5" cy="11.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.5" cy="4.5" r="1.3" fill="currentColor" stroke="none"/></svg>
           </button>
-          <button data-tool="hole" class="tool-btn icon-btn" title="Cut a hole in a body — click inside a body, then more vertices; click the first vertex or press Enter to close (U)" aria-label="Hole tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" fill="currentColor" fill-opacity="0.18"/><circle cx="9.5" cy="9" r="2.6" stroke-dasharray="2.5 1.8"/></svg>
+          <button data-tool="rect" class="tool-btn icon-btn" title="Rectangle — click two opposite corners, or press and drag; Shift for a square, Alt to draw from the centre (Shift+B)" aria-label="Rectangle tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="5" width="13" height="10" rx="1" fill="currentColor" fill-opacity="0.18"/></svg>
+          </button>
+          <button data-tool="circle" class="tool-btn icon-btn" title="Circle — click the centre, then a point on the rim; or press and drag the radius out (Shift+C)" aria-label="Circle tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="0.9" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button data-tool="polygon" class="tool-btn icon-btn" title="Regular polygon — click the centre, then one corner; or press and drag. Sides in the toolbar field, or ↑ / ↓ (Shift+P)" aria-label="Regular polygon tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5l5.6 3.25v6.5L10 16.5l-5.6-3.25v-6.5z" fill="currentColor" fill-opacity="0.18"/></svg>
+          </button>
+          <button data-tool="slot" class="tool-btn icon-btn" title="Slot — click where it starts and where it ends (or press and drag), then move out to set the width and click (Shift+S)" aria-label="Slot tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="14" height="6" rx="3" fill="currentColor" fill-opacity="0.18"/><circle cx="6" cy="10" r="0.9" fill="currentColor" stroke="none"/><circle cx="14" cy="10" r="0.9" fill="currentColor" stroke="none"/></svg>
           </button>
           <button data-tool="patternLinear" class="tool-btn icon-btn" title="Linear pattern — repeat a hole or a joint along one or two directions: click the hole / joint, then where the next instance goes; a second click adds a second direction (a grid). Count and spacing are edited on the canvas labels (I)" aria-label="Linear pattern tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="5" r="2.2" fill="currentColor" fill-opacity="0.35"/><circle cx="11" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="17" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="11" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="17" r="2.2" stroke-dasharray="2 1.6"/></svg>
@@ -80,9 +96,28 @@
           <button data-tool="slider" class="tool-btn icon-btn" title="Slider — click a body where the travel starts (that body moves), then click where it ends: the body slides along the arrow without rotating. Over another body the track rides that body, else it is fixed in the world. Click an existing rail to add a slider there, or a rider to toggle its rotation lock (S)" aria-label="Slider tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><rect x="6.5" y="6.5" width="7" height="7" rx="1.2" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="1.3" fill="currentColor" stroke="none"/></svg>
           </button>
+          <button data-tool="line" class="tool-btn icon-btn" title="Line — a reference segment: click two points, or press and drag; points land on joints / corners / edges (Shift+L)" aria-label="Line tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="15.5" x2="16" y2="4.5" stroke-dasharray="4 1.5 1 1.5"/><circle cx="4" cy="15.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16" cy="4.5" r="1.3" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button data-tool="arc" class="tool-btn icon-btn" title="Arc — a reference arc: click its start and end points, then a point it passes through (Shift+A)" aria-label="Arc tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 14.5A7.5 7.5 0 0 1 16 14.5" stroke-dasharray="4 1.5 1 1.5"/><circle cx="4" cy="14.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16" cy="14.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="10" cy="6.9" r="1.3" fill="currentColor" stroke="none"/></svg>
+          </button>
+          <button data-tool="text" class="tool-btn icon-btn" title="Text — a label: click where it goes (on a body it rides with that body), type, Enter. Double-click a label to edit it (Shift+T)" aria-label="Text tool">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5.5V4h10v1.5"/><path d="M10 4v12"/><path d="M7.5 16h5"/></svg>
+          </button>
           <button data-tool="guide" class="tool-btn icon-btn" title="Construction guideline — click two points to place an infinite line; points land on joints / corners / edges, and snapping prefers guidelines over the grid (L)" aria-label="Guideline tool">
             <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="2.5" y1="17.5" x2="17.5" y2="2.5" stroke-dasharray="4 2"/><circle cx="7" cy="13" r="1.7" fill="currentColor" stroke="none"/><circle cx="13" cy="7" r="1.7" fill="currentColor" stroke="none"/></svg>
           </button>
+        </div>
+        <div class="group hidden" id="shape-props">
+          <label class="select-label" id="poly-sides-label" title="Regular polygon: number of sides (3–64; ↑ / ↓ while the tool is armed)">
+            <span class="prop-tag">#</span>
+            <input id="poly-sides" type="number" min="3" max="64" step="1" value="6" />
+          </label>
+          <label class="select-label hidden" id="text-size-label" title="Text height, in working units">
+            <span class="prop-tag">T</span>
+            <input id="text-size" type="number" min="0.1" step="any" value="10" />
+          </label>
         </div>
         <div class="group" id="edit-group">
           <button data-tool="rotate" class="tool-btn icon-btn" title="Rotate a body about its centroid, or a node (drag); snaps to 45° (R)" aria-label="Rotate tool">
@@ -342,6 +377,9 @@
              Enter commits (drives the dimension); empty commits back to driven; Esc cancels. -->
         <input id="dim-edit" class="hidden" type="text" inputmode="decimal" autocomplete="off"
           aria-label="Dimension value" />
+        <!-- Inline text editor for a label (Text tool click, or double-click an existing label).
+             Enter commits, Esc cancels, empty text is ignored. -->
+        <input id="text-edit" class="hidden" type="text" autocomplete="off" aria-label="Label text" />
         <!-- View-rotation dial readout / editor (Shift+R): shows the view angle in degrees,
              Enter sets an exact value; hidden while the dial is closed. -->
         <input id="view-angle-edit" class="hidden" type="text" inputmode="decimal" autocomplete="off"

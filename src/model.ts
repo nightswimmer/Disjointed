@@ -28,8 +28,11 @@ import {
   pointInPolygon,
   closestPointOnPolygon,
   filletCornerArcs,
+  Arc,
+  arcThrough,
+  distToArc,
 } from "./geometry";
-import { unionRegions, segmentsCross, pointOnSegment, PolyRegion } from "./boolean";
+import { unionRegions, differenceRegions, segmentsCross, pointOnSegment, PolyRegion } from "./boolean";
 
 /**
  * A joint exactly coincident with a body control vertex is "stuck" to it — they move
@@ -218,6 +221,15 @@ export type SplitResult = { ok: true; a: Body; b: Body } | { ok: false; reason: 
 
 /** Outcome of `Scene.combineBodies`: the surviving (first) body, or why it was refused. */
 export type CombineResult = { ok: true; body: Body } | { ok: false; reason: string };
+/** Outcome of `Scene.cutBody`: `hole` is the new hole's index when the cut became a plain hole, else null. */
+export type CutResult = { ok: true; hole: number | null } | { ok: false; reason: string };
+
+/** A body's editable outline as the boolean tools see it (see `Scene.editableOutline`). */
+interface EditableOutline {
+  outer: { p: Vec2; rad: number }[];
+  radius: number;
+  holes: { control: { p: Vec2; rad: number }[]; radius: number; baked: boolean }[];
+}
 
 /** Effective per-corner radii of a hole (overrides over its default), or the default. */
 function holeRadii(h: BodyHole): number | number[] {
@@ -417,19 +429,42 @@ export interface BodyGroup {
   jointIds: number[];
 }
 
-// --- construction guidelines ------------------------------------------------
+// --- construction geometry (guides) -------------------------------------------
 
 /**
- * A construction guideline: an **infinite** line defined by two points `a` and `b`
- * (world coordinates). A drawing aid only — guidelines never participate in
- * simulation. Dragging the line translates both points (the angle is preserved);
- * dragging either defining point re-aims the line. With snapping enabled,
- * placements and drags snap onto guidelines in preference to the grid.
+ * Reference geometry (v20 — "guides"): drawing aids that never participate in
+ * simulation and are invisible there. Every kind is defined by a few **points** that
+ * can be dragged, snapped to and (except a text's anchor and a circle's rim handle)
+ * used as measurement / sketch-constraint references (`MeasureRef.guidePoint`, with
+ * `which` naming the point); line-like kinds also offer line references
+ * (`MeasureRef.guideLine`). With snapping enabled, placements and drags snap onto
+ * guide lines / edges in preference to the grid.
+ *
+ * - `line`: an **infinite** line through `a` and `b` (the original guideline; files
+ *   up to v19 carry it without a `kind`). Points "a" / "b".
+ * - `poly`: a finite polyline through `pts` — a segment (2 points), an open chain, or a
+ *   closed polygon (`closed`: a reference rectangle / regular polygon / outline).
+ *   Points "0" … "n−1"; edge `i` runs pts[i] → pts[i+1] (wrapping when closed).
+ * - `circle`: centre `c`, radius `r`. Point "c" (the centre); "r" is the rim handle
+ *   (drag to resize — not a reference).
+ * - `arc`: the arc from `a` through `m` to `b`. Points "a" / "m" / "b".
+ * - `text`: a label anchored at `p` (world — or the body's local frame when `bodyId`
+ *   is set, so it rides with that body) in `size` world units. Point "p" (drag only).
  */
-export interface Guide {
-  id: number;
+export type Guide =
+  | { id: number; kind: "line"; a: Vec2; b: Vec2 }
+  | { id: number; kind: "poly"; pts: Vec2[]; closed: boolean }
+  | { id: number; kind: "circle"; c: Vec2; r: number }
+  | { id: number; kind: "arc"; a: Vec2; m: Vec2; b: Vec2 }
+  | { id: number; kind: "text"; p: Vec2; text: string; size: number; bodyId?: number };
+
+/** One line-like part of a guide: the infinite line, or a finite polyline edge. */
+export interface GuideLine {
+  /** Polyline edge index, or null for an infinite `line` guide. */
+  edge: number | null;
   a: Vec2;
   b: Vec2;
+  infinite: boolean;
 }
 
 // --- measurements ---------------------------------------------------------
@@ -460,8 +495,8 @@ export type MeasureRef =
   | { kind: "bodyPoint"; bodyId: number; local: Vec2 } // point: fixed in a body's frame
   | { kind: "rail"; sliderId: number } // line: a slider rail
   | { kind: "edge"; bodyId: number; index: number; hole?: number } // line: control edge index → index+1 (of hole `hole`, or the outer)
-  | { kind: "guidePoint"; guideId: number; which: "a" | "b" } // point: a guideline defining point
-  | { kind: "guideLine"; guideId: number } // line: a construction guideline (infinite)
+  | { kind: "guidePoint"; guideId: number; which: string } // point: a guide's defining point (see `Guide` for the names)
+  | { kind: "guideLine"; guideId: number; edge?: number } // line: an infinite guideline, or edge `edge` of a reference polyline (finite)
   | { kind: "patternAxis"; patternId: number; axis: number }; // line: a linear pattern's direction (seed anchor → last instance)
 
 /**
@@ -802,7 +837,7 @@ export interface FeatureClip {
     members: number[];
   }[];
 }
-const FORMAT_VERSION = 19;
+const FORMAT_VERSION = 20;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -1642,11 +1677,7 @@ export class Scene {
    * **baked** as sharp corners (radius 0 everywhere). Holes likewise (an offset hole —
    * a disk — bakes to its sampled loop). World coordinates.
    */
-  private editableOutline(body: Body): {
-    outer: { p: Vec2; rad: number }[];
-    radius: number;
-    holes: { control: { p: Vec2; rad: number }[]; radius: number; baked: boolean }[];
-  } {
+  private editableOutline(body: Body): EditableOutline {
     const baked = body.round === "offset";
     const outerRadii = this.bodyCornerRadii(body);
     const outer = baked
@@ -1994,6 +2025,153 @@ export class Scene {
     for (const b of bodies) this.dissolvePatternsOfBody(b.id); // hole indices are rebuilt below
     const absorbed = bodies.slice(1);
 
+    // --- joints of the absorbed bodies move to the survivor (world positions kept) ---
+    const moved = new Set<number>();
+    for (const b of absorbed) {
+      for (const j of this.joints) {
+        if (j.bodyId !== b.id) continue;
+        const w = this.jointWorld(j);
+        j.bodyId = survivor.id;
+        j.local = rotate(sub(w, survivor.pos), -survivor.angle);
+        moved.add(j.id);
+      }
+    }
+
+    // --- survivor takes the union (radii / hole specs / refs carried over) ---
+    this.applyRegion(survivor, bodies, shapes, result, tol);
+
+    // --- constraints: motors follow their body; pins now internal to the survivor go ---
+    for (const c of [...this.constraints]) {
+      if (c.kind === "motor" && absorbed.some((b) => b.id === c.bodyId)) c.bodyId = survivor.id;
+      if (c.kind === "pin") {
+        const a = this.getJoint(c.jointA), b = this.getJoint(c.jointB);
+        if (a && b && a.bodyId === survivor.id && b.bodyId === survivor.id && (moved.has(a.id) || moved.has(b.id))) {
+          this.removeConstraint(c.id);
+        }
+      }
+    }
+
+    // --- groups: merge everything touched around the survivor ---
+    const absorbedIds = new Set(absorbed.map((b) => b.id));
+    const touched = bodies.map((b) => this.groupOf(b.id)).filter((g): g is BodyGroup => !!g);
+    if (touched.length) {
+      const gb = new Set<number>([survivor.id]);
+      const gj = new Set<number>();
+      for (const g of touched) {
+        g.bodyIds.forEach((id) => { if (!absorbedIds.has(id)) gb.add(id); });
+        g.jointIds.forEach((id) => gj.add(id));
+      }
+      this.groups = this.groups.filter((g) => !touched.includes(g));
+      if (gb.size + gj.size >= 2) this.addGroup([...gb], [...gj]);
+    }
+
+    // --- drop the absorbed bodies (their joints already moved) ---
+    this.bodies = this.bodies.filter((b) => !absorbedIds.has(b.id));
+    survivor.grounded = bodies.some((b) => b.grounded);
+    this.pruneGuides();
+    this.pruneMeasurements();
+    this.pruneSketch();
+    this.pruneGroups();
+    this.pruneInstances();
+    return { ok: true, body: survivor };
+  }
+
+  /**
+   * Cut a shape out of a body — the shape tools' **Cut** role. `spec` is a world-coord
+   * hole spec (a plain loop, or a control polygon + rounding — a one-point offset spec is
+   * a disk). A cutter that lies entirely inside the material, clear of the outline and of
+   * every existing hole, becomes a plain **hole** with its exact editable spec (so a disk
+   * stays a parametric disk — `hole` is its index). Anything else — a notch crossing the
+   * outline, a cutter overlapping a hole, a cutter enclosing one — goes through a polygon
+   * **difference** (`differenceRegions`) on the editable outline: untouched corners keep
+   * their radii, untouched holes keep their exact specs, new corners start sharp, refs
+   * remap like Combine, and the body's patterns dissolve (hole indices are rebuilt). An
+   * offset-mode body is baked first (see `editableOutline`); a rounded cutter arrives as
+   * its sampled loop. Refused (scene untouched, reason returned) when the cut would remove
+   * everything, sever the body into several pieces (use Split), leave it pinched at a
+   * point, lie entirely inside an existing hole, or target a component instance.
+   */
+  cutBody(bodyId: number, spec: HoleSpec): CutResult {
+    const body = this.getBody(bodyId);
+    if (!body) return { ok: false, reason: "There is no body to cut here." };
+    if (this.instanceOfBody(body.id)) {
+      return { ok: false, reason: "This body belongs to a component instance — edit the definition to cut it." };
+    }
+    const control = Array.isArray(spec) ? spec : spec.control;
+    const round = Array.isArray(spec) ? undefined : spec.round;
+    if (control.length < (round === "offset" ? 1 : 3)) return { ok: false, reason: "The cut shape has no area." };
+    // The cutter's sampled loop (world): a plain loop as is, a spec through the same
+    // derivation a hole uses (so a disk spec samples to the disk's rim).
+    const cutter = Array.isArray(spec)
+      ? spec.map(clone)
+      : deriveHoleOutline(spec.control, {
+          controlLocal: spec.control,
+          radius: Math.max(0, spec.radius ?? 0),
+          radii: spec.radii && spec.radii.length === spec.control.length ? spec.radii : undefined,
+          round: spec.round,
+        });
+    if (cutter.length < 3) return { ok: false, reason: "The cut shape has no area." };
+    const outer = this.bodyWorldVerts(body);
+    const holes = this.bodyHolesWorld(body);
+    const tol = Scene.shapeTol([outer, cutter, ...holes]) * 10;
+    if (Math.abs(polygonArea(cutter)) <= tol * tol) return { ok: false, reason: "The cut shape has no area." };
+    const meets = (a: Vec2[], b: Vec2[]): boolean => Scene.loopsMeet(a, b, tol);
+    const within = (inner: Vec2[], outerLoop: Vec2[]): boolean =>
+      !meets(inner, outerLoop) && inner.every((p) => pointInPolygon(p, outerLoop));
+    // Entirely inside an existing hole: nothing to remove.
+    if (holes.some((h) => within(cutter, h))) {
+      return { ok: false, reason: "The cut lies inside an existing hole — there is nothing to remove." };
+    }
+    // Fast path: inside the material and clear of every hole → a plain hole, exact spec.
+    if (within(cutter, outer) && !holes.some((h) => meets(cutter, h) || within(h, cutter))) {
+      const hole = this.addBodyHole(bodyId, spec);
+      return hole === null ? { ok: false, reason: "The cut shape has no area." } : { ok: true, hole };
+    }
+    // General path: polygon difference on the editable outline.
+    const shape = this.editableOutline(body);
+    const region: PolyRegion = {
+      outer: shape.outer.map((c) => c.p),
+      holes: shape.holes.map((h) => h.control.map((c) => c.p)),
+    };
+    const diff = differenceRegions(region, [{ outer: cutter, holes: [] }]);
+    if (!diff) return { ok: false, reason: "The cut would remove the whole body." };
+    if (diff.regions.length > 1) {
+      return { ok: false, reason: `The cut would split the body into ${diff.regions.length} pieces — use the Split tool for that.` };
+    }
+    if (diff.pinched) return { ok: false, reason: "The cut would leave the body touching itself at a single point." };
+    this.dissolvePatternsOfBody(body.id); // hole indices are rebuilt below
+    this.applyRegion(body, [body], [shape], diff.regions[0], tol);
+    this.pruneMeasurements();
+    this.pruneSketch();
+    return { ok: true, hole: null };
+  }
+
+  /** Whether two closed loops cross, touch, or share a vertex (within `tol`). */
+  private static loopsMeet(a: Vec2[], b: Vec2[], tol: number): boolean {
+    const na = a.length, nb = b.length;
+    for (let i = 0; i < na; i++) {
+      const a0 = a[i], a1 = a[(i + 1) % na];
+      for (let j = 0; j < nb; j++) {
+        const b0 = b[j], b1 = b[(j + 1) % nb];
+        if (segmentsCross(a0, a1, b0, b1)) return true;
+        if (pointOnSegment(b0, a0, a1, tol) || pointOnSegment(a0, b0, b1, tol)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Give `survivor` the outline `result` produced by a polygon boolean over `sources`
+   * (whose editable outlines are `shapes`, in the same order — the survivor among them).
+   * Corner radii: a result corner that is an unchanged input corner keeps that corner's
+   * radius, a new one is sharp. Holes: a result hole identical to an input hole keeps
+   * that hole's exact editable spec (a disk stays a disk), others become radius-0
+   * outlines. Vertex / edge measurement + sketch refs on the sources remap by matching
+   * world geometry (an edge survives only whole), refs on kept holes keep following
+   * them, `bodyPoint` refs re-anchor in the survivor's frame; unmatched refs are dropped.
+   * Joints are not touched (the caller moves them first when bodies merge).
+   */
+  private applyRegion(survivor: Body, sources: Body[], shapes: EditableOutline[], result: PolyRegion, tol: number): void {
     // --- radii: a result corner that is an unchanged input corner keeps that radius ---
     const corners: { p: Vec2; prev: Vec2; next: Vec2; rad: number }[] = [];
     for (const s of shapes) {
@@ -2028,8 +2206,8 @@ export class Scene {
     type HoleOrigin = { bodyId: number; hole: number };
     type Spec = Exclude<HoleSpec, Vec2[]>;
     const holeSpecs: { spec: Spec; origin: HoleOrigin | null }[] = result.holes.map((loop) => {
-      for (let bi = 0; bi < bodies.length; bi++) {
-        const b = bodies[bi];
+      for (let bi = 0; bi < sources.length; bi++) {
+        const b = sources[bi];
         for (let hi = 0; hi < shapes[bi].holes.length; hi++) {
           const h = shapes[bi].holes[hi];
           if (!sameLoop(loop, h.control.map((c) => c.p))) continue;
@@ -2044,20 +2222,9 @@ export class Scene {
       return { spec: { control: loop, radius: 0, radii: Scene.overrides(radiiOf(loop), 0) }, origin: null };
     });
 
-    // --- joints of the absorbed bodies move to the survivor (world positions kept) ---
-    const moved = new Set<number>();
-    for (const b of absorbed) {
-      for (const j of this.joints) {
-        if (j.bodyId !== b.id) continue;
-        const w = this.jointWorld(j);
-        j.bodyId = survivor.id;
-        j.local = rotate(sub(w, survivor.pos), -survivor.angle);
-        moved.add(j.id);
-      }
-    }
-    // bodyPoint refs on any input: remember their world positions to re-anchor after.
+    // bodyPoint refs on any source: remember their world positions to re-anchor after.
     const bodyPoints: { ref: { bodyId: number; local: Vec2 }; world: Vec2 }[] = [];
-    const inputIds = new Set(bodies.map((b) => b.id));
+    const inputIds = new Set(sources.map((b) => b.id));
     for (const mm of this.measurements) {
       for (const ref of [mm.refA, mm.refB]) {
         if (ref.kind === "bodyPoint" && inputIds.has(ref.bodyId)) {
@@ -2085,8 +2252,8 @@ export class Scene {
     for (const mm of this.measurements) { record(mm.refA); record(mm.refB); }
     for (const c of this.sketch) { record(c.refA); record(c.refB); }
 
-    // --- survivor takes the union ---
-    const def = shapes[0].radius;
+    // --- survivor takes the result ---
+    const def = shapes[sources.indexOf(survivor)]?.radius ?? shapes[0].radius;
     const toLocal = (p: Vec2): Vec2 => rotate(sub(p, survivor.pos), -survivor.angle);
     survivor.round = "fillet";
     survivor.radius = def;
@@ -2102,36 +2269,7 @@ export class Scene {
       return hole;
     });
     if (holes.length) survivor.holes = holes; else { delete survivor.holes; delete survivor.holesLocal; }
-    survivor.grounded = bodies.some((b) => b.grounded);
     this.rebuildBody(survivor);
-
-    // --- constraints: motors follow their body; pins now internal to the survivor go ---
-    for (const c of [...this.constraints]) {
-      if (c.kind === "motor" && absorbed.some((b) => b.id === c.bodyId)) c.bodyId = survivor.id;
-      if (c.kind === "pin") {
-        const a = this.getJoint(c.jointA), b = this.getJoint(c.jointB);
-        if (a && b && a.bodyId === survivor.id && b.bodyId === survivor.id && (moved.has(a.id) || moved.has(b.id))) {
-          this.removeConstraint(c.id);
-        }
-      }
-    }
-
-    // --- groups: merge everything touched around the survivor ---
-    const absorbedIds = new Set(absorbed.map((b) => b.id));
-    const touched = bodies.map((b) => this.groupOf(b.id)).filter((g): g is BodyGroup => !!g);
-    if (touched.length) {
-      const gb = new Set<number>([survivor.id]);
-      const gj = new Set<number>();
-      for (const g of touched) {
-        g.bodyIds.forEach((id) => { if (!absorbedIds.has(id)) gb.add(id); });
-        g.jointIds.forEach((id) => gj.add(id));
-      }
-      this.groups = this.groups.filter((g) => !touched.includes(g));
-      if (gb.size + gj.size >= 2) this.addGroup([...gb], [...gj]);
-    }
-
-    // --- drop the absorbed bodies (their joints already moved) ---
-    this.bodies = this.bodies.filter((b) => !absorbedIds.has(b.id));
 
     // --- refs: match recorded world geometry against the new outline ---
     const outerW = this.bodyControlWorld(survivor);
@@ -2185,11 +2323,6 @@ export class Scene {
       ref.bodyId = survivor.id;
       ref.local = rotate(sub(world, survivor.pos), -survivor.angle);
     }
-    this.pruneMeasurements();
-    this.pruneSketch();
-    this.pruneGroups();
-    this.pruneInstances();
-    return { ok: true, body: survivor };
   }
 
   /**
@@ -2805,13 +2938,18 @@ export class Scene {
       }
       case "guidePoint": {
         const g = this.getGuide(ref.guideId);
-        return g ? { kind: "point", p: clone(g[ref.which]) } : null;
+        if (!g || !this.guidePointIsRef(g, ref.which)) return null;
+        const p = this.guidePointWorld(g, ref.which);
+        return p ? { kind: "point", p } : null;
       }
       case "guideLine": {
-        // Resolved as the defining segment; consumers that need the infinite line
-        // (point+line measurements, the renderer) already extend line refs themselves.
+        // An infinite guideline resolves as its defining segment flagged `infinite`
+        // (consumers that need the whole line extend it themselves); a polyline edge is
+        // a finite segment like a body edge.
         const g = this.getGuide(ref.guideId);
-        return g ? { kind: "line", a: clone(g.a), b: clone(g.b), infinite: true } : null;
+        const ln = g ? this.guideLines(g).find((l) => l.edge === (ref.edge ?? null)) : undefined;
+        if (!ln) return null;
+        return ln.infinite ? { kind: "line", a: ln.a, b: ln.b, infinite: true } : { kind: "line", a: ln.a, b: ln.b };
       }
     }
   }
@@ -2980,8 +3118,9 @@ export class Scene {
     } else {
       if (!b || !isLine(refA) || !isLine(b)) return null;
       // Equal length is meaningless on an infinite guideline (its defining segment's
-      // length is arbitrary construction, not geometry) — reject it.
-      if (kind === "equal" && (refA.kind === "guideLine" || b.kind === "guideLine")) return null;
+      // length is arbitrary construction, not geometry) — reject it. A reference
+      // polyline's edge has a real length, so it may take one.
+      if (kind === "equal" && (this.refIsInfiniteLine(refA) || this.refIsInfiniteLine(b))) return null;
     }
     if (!this.resolveMeasureRef(refA) || (b && !this.resolveMeasureRef(b))) return null;
     if (b && sameMeasureRef(refA, b)) return null;
@@ -3030,8 +3169,19 @@ export class Scene {
       const s = this.constraints.find((c) => c.kind === "slider" && c.id === ln.sliderId);
       return !!s && s.kind === "slider" && (s.railA === pt.jointId || s.railB === pt.jointId);
     }
-    if (ln.kind === "guideLine" && pt.kind === "guidePoint") return ln.guideId === pt.guideId;
+    if (ln.kind === "guideLine" && pt.kind === "guidePoint") {
+      if (ln.guideId !== pt.guideId) return false;
+      const g = this.getGuide(ln.guideId);
+      if (!g || g.kind !== "poly" || ln.edge === undefined) return true; // an infinite line's two points define it
+      const i = Number(pt.which);
+      return i === ln.edge || i === (ln.edge + 1) % g.pts.length;
+    }
     return false;
+  }
+
+  /** Whether a line reference names an infinite guideline (vs a finite edge / rail / polyline edge). */
+  private refIsInfiniteLine(r: MeasureRef): boolean {
+    return r.kind === "guideLine" && this.getGuide(r.guideId)?.kind === "line";
   }
 
   getSketchConstraint(id: number): SketchConstraint | undefined {
@@ -3720,21 +3870,101 @@ export class Scene {
     this.groups = this.groups.filter((g) => g.bodyIds.length + g.jointIds.length >= 2);
   }
 
-  // --- construction guidelines ----------------------------------------------
+  // --- construction geometry (guides) -----------------------------------------
 
   /** Below this separation two guide points can't define a direction (rejected). */
   static readonly GUIDE_MIN_SPAN = 1e-6;
+  /** Approximate advance per character of a text guide, as a fraction of its size (hit-testing only). */
+  static readonly TEXT_ADVANCE = 0.58;
 
   getGuide(id: number): Guide | undefined {
     return this.guides.find((g) => g.id === id);
   }
 
-  /** Create a guideline through two points. Returns null when they (nearly) coincide. */
+  /** Create an infinite guideline through two points. Returns null when they (nearly) coincide. */
   addGuide(a: Vec2, b: Vec2): Guide | null {
     if (dist(a, b) < Scene.GUIDE_MIN_SPAN) return null;
-    const guide: Guide = { id: this.id(), a: clone(a), b: clone(b) };
+    const guide: Guide = { id: this.id(), kind: "line", a: clone(a), b: clone(b) };
     this.guides.push(guide);
     return guide;
+  }
+
+  /**
+   * Create a reference polyline (a segment, an open chain or — `closed` — a polygon).
+   * Consecutive duplicates are dropped (a closing repeat of the first point too).
+   * Returns null with fewer than 2 distinct points (3 for a closed one).
+   */
+  addGuidePoly(pts: Vec2[], closed: boolean): Guide | null {
+    const clean: Vec2[] = [];
+    for (const p of pts) {
+      if (clean.length && dist(p, clean[clean.length - 1]) < Scene.GUIDE_MIN_SPAN) continue;
+      clean.push(clone(p));
+    }
+    if (closed && clean.length > 1 && dist(clean[0], clean[clean.length - 1]) < Scene.GUIDE_MIN_SPAN) clean.pop();
+    if (clean.length < (closed ? 3 : 2)) return null;
+    const guide: Guide = { id: this.id(), kind: "poly", pts: clean, closed };
+    this.guides.push(guide);
+    return guide;
+  }
+
+  /** Create a reference circle. Returns null for a (near-)zero radius. */
+  addGuideCircle(c: Vec2, r: number): Guide | null {
+    if (!(r >= Scene.GUIDE_MIN_SPAN)) return null;
+    const guide: Guide = { id: this.id(), kind: "circle", c: clone(c), r };
+    this.guides.push(guide);
+    return guide;
+  }
+
+  /** Create a reference arc from `a` through `m` to `b`. Returns null when the points are collinear. */
+  addGuideArc(a: Vec2, m: Vec2, b: Vec2): Guide | null {
+    if (!arcThrough(a, m, b)) return null;
+    const guide: Guide = { id: this.id(), kind: "arc", a: clone(a), m: clone(m), b: clone(b) };
+    this.guides.push(guide);
+    return guide;
+  }
+
+  /**
+   * Create a text label at world point `p`, `size` world units tall. With `bodyId` the
+   * label is anchored to that body (stored in its local frame) and rides with it.
+   * Returns null for empty text / a non-positive size / an unknown body.
+   */
+  addGuideText(p: Vec2, text: string, size: number, bodyId?: number | null): Guide | null {
+    const t = text.trim();
+    if (!t || !(size > 0)) return null;
+    const guide: Guide = { id: this.id(), kind: "text", p: clone(p), text: t, size };
+    if (bodyId !== undefined && bodyId !== null) {
+      const body = this.getBody(bodyId);
+      if (!body) return null;
+      guide.bodyId = bodyId;
+      guide.p = rotate(sub(p, body.pos), -body.angle);
+    }
+    this.guides.push(guide);
+    return guide;
+  }
+
+  /** Change a text label's content (and optionally its size). Empty text is refused. */
+  setGuideText(id: number, text: string, size?: number): boolean {
+    const g = this.getGuide(id);
+    const t = text.trim();
+    if (!g || g.kind !== "text" || !t) return false;
+    g.text = t;
+    if (size !== undefined && size > 0) g.size = size;
+    return true;
+  }
+
+  /** A text label's world anchor and angle (its body's, when anchored), or null if the body is gone. */
+  guideTextWorld(g: Guide): { p: Vec2; angle: number } | null {
+    if (g.kind !== "text") return null;
+    if (g.bodyId === undefined) return { p: clone(g.p), angle: 0 };
+    const body = this.getBody(g.bodyId);
+    return body ? { p: add(body.pos, rotate(g.p, body.angle)), angle: body.angle } : null;
+  }
+
+  /** A text label's approximate world box (baseline-anchored; hit-testing / layout). */
+  guideTextBox(g: Guide): { p: Vec2; angle: number; w: number; ascent: number; descent: number } | null {
+    const at = this.guideTextWorld(g);
+    if (!at || g.kind !== "text") return null;
+    return { ...at, w: g.text.length * g.size * Scene.TEXT_ADVANCE, ascent: g.size * 0.8, descent: g.size * 0.25 };
   }
 
   removeGuide(id: number): void {
@@ -3744,33 +3974,154 @@ export class Scene {
     this.pruneSketch();
   }
 
-  /** Translate a whole guideline by `delta` (both points move; the angle is preserved). */
+  /** Drop guides whose subject is gone (a text label whose body was deleted). */
+  private pruneGuides(): void {
+    this.guides = this.guides.filter((g) => g.kind !== "text" || g.bodyId === undefined || this.getBody(g.bodyId));
+  }
+
+  /** Translate a whole guide by `delta` (every defining point moves; shape and angle are preserved). */
   moveGuide(id: number, delta: Vec2): void {
     const g = this.getGuide(id);
     if (!g) return;
-    g.a = add(g.a, delta);
-    g.b = add(g.b, delta);
+    switch (g.kind) {
+      case "line": g.a = add(g.a, delta); g.b = add(g.b, delta); break;
+      case "poly": g.pts = g.pts.map((p) => add(p, delta)); break;
+      case "circle": g.c = add(g.c, delta); break;
+      case "arc": g.a = add(g.a, delta); g.m = add(g.m, delta); g.b = add(g.b, delta); break;
+      case "text": {
+        const body = g.bodyId === undefined ? undefined : this.getBody(g.bodyId);
+        g.p = add(g.p, body ? rotate(delta, -body.angle) : delta);
+        break;
+      }
+    }
+  }
+
+  /** Names of a guide's solver-capable points (usable as `guidePoint` references). */
+  guidePointKeys(g: Guide): string[] {
+    switch (g.kind) {
+      case "line": return ["a", "b"];
+      case "poly": return g.pts.map((_, i) => String(i));
+      case "circle": return ["c"];
+      case "arc": return ["a", "m", "b"];
+      case "text": return [];
+    }
+  }
+
+  /** Names of every draggable point of a guide: its reference points plus drag-only handles. */
+  guideHandleKeys(g: Guide): string[] {
+    if (g.kind === "circle") return ["c", "r"];
+    if (g.kind === "text") return ["p"];
+    return this.guidePointKeys(g);
+  }
+
+  /** Whether `which` names a point of `g` that can serve as a reference (not a drag-only handle). */
+  guidePointIsRef(g: Guide, which: string): boolean {
+    return this.guidePointKeys(g).includes(which);
+  }
+
+  /** World position of a guide's point / handle `which`, or null when it doesn't exist. */
+  guidePointWorld(g: Guide, which: string): Vec2 | null {
+    switch (g.kind) {
+      case "line":
+        return which === "a" || which === "b" ? clone(g[which]) : null;
+      case "poly": {
+        const i = Number(which);
+        return Number.isInteger(i) && i >= 0 && i < g.pts.length ? clone(g.pts[i]) : null;
+      }
+      case "circle":
+        if (which === "c") return clone(g.c);
+        return which === "r" ? vec(g.c.x + g.r, g.c.y) : null;
+      case "arc":
+        return which === "a" || which === "m" || which === "b" ? clone(g[which]) : null;
+      case "text":
+        return which === "p" ? this.guideTextWorld(g)?.p ?? null : null;
+    }
   }
 
   /**
-   * Move one of a guideline's defining points to `worldPos` (re-aiming the line).
-   * Ignored when it would land on the other point (the line needs a direction).
+   * Move one defining point / handle of a guide to `worldPos`: re-aims a line, reshapes a
+   * polyline or arc, moves a circle's centre ("c") or resizes it ("r"), moves a label.
+   * A line's point may not land on its other point (the line needs a direction).
    */
-  moveGuidePoint(id: number, which: "a" | "b", worldPos: Vec2): void {
+  moveGuidePoint(id: number, which: string, worldPos: Vec2): void {
     const g = this.getGuide(id);
     if (!g) return;
-    const other = which === "a" ? g.b : g.a;
-    if (dist(worldPos, other) < Scene.GUIDE_MIN_SPAN) return;
-    g[which] = clone(worldPos);
+    switch (g.kind) {
+      case "line": {
+        if (which !== "a" && which !== "b") return;
+        const other = which === "a" ? g.b : g.a;
+        if (dist(worldPos, other) < Scene.GUIDE_MIN_SPAN) return;
+        g[which] = clone(worldPos);
+        return;
+      }
+      case "poly": {
+        const i = Number(which);
+        if (Number.isInteger(i) && i >= 0 && i < g.pts.length) g.pts[i] = clone(worldPos);
+        return;
+      }
+      case "circle":
+        if (which === "c") g.c = clone(worldPos);
+        else if (which === "r") g.r = Math.max(Scene.GUIDE_MIN_SPAN, dist(g.c, worldPos));
+        return;
+      case "arc":
+        if (which === "a" || which === "m" || which === "b") g[which] = clone(worldPos);
+        return;
+      case "text": {
+        if (which !== "p") return;
+        const body = g.bodyId === undefined ? undefined : this.getBody(g.bodyId);
+        g.p = body ? rotate(sub(worldPos, body.pos), -body.angle) : clone(worldPos);
+        return;
+      }
+    }
   }
 
-  /** Nearest guideline whose **infinite** line passes within `radius` of `p` (topmost first). */
+  /** The line-like parts of a guide: an infinite guideline, or a polyline's edges (none for the rest). */
+  guideLines(g: Guide): GuideLine[] {
+    if (g.kind === "line") return [{ edge: null, a: clone(g.a), b: clone(g.b), infinite: true }];
+    if (g.kind !== "poly") return [];
+    const n = g.pts.length;
+    const count = g.closed ? n : n - 1;
+    const out: GuideLine[] = [];
+    for (let i = 0; i < count; i++) out.push({ edge: i, a: clone(g.pts[i]), b: clone(g.pts[(i + 1) % n]), infinite: false });
+    return out;
+  }
+
+  /** A reference arc's geometry (null for other kinds, or when its points went collinear). */
+  guideArc(g: Guide): Arc | null {
+    return g.kind === "arc" ? arcThrough(g.a, g.m, g.b) : null;
+  }
+
+  /** Distance from `p` to the nearest drawn part of a guide (line, edge, rim, arc or label box). */
+  private guideDistance(g: Guide, p: Vec2): number {
+    switch (g.kind) {
+      case "line":
+        return distToLine(p, g.a, normalize(sub(g.b, g.a)));
+      case "poly":
+        return Math.min(...this.guideLines(g).map((l) => distToSegment(p, l.a, l.b)));
+      case "circle":
+        return Math.abs(dist(p, g.c) - g.r);
+      case "arc": {
+        const arc = arcThrough(g.a, g.m, g.b);
+        return arc ? distToArc(p, arc) : Math.min(distToSegment(p, g.a, g.m), distToSegment(p, g.m, g.b));
+      }
+      case "text": {
+        const box = this.guideTextBox(g);
+        if (!box) return Infinity;
+        const q = rotate(sub(p, box.p), -box.angle); // into the label's frame (x along the text)
+        const dx = Math.max(0, -q.x, q.x - box.w);
+        const dy = Math.max(0, -box.ascent - q.y, q.y - box.descent);
+        return Math.hypot(dx, dy);
+      }
+    }
+  }
+
+  /** Nearest guide any drawn part of which passes within `radius` of `p` (topmost first). */
   guideAt(p: Vec2, radius: number): Guide | undefined {
     let best: Guide | undefined;
     let bestD = radius;
     for (let i = this.guides.length - 1; i >= 0; i--) {
       const g = this.guides[i];
-      const d = distToLine(p, g.a, normalize(sub(g.b, g.a)));
+      const d = this.guideDistance(g, p);
       if (d <= bestD) {
         bestD = d;
         best = g;
@@ -3779,16 +4130,35 @@ export class Scene {
     return best;
   }
 
-  /** Guideline defining point within `radius` of `p` (topmost first), or null.
-   *  `excludeGuide` leaves one guideline's points out (a dragged point can't pick itself). */
-  guidePointAt(p: Vec2, radius: number, excludeGuide?: number): { guide: Guide; which: "a" | "b" } | null {
-    let best: { guide: Guide; which: "a" | "b" } | null = null;
+  /** Nearest guide **line** (an infinite guideline, or a polyline edge) within `radius` of `p`. */
+  guideLineAt(p: Vec2, radius: number): { guide: Guide; edge: number | null } | null {
+    let best: { guide: Guide; edge: number | null } | null = null;
+    let bestD = radius;
+    for (let i = this.guides.length - 1; i >= 0; i--) {
+      const g = this.guides[i];
+      for (const l of this.guideLines(g)) {
+        const d = l.infinite ? distToLine(p, l.a, normalize(sub(l.b, l.a))) : distToSegment(p, l.a, l.b);
+        if (d <= bestD) {
+          bestD = d;
+          best = { guide: g, edge: l.edge };
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Guide point / handle within `radius` of `p` (topmost first), or null.
+   *  `excludeGuide` leaves one guide's points out (a dragged point can't pick itself). */
+  guidePointAt(p: Vec2, radius: number, excludeGuide?: number): { guide: Guide; which: string } | null {
+    let best: { guide: Guide; which: string } | null = null;
     let bestD = radius;
     for (let i = this.guides.length - 1; i >= 0; i--) {
       const g = this.guides[i];
       if (g.id === excludeGuide) continue;
-      for (const which of ["a", "b"] as const) {
-        const d = dist(g[which], p);
+      for (const which of this.guideHandleKeys(g)) {
+        const q = this.guidePointWorld(g, which);
+        if (!q) continue;
+        const d = dist(q, p);
         if (d <= bestD) {
           bestD = d;
           best = { guide: g, which };
@@ -5350,6 +5720,7 @@ export class Scene {
     this.patterns = this.patterns.filter((p) => p.bodyId !== id);
     this.bodies = this.bodies.filter((b) => b.id !== id);
     this.joints = this.joints.filter((j) => j.bodyId !== id);
+    this.pruneGuides(); // text labels anchored to the body go with it
     this.pruneConstraints(removed);
     this.pruneGroups();
     this.pruneInstances();
@@ -5684,12 +6055,12 @@ export class Scene {
       if (inst.mirrored !== true) delete inst.mirrored;
     }
     this.pruneInstances();
-    // Construction guidelines arrived in v11; older files simply have none.
+    // Construction guidelines arrived in v11 (infinite lines only — no `kind`); v20 added
+    // the other reference kinds. Older files simply have none.
     this.guides = Array.isArray(data.guides)
-      ? data.guides
-          .map((g) => ({ id: g.id, a: vec(g.a.x, g.a.y), b: vec(g.b.x, g.b.y) }))
-          .filter((g) => dist(g.a, g.b) >= Scene.GUIDE_MIN_SPAN)
+      ? data.guides.map(loadGuide).filter((g): g is Guide => g !== null)
       : [];
+    this.pruneGuides();
     // Driving-dimension sides: sanitize hand-edited values, back-fill files saved
     // before the side existed (captured from the loaded — satisfied — geometry), and
     // drop the field from driven dimensions. Runs last so every ref kind resolves.
@@ -5853,6 +6224,49 @@ export function cascadeComponentChange(
 
 // --- measurement geometry --------------------------------------------------
 
+/** Sanitize one saved guide record (any version); null drops it. */
+function loadGuide(raw: unknown): Guide | null {
+  if (!raw || typeof raw !== "object") return null;
+  const g = raw as Record<string, unknown>;
+  if (typeof g.id !== "number") return null;
+  const pt = (v: unknown): Vec2 | null => {
+    const q = v as { x?: unknown; y?: unknown } | null;
+    return q && typeof q.x === "number" && typeof q.y === "number" && Number.isFinite(q.x) && Number.isFinite(q.y)
+      ? vec(q.x, q.y)
+      : null;
+  };
+  const kind = g.kind ?? "line";
+  switch (kind) {
+    case "line": {
+      const a = pt(g.a), b = pt(g.b);
+      return a && b && dist(a, b) >= Scene.GUIDE_MIN_SPAN ? { id: g.id, kind: "line", a, b } : null;
+    }
+    case "poly": {
+      if (!Array.isArray(g.pts)) return null;
+      const pts = g.pts.map(pt).filter((p): p is Vec2 => p !== null);
+      const closed = g.closed === true;
+      return pts.length >= (closed ? 3 : 2) ? { id: g.id, kind: "poly", pts, closed } : null;
+    }
+    case "circle": {
+      const c = pt(g.c);
+      return c && typeof g.r === "number" && g.r >= Scene.GUIDE_MIN_SPAN ? { id: g.id, kind: "circle", c, r: g.r } : null;
+    }
+    case "arc": {
+      const a = pt(g.a), m = pt(g.m), b = pt(g.b);
+      return a && m && b ? { id: g.id, kind: "arc", a, m, b } : null;
+    }
+    case "text": {
+      const p = pt(g.p);
+      if (!p || typeof g.text !== "string" || !g.text.trim() || typeof g.size !== "number" || !(g.size > 0)) return null;
+      const out: Guide = { id: g.id, kind: "text", p, text: g.text, size: g.size };
+      if (typeof g.bodyId === "number") out.bodyId = g.bodyId;
+      return out;
+    }
+    default:
+      return null;
+  }
+}
+
 function cloneMeasureRef(r: MeasureRef): MeasureRef {
   return r.kind === "bodyPoint" ? { ...r, local: clone(r.local) } : { ...r };
 }
@@ -5875,10 +6289,13 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
     case "guidePoint":
       return (
         a.guideId === (b as { guideId: number }).guideId &&
-        a.which === (b as { which: "a" | "b" }).which
+        a.which === (b as { which: string }).which
       );
     case "guideLine":
-      return a.guideId === (b as { guideId: number }).guideId;
+      return (
+        a.guideId === (b as { guideId: number }).guideId &&
+        (a.edge ?? null) === ((b as { edge?: number }).edge ?? null)
+      );
     case "patternAxis":
       return a.patternId === (b as { patternId: number }).patternId && a.axis === (b as { axis: number }).axis;
     default:

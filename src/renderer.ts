@@ -9,8 +9,9 @@ import {
   MeasureHighlight,
   ResolvedMeasureRef,
   SketchConstraintKind,
+  Guide,
 } from "./model";
-import { Vec2, add, sub, vec, dist, distToSegment, normalize, scale, convexHull } from "./geometry";
+import { Vec2, add, sub, vec, dist, distToSegment, normalize, scale, convexHull, Arc } from "./geometry";
 import { View, viewMatrix, visibleWorldRect, worldToScreen, rotateToScreen } from "./view";
 import { ConstraintBreak } from "./solver";
 
@@ -18,9 +19,28 @@ export interface RenderInput {
   scene: Scene;
   view: View;
   mode: "draw" | "sim";
+  /** Split tool: the cut path drawn so far (dashed polyline to the cursor). */
   draftBody: Vec2[] | null;
-  /** Hole tool: the round hole being dragged out (centre + current radius), or null. */
-  draftCircle: { c: Vec2; r: number } | null;
+  /**
+   * Shape tools (draw mode): the shape being drawn, styled by its **role** — Body (tint
+   * of the colour it will get), Cut (hatched, with the target body highlighted) or
+   * Reference (construction dash-dot). `outline` is the preview geometry so far (already
+   * sampled for circles / arcs / slots), closed or open; `points` are the placed
+   * defining points; `aux` extra construction segments (a radius line, a slot axis);
+   * `text` a label being placed. Present whenever a shape tool is armed (the role badge
+   * follows the cursor even before the first click).
+   */
+  shapeDraft: {
+    role: "body" | "cut" | "reference";
+    fill: string;
+    outline: Vec2[];
+    closed: boolean;
+    points: Vec2[];
+    aux: [Vec2, Vec2][];
+    text: { p: Vec2; size: number; text: string } | null;
+    /** The body a Cut will subtract from, once known. */
+    target: number | null;
+  } | null;
   /**
    * Pattern tool: the seed hole's outline (or, with no seed yet, the hole under the
    * cursor — `anchor` null), the seed anchor, the linear target / circular centre being
@@ -298,16 +318,14 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
 
   if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
 
-  // Construction guidelines (draw mode only): infinite dash-dot lines drawn under the
-  // geometry, with small handles on the two defining points (drag one to re-aim the line).
+  // Construction geometry (draw mode only): infinite guidelines, reference polylines /
+  // circles / arcs and text labels, dash-dot under the geometry, with crosshair handles on
+  // their defining points (drag one to reshape; a circle's rim handle shows when selected).
   if (input.mode === "draw") {
     const selectedGuide = input.selection?.kind === "guide" ? input.selection.id : null;
     for (const g of scene.guides) {
       const sel = g.id === selectedGuide;
-      const color = sel ? theme.ink : GUIDE_COLOR;
-      drawGuideLine(ctx, g.a, g.b, left, top, right, bottom, px, color, sel);
-      crosshair(ctx, g.a, px, color, sel);
-      crosshair(ctx, g.b, px, color, sel);
+      drawGuide(ctx, scene, g, left, top, right, bottom, px, sel ? theme.ink : GUIDE_COLOR, sel);
     }
     if (input.guideDraft) {
       const { a, cursor } = input.guideDraft;
@@ -333,7 +351,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     const verts = scene.bodyWorldVerts(body);
     const holes = scene.bodyHolesWorld(body);
     const isSelected = body.id === selectedBody || multiBodies.has(body.id);
-    const isHover = body.id === input.hoverBody || highlightBodies.has(body.id);
+    const isHover = body.id === input.hoverBody || highlightBodies.has(body.id) || body.id === input.shapeDraft?.target;
     // Outer outline + hole loops as subpaths: even-odd fill leaves the holes empty.
     ctx.beginPath();
     verts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
@@ -459,25 +477,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     for (const p of pts) dot(ctx, p, px(3), theme.ink);
   }
 
-  // Round hole being dragged out: dashed circle, its centre, and the radius to the cursor.
-  if (input.draftCircle) {
-    const { c, r } = input.draftCircle;
-    ctx.strokeStyle = theme.ink;
-    ctx.lineWidth = px(1.5);
-    ctx.setLineDash([px(5), px(4)]);
-    ctx.beginPath();
-    ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
-    ctx.stroke();
-    if (input.cursor) {
-      ctx.lineWidth = px(1);
-      ctx.beginPath();
-      ctx.moveTo(c.x, c.y);
-      ctx.lineTo(input.cursor.x, input.cursor.y);
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-    dot(ctx, c, px(3), theme.ink);
-  }
+  // Shape being drawn, in its role's style (see RenderInput.shapeDraft).
+  if (input.shapeDraft) drawShapeDraft(ctx, input.shapeDraft, px, theme);
 
   // Pattern tool: seed highlight, the direction line / rotation centre, and every instance
   // (dashed; red where it would leave the body or overlap another hole / joint).
@@ -970,8 +971,229 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     }
   }
 
+  // Shape tools: the active role rides beside the cursor (screen space), so the mode
+  // the next shape will take is visible right where the eye is.
+  if (input.shapeDraft && input.cursor && input.mode === "draw") {
+    drawRoleBadge(ctx, worldToScreen(view, input.cursor), input.shapeDraft.role, dpr, theme);
+  }
+
   // View-rotation dial: drawn last, in screen space, over everything.
   if (input.viewRotate) drawViewRotateDial(ctx, input.viewRotate, view, dpr, theme);
+}
+
+/** Cut-role accent (a warm "material removed" tone; reads on both themes). */
+const CUT_COLOR = "#e5643a";
+
+const ROLE_LABEL = { body: "Body", cut: "Cut", reference: "Ref" } as const;
+
+/** The role badge: a small pill with the role's name, offset down-right of the cursor. */
+function drawRoleBadge(
+  ctx: CanvasRenderingContext2D,
+  at: Vec2,
+  role: "body" | "cut" | "reference",
+  dpr: number,
+  theme: Theme
+): void {
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const label = ROLE_LABEL[role];
+  ctx.font = "600 11px system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  const w = ctx.measureText(label).width + 12;
+  const h = 18;
+  const x = at.x + 14;
+  const y = at.y + 14;
+  const color = role === "cut" ? CUT_COLOR : role === "reference" ? GUIDE_COLOR : theme.ink;
+  ctx.fillStyle = theme.surface + "e6";
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 9);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.fillText(label, x + 6, y + h / 2 + 0.5);
+  ctx.restore();
+}
+
+/**
+ * The shape being drawn. Body: dashed ink outline over a faint tint of the colour the
+ * body will get. Cut: dashed accent outline over diagonal hatching (material to remove).
+ * Reference: construction dash-dot with crosshair points, like a finished guide.
+ */
+function drawShapeDraft(
+  ctx: CanvasRenderingContext2D,
+  d: NonNullable<RenderInput["shapeDraft"]>,
+  px: (n: number) => number,
+  theme: Theme
+): void {
+  const color = d.role === "cut" ? CUT_COLOR : d.role === "reference" ? GUIDE_COLOR : theme.ink;
+  const path = (): void => {
+    ctx.beginPath();
+    d.outline.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    if (d.closed && d.outline.length > 2) ctx.closePath();
+  };
+  if (d.outline.length >= 2) {
+    if (d.closed && d.outline.length > 2) {
+      if (d.role === "body") {
+        path();
+        ctx.fillStyle = d.fill + "33";
+        ctx.fill();
+      } else if (d.role === "cut") {
+        // Diagonal hatching clipped to the shape: the material that will be removed.
+        ctx.save();
+        path();
+        ctx.clip();
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const p of d.outline) {
+          minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+          minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+        }
+        const step = px(7);
+        const span = maxX - minX + (maxY - minY);
+        ctx.strokeStyle = CUT_COLOR + "88";
+        ctx.lineWidth = px(1);
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        for (let k = 0; k <= span; k += step) {
+          ctx.moveTo(minX + k, minY);
+          ctx.lineTo(minX, minY + k);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+    path();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = px(d.role === "reference" ? 1.2 : 1.5);
+    ctx.setLineDash(d.role === "reference" ? [px(12), px(5), px(3), px(5)] : [px(5), px(4)]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (d.aux.length) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = px(1);
+    ctx.setLineDash([px(3), px(3)]);
+    ctx.beginPath();
+    for (const [a, b] of d.aux) {
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  for (const p of d.points) {
+    if (d.role === "reference") crosshair(ctx, p, px, color, false);
+    else dot(ctx, p, px(3), color);
+  }
+  if (d.text) drawGuideText(ctx, d.text.p, 0, d.text.text, d.text.size, color);
+}
+
+/** One reference element in its dash-dot style, with crosshairs on its defining points. */
+function drawGuide(
+  ctx: CanvasRenderingContext2D,
+  scene: Scene,
+  g: Guide,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+  px: (n: number) => number,
+  color: string,
+  selected: boolean
+): void {
+  const dash = (): void => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = px(selected ? 2 : 1.2);
+    ctx.setLineDash([px(12), px(5), px(3), px(5)]);
+  };
+  switch (g.kind) {
+    case "line":
+      drawGuideLine(ctx, g.a, g.b, left, top, right, bottom, px, color, selected);
+      crosshair(ctx, g.a, px, color, selected);
+      crosshair(ctx, g.b, px, color, selected);
+      return;
+    case "poly":
+      dash();
+      ctx.beginPath();
+      g.pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      if (g.closed) ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      for (const p of g.pts) crosshair(ctx, p, px, color, selected);
+      return;
+    case "circle":
+      dash();
+      ctx.beginPath();
+      ctx.arc(g.c.x, g.c.y, g.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      crosshair(ctx, g.c, px, color, selected);
+      if (selected) {
+        // The rim handle (drag to resize) shows only while the circle is selected.
+        const rim = scene.guidePointWorld(g, "r");
+        if (rim) squareHandle(ctx, rim, px(4), color);
+      }
+      return;
+    case "arc": {
+      const arc = scene.guideArc(g);
+      dash();
+      ctx.beginPath();
+      if (arc) drawArcPath(ctx, arc);
+      else {
+        ctx.moveTo(g.a.x, g.a.y);
+        ctx.lineTo(g.m.x, g.m.y);
+        ctx.lineTo(g.b.x, g.b.y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      crosshair(ctx, g.a, px, color, selected);
+      crosshair(ctx, g.m, px, color, selected);
+      crosshair(ctx, g.b, px, color, selected);
+      return;
+    }
+    case "text": {
+      const at = scene.guideTextWorld(g);
+      if (!at) return;
+      drawGuideText(ctx, at.p, at.angle, g.text, g.size, color);
+      if (selected) crosshair(ctx, at.p, px, color, true);
+      return;
+    }
+  }
+}
+
+/** Append an arc (centre / radius / start / signed sweep) to the current path. */
+function drawArcPath(ctx: CanvasRenderingContext2D, arc: Arc): void {
+  ctx.arc(arc.c.x, arc.c.y, arc.r, arc.a0, arc.a0 + arc.sweep, arc.sweep < 0);
+}
+
+/** A text label: baseline at `p`, `size` world units tall, turned by `angle` (its body's). */
+function drawGuideText(
+  ctx: CanvasRenderingContext2D,
+  p: Vec2,
+  angle: number,
+  text: string,
+  size: number,
+  color: string
+): void {
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(angle);
+  ctx.font = `${size}px system-ui, sans-serif`;
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  ctx.fillStyle = color;
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
+/** A small hollow square handle (a guide's resize grip). */
+function squareHandle(ctx: CanvasRenderingContext2D, p: Vec2, half: number, color: string): void {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = half / 3;
+  ctx.setLineDash([]);
+  ctx.strokeRect(p.x - half, p.y - half, half * 2, half * 2);
 }
 
 const VIEW_ROTATE_COLOR = "#46c2cb";

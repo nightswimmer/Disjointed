@@ -99,11 +99,17 @@ function itemRank(sys: System, i: number, tie: boolean): number {
 
 const isGuideRef = (r: MeasureRef) => r.kind === "guidePoint" || r.kind === "guideLine";
 
-/** Guide variable keys a ref names (a guideline names both its points). */
-function guideVarKeys(ref: MeasureRef): string[] {
+/** Guide variable keys a ref names (a line ref names the two points of that line / edge). */
+function guideVarKeys(scene: Scene, ref: MeasureRef): string[] {
   if (ref.kind === "guidePoint") return [`g:${ref.guideId}:${ref.which}`];
-  if (ref.kind === "guideLine") return [`g:${ref.guideId}:a`, `g:${ref.guideId}:b`];
+  if (ref.kind === "guideLine") return lineVarKeys(scene, ref) ?? [];
   return [];
+}
+
+/** Every solver variable of a guide (all of its reference points). */
+function allGuideVars(scene: Scene, guideId: number): string[] {
+  const g = scene.getGuide(guideId);
+  return g ? scene.guidePointKeys(g).map((w) => `g:${guideId}:${w}`) : [];
 }
 
 /** Guide variables tied to geometry through coincident constraints (see System.tied). */
@@ -114,12 +120,12 @@ function tiedGuideVars(scene: Scene): Set<string> {
     if (c.kind !== "coincident" || !c.refB) continue;
     const ga = isGuideRef(c.refA);
     const gb = isGuideRef(c.refB);
-    if (ga && gb) links.push([guideVarKeys(c.refA), guideVarKeys(c.refB)]);
-    else if (ga) for (const k of guideVarKeys(c.refA)) tied.add(k);
-    else if (gb) for (const k of guideVarKeys(c.refB)) tied.add(k);
+    if (ga && gb) links.push([guideVarKeys(scene, c.refA), guideVarKeys(scene, c.refB)]);
+    else if (ga) for (const k of guideVarKeys(scene, c.refA)) tied.add(k);
+    else if (gb) for (const k of guideVarKeys(scene, c.refB)) tied.add(k);
   }
-  // A guide tied to a tied guide is tied too (a whole guide is tied when either point is).
-  const wholeGuide = (k: string) => { const g = k.split(":")[1]; return [`g:${g}:a`, `g:${g}:b`]; };
+  // A guide tied to a tied guide is tied too (a whole guide is tied when any point is).
+  const wholeGuide = (k: string) => allGuideVars(scene, Number(k.split(":")[1]));
   let grew = true;
   while (grew) {
     grew = false;
@@ -217,7 +223,8 @@ function pointVarKey(scene: Scene, ref: MeasureRef): string | null {
     return `j:${ref.jointId}`;
   }
   if (ref.kind === "guidePoint") {
-    return scene.getGuide(ref.guideId) ? `g:${ref.guideId}:${ref.which}` : null;
+    const g = scene.getGuide(ref.guideId);
+    return g && scene.guidePointIsRef(g, ref.which) ? `g:${ref.guideId}:${ref.which}` : null;
   }
   return null; // bodyPoint refs are measurement-only; line refs aren't points
 }
@@ -241,9 +248,16 @@ function lineVarKeys(scene: Scene, ref: MeasureRef): [string, string] | null {
     return a && b ? [a, b] : null;
   }
   if (ref.kind === "guideLine") {
-    return scene.getGuide(ref.guideId)
-      ? [`g:${ref.guideId}:a`, `g:${ref.guideId}:b`]
-      : null;
+    // An infinite guideline: its two defining points. A reference polyline's edge `i`:
+    // its two vertices (wrapping on a closed polyline).
+    const g = scene.getGuide(ref.guideId);
+    if (!g) return null;
+    if (g.kind === "line") return ref.edge === undefined ? [`g:${g.id}:a`, `g:${g.id}:b`] : null;
+    if (g.kind !== "poly" || ref.edge === undefined) return null;
+    const n = g.pts.length;
+    const last = g.closed ? n : n - 1;
+    if (ref.edge < 0 || ref.edge >= last) return null;
+    return [`g:${g.id}:${ref.edge}`, `g:${g.id}:${(ref.edge + 1) % n}`];
   }
   if (ref.kind === "patternAxis") {
     // A pattern axis: its seed anchor (`pa`, immovable — the axis pivots about the seed)
@@ -293,7 +307,7 @@ function varWorld(scene: Scene, key: string): Vec2 | null {
   }
   if (parts[0] === "g") {
     const g = scene.getGuide(Number(parts[1]));
-    return g ? vec(g[parts[2] as "a" | "b"].x, g[parts[2] as "a" | "b"].y) : null;
+    return g ? scene.guidePointWorld(g, parts[2]) : null;
   }
   if (parts[0] === "pa" || parts[0] === "pb") {
     const info = scene.patternInfo(Number(parts[1]));
@@ -844,7 +858,7 @@ function applySystem(scene: Scene, sys: System): void {
         parts.length > 3 ? Number(parts[3]) : null
       );
     } else if (parts[0] === "g") {
-      scene.moveGuidePoint(Number(parts[1]), parts[2] as "a" | "b", sys.pos[i]);
+      scene.moveGuidePoint(Number(parts[1]), parts[2], sys.pos[i]);
     } else scene.moveJoint(Number(parts[1]), delta);
   }
 }
@@ -1058,13 +1072,13 @@ export function anchorVarsForJoint(scene: Scene, jointId: number): string[] {
   return k ? [k] : [];
 }
 
-/** Anchor keys pinning a whole guideline (both defining points). */
-export function anchorVarsForGuide(guideId: number): string[] {
-  return [`g:${guideId}:a`, `g:${guideId}:b`];
+/** Anchor keys pinning a whole guide (every defining point). */
+export function anchorVarsForGuide(scene: Scene, guideId: number): string[] {
+  return allGuideVars(scene, guideId);
 }
 
-/** Anchor key pinning one guideline defining point. */
-export function anchorVarForGuidePoint(guideId: number, which: "a" | "b"): string {
+/** Anchor key pinning one guide defining point. */
+export function anchorVarForGuidePoint(guideId: number, which: string): string {
   return `g:${guideId}:${which}`;
 }
 

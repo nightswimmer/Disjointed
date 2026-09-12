@@ -168,6 +168,15 @@ export class SvgRecorder {
   transform(a: number, b: number, c: number, d: number, e: number, f: number): void {
     this.st.m = mul(this.st.m, [a, b, c, d, e, f]);
   }
+  translate(x: number, y: number): void {
+    this.transform(1, 0, 0, 1, x, y);
+  }
+  rotate(angle: number): void {
+    const c = Math.cos(angle), s = Math.sin(angle);
+    this.transform(c, s, -s, c, 0, 0);
+  }
+  /** Clipping is not recorded (the shape-draft hatching is a transient overlay). */
+  clip(): void {}
   setLineDash(segments: number[]): void {
     this.st.dash = [...segments];
   }

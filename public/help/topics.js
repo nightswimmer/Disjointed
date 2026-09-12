@@ -72,6 +72,13 @@ window.DISJOINTED_TOPIC_IDS = {
  "tool-motor": [
   "motor-speed"
  ],
+ "tool-polygon": [
+  "poly-sides"
+ ],
+ "tool-text": [
+  "text-size",
+  "text-edit"
+ ],
  "solver-tuning": [
   "anim-iter-ctrl",
   "cleanup-max-ctrl",

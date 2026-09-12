@@ -340,3 +340,73 @@ export function roundedConvexBody(points: Vec2[], margin: number | number[], seg
   });
   return convexHull(cloud);
 }
+
+/** A circular arc: centre, radius, start angle and signed sweep (radians, screen-y-down). */
+export interface Arc {
+  c: Vec2;
+  r: number;
+  a0: number;
+  sweep: number;
+}
+
+/**
+ * The arc from `a` through `m` to `b` (the unique circle through three points, swept
+ * the way that passes `m`), or null when the points are (near-)collinear.
+ */
+export function arcThrough(a: Vec2, m: Vec2, b: Vec2): Arc | null {
+  const d = 2 * (a.x * (m.y - b.y) + m.x * (b.y - a.y) + b.x * (a.y - m.y));
+  const span = Math.max(dist(a, b), dist(a, m), dist(m, b));
+  if (Math.abs(d) < 1e-9 * span * span || span < 1e-12) return null;
+  const a2 = lenSq(a), m2 = lenSq(m), b2 = lenSq(b);
+  const c = vec(
+    (a2 * (m.y - b.y) + m2 * (b.y - a.y) + b2 * (a.y - m.y)) / d,
+    (a2 * (b.x - m.x) + m2 * (a.x - b.x) + b2 * (m.x - a.x)) / d
+  );
+  const r = dist(c, a);
+  const ang = (p: Vec2): number => Math.atan2(p.y - c.y, p.x - c.x);
+  const a0 = ang(a);
+  const am = ang(m);
+  const ab = ang(b);
+  const tau = Math.PI * 2;
+  // Counter-clockwise (increasing angle) sweep from a to b, and where m sits along it.
+  const ccwB = ((ab - a0) % tau + tau) % tau;
+  const ccwM = ((am - a0) % tau + tau) % tau;
+  const sweep = ccwM <= ccwB ? ccwB : ccwB - tau; // m on the ccw way → ccw, else the other way round
+  return { c, r, a0, sweep };
+}
+
+/** `n` points along an arc (its endpoints included, `n` ≥ 2). */
+export function sampleArc(arc: Arc, n: number): Vec2[] {
+  const out: Vec2[] = [];
+  const k = Math.max(2, n);
+  for (let i = 0; i < k; i++) {
+    const t = arc.a0 + (arc.sweep * i) / (k - 1);
+    out.push(vec(arc.c.x + arc.r * Math.cos(t), arc.c.y + arc.r * Math.sin(t)));
+  }
+  return out;
+}
+
+/** Distance from `p` to the nearest point of an arc (its endpoints included). */
+export function distToArc(p: Vec2, arc: Arc): number {
+  const ang = Math.atan2(p.y - arc.c.y, p.x - arc.c.x);
+  const tau = Math.PI * 2;
+  const rel = ((ang - arc.a0) % tau + tau) % tau; // ccw offset from the start
+  const on = arc.sweep >= 0 ? rel <= arc.sweep : rel >= tau + arc.sweep;
+  if (on) return Math.abs(dist(p, arc.c) - arc.r);
+  const end = vec(arc.c.x + arc.r * Math.cos(arc.a0 + arc.sweep), arc.c.y + arc.r * Math.sin(arc.a0 + arc.sweep));
+  const start = vec(arc.c.x + arc.r * Math.cos(arc.a0), arc.c.y + arc.r * Math.sin(arc.a0));
+  return Math.min(dist(p, start), dist(p, end));
+}
+
+/** The `n` vertices of a regular polygon centred on `c` with one vertex at `first`. */
+export function regularPolygon(c: Vec2, first: Vec2, n: number): Vec2[] {
+  const k = Math.max(3, Math.round(n));
+  const r = dist(c, first);
+  const a0 = Math.atan2(first.y - c.y, first.x - c.x);
+  const out: Vec2[] = [];
+  for (let i = 0; i < k; i++) {
+    const t = a0 + (i / k) * Math.PI * 2;
+    out.push(vec(c.x + r * Math.cos(t), c.y + r * Math.sin(t)));
+  }
+  return out;
+}
