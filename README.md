@@ -377,6 +377,22 @@ through two points — CAD-style scaffolding for laying out a mechanism:
   If a definition edit reshapes a body from under a joint you added **at the assembly level**
   (the new outline no longer covers it), the joint is flagged **red with a dashed ring** rather
   than moved — drag it back inside or adjust the definition.
+- **Edit in context**: **Ctrl+double-click** an instance to open its definition with the
+  **whole surrounding assembly drawn faded in the definition's own frame** — the instance you
+  came through sits exactly on the live definition, everything else appears where it is
+  relative to it (rotated, shifted, mirrored for a mirrored instance; nested components see
+  through every level). The ghost is inert — nothing on it can be selected, dragged or
+  constrained — but its corners, midpoints, edges, joints and rails are **snap targets** (with
+  object snap on), so a hole lands exactly on the pin that will hold it, and the Measure tool
+  can pick its joints / corners / edges / rails for **temporary dimensions**: shown in a muted
+  tint, always driven, never saved, gone when you leave the definition. **Double-click a
+  temporary dimension's value** to move your own geometry so it reads that value (a corner
+  reshapes the body, an edge or body point carries the whole part) — the dimension stays a
+  reference. The **eyes beside the breadcrumbs** (◉ / ◌) choose how far out the ghost reaches:
+  click one to show up to that level, click a shown one to hide it and everything outside it.
+  A plain double-click still opens the definition with the ghost off (turn it on with the
+  eyes); a definition opened from the component browser has no instance to place it by, so its
+  eye stays dimmed.
 - The **component browser** lists definitions: rename inline, **＋** inserts an instance (click
   the canvas to place it), **✎** edits, **×** deletes — any instances of it become plain
   bodies (each keeps its rigid group, but they no longer share a definition).
@@ -554,7 +570,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed)
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed), the context ghost (the enclosing assembly mapped into a definition's frame)
 ```
 
 ## How it works

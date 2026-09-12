@@ -967,15 +967,28 @@ function solveAndApply(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<s
   const snap = snapshot(scene);
   applySystem(scene, build.sys);
   // Re-measure from the actual scene: the edit paths may have adjusted positions
-  // (containment clamps), so verify the applied state truly satisfies everything.
-  const after = buildSystem(scene, override, anchors, guidesAsReference);
-  const bad = residualBreaks(after.sys, after.items).concat(after.invalid);
-  if (bad.length) {
-    restore(scene, snap);
-    return bad;
+  // (containment clamps, the whole-body rigid carry), so verify the applied state
+  // truly satisfies everything. The write-back can move items the solver had left
+  // satisfied — a distorted H/V rectangle repairs through a best-fit rigid *rotation*
+  // that carries its unchanged joints along, tilting a vertical joint pair — so a
+  // failed check gets a few more solve-and-apply passes from the applied state (by
+  // then the body is already square, the rigid fit is the identity and only the
+  // carried items move) before the whole edit is rejected and the scene restored.
+  let bad: SketchBreak[] = [];
+  for (let pass = 0; pass < APPLY_PASSES; pass++) {
+    const after = buildSystem(scene, override, anchors, guidesAsReference);
+    bad = residualBreaks(after.sys, after.items).concat(after.invalid);
+    if (bad.length === 0) return [];
+    if (after.invalid.length || pass === APPLY_PASSES - 1) break;
+    if (!iterate(after.sys, after.items)) break;
+    applySystem(scene, after.sys);
   }
-  return [];
+  restore(scene, snap);
+  return bad;
 }
+
+/** Solve-and-apply passes a write-back drift may take before the edit is rejected. */
+const APPLY_PASSES = 3;
 
 /**
  * Re-solve every sketch constraint + driving dimension from the current geometry and

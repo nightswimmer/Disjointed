@@ -45,6 +45,55 @@ reload; the title shows `• name` while modified), with a timestamped download 
 fallback elsewhere; **auto-backup** (clock button) writes `<name>-backup-<time>.json` into a
 user-chosen folder N minutes after the first change since the last backup / save, pruning to
 the last K, with a change-armed countdown shown in its panel.
+**Context ghost — editing a definition inside its assembly + temporary context dimensions**
+(v21 UI, no format change): **Ctrl+double-click a component instance** opens its definition
+with the **whole enclosing assembly drawn faded in the definition's own frame** — the
+instance you entered through lands exactly on the live definition, so the world around it
+appears rotated / shifted (mirrored for a mirrored instance) by the inverse of that
+instance's placement; nested levels compose through every placement on the way in. New
+`src/context.ts`: `buildContextGhost(sources, components, depth)` builds one **scratch
+`Scene` per enclosing context** (root = level 0 … immediate parent), each loaded from the
+stored context snapshot (`rootData` / the ancestor def's data — both kept fresh by every
+`markDirty`'s cascade, so sibling instances of the same def update live), with the
+reference instance's own material stripped (`removeInstance`; the **joints other elements
+placed on its bodies are kept as free points** — assembly pins, neighbour links: the spots
+one aligns to), the context's guides / dimensions / sketch dropped, and everything mapped
+by `applyInversePlacement` (translate −pos, rotate −angle about the origin, reflect y → −y
+when mirrored — via `moveBody` / `rotateBody` / `mirrorBodies` so anchors and body-owned
+rail tracks ride along). Main keeps `viaStack` (the instance each `editPath` level was
+entered through; null from the browser's ✎ / an empty component — the placement chain
+**breaks** there and that level plus everything outside it can't be shown), `ghostDepth`
+(enclosing levels shown, 0 = off, Infinity = all; Ctrl entry → all, plain entry → off),
+lazily rebuilt `ghostLevels` (`invalidateGhost` on markDirty / enter / exit / undo;
+history entries now carry `via`). **Breadcrumb eyes**: every ancestor crumb gets a ◉/◌
+toggle that sets the depth to reach exactly that context (a shown level's eye hides it
+and everything outside; dimmed from the first unplaceable level). Renderer: `RenderInput.
+ghostScenes` drawn after grid + guides, under the geometry — thin ink outlines with a
+whisper of fill (`GHOST_FILL_ALPHA` / `GHOST_STROKE_ALPHA`), hollow joint rings, thin rail
+arrows. The ghost is **inert**: never selectable, draggable or constrainable. It takes
+part in exactly two things. **Object snap**: `objSnapTargets` = `objSnapTargetsOf(scene,…)`
+(the old body, now scene-parametrised, like `bodyControlLoops` / `bodyVertexRefAt` /
+`bodyEdgeRefAt`) + the ghost's features with **refs stripped to null** (cached per build in
+`ghostTargets`) — positions snap, but `updateDragAlign` skips ref-less targets, so no
+implicit constraint / guide auto-coincident / measurement can ever bind live geometry to
+the ghost. **Temporary context dimensions**: the Measure tool falls back to `ghostRefAt(p)`
+(joint → corner → rail → edge on the ghost, innermost level first; draw mode only) when no
+live reference is under the cursor; a pick pair with a ghost end (`GhostRef {kind:
+"ghost", level, ref}` / `TempRef`) creates a **`TempDim`** in a main-side per-level list
+(`tempDims[depth]`; negative ids; never serialized; dropped on exit of that level / on any
+document swap; pruned per frame when an end stops resolving) instead of a scene
+measurement — driven, drawn in the muted `TEMP_MEASURE_COLOR` (`MeasureInfo.temp`), label
+draggable, selectable (`Selection.kind "tempDim"`, rendered as a measure selection),
+deletable, both-ends-on-ghost allowed as a read-out. `measureInfoFor(id, a, b, axis,
+labelPos)` (model.ts, extracted from `Scene.measureInfo`, `refCenter` exported) measures
+two independently resolved refs. **One-shot move** (`applyTempDimValue`): double-click a
+temp dim's value and type — the **live** side moves so the dimension reads the value,
+exactly as a drag of that feature would (a corner reshapes via `moveBodyVertex`, a joint
+slides in its body, an edge / body point / rail carries the whole rigid unit — body, group
+or instance — `moveUnitOfBody`; guide points / lines move too), then `enforcePose` +
+the anchored `solveSketch` (symmetric fallback); off-target by > `TEMP_DIM_TOL` → the
+context snapshot is restored and the dim flashes red; both ends on the ghost rejects. The
+dimension stays driven. Tests: `scripts/context-ghost.ts` (30 checks).
 **Implicit constraints while dragging** (draw mode, no format change): hold a dragged point /
 line over another element for ~0.4 s to arm it as the **alignment candidate** (violet, replaced
 by the next hover, dropped with Esc); release with the dragged reference H/V-aligned with a
@@ -1342,6 +1391,14 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
   behaviour is exactly as before (immovable-vs-immovable conflicts still report).
   See "Solver notes" below.
 - **sketch.ts** — the **sketch solver** (draw-mode only; the sim solver is untouched).
+  **Multi-pass write-back** (`solveAndApply`, `APPLY_PASSES = 3`): after `applySystem` the
+  system is re-measured from the real scene; if the check fails the solver does not reject
+  at once but rebuilds from the *applied* state, iterates and applies again (up to three
+  passes) — the write-back itself can move items the iteration had left satisfied (the
+  whole-body rigid carry rotates a distorted body's unchanged joints along with it), and
+  by the second pass the body is already square so only the carried items move. Only a
+  system still off after the passes (or with invalid items) restores the snapshot and
+  returns breaks — reject semantics are unchanged for genuinely impossible edits.
   Gauss-Seidel projection like solver.ts, but the variables are *shape*: the world
   positions of body **control vertices** (`v:body:index`) and **joints** (`j:id`) — a
   joint coincident with one of its body's control vertices maps onto the vertex variable
@@ -1404,6 +1461,17 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
   (residual reshape via `moveBodyVertex`), then joints. Distance dimensions off an
   **H/V-constrained line** shift along the exact world axis (`axisNormalOf`), not the line's
   momentary normal, so a transient mid-sweep tilt can't leak motion into the free direction.
+- **context.ts** — the **context ghost** (v21): `GhostSource { data, via }` (one enclosing
+  context snapshot + the instance the next-inner definition was entered through),
+  `buildContextGhost(sources, components, depth) → (Scene | null)[]` aligned with the
+  sources (null beyond `depth` levels from the immediate parent, or outside a `via: null`
+  break) — per level a scratch Scene: `loadContext` (deep-clones), reference instance
+  stripped (outside joints on its bodies detached to free points, then `removeInstance`),
+  guides / measurements / sketch cleared, then `applyInversePlacement(scene, T)` for its
+  own placement and every inner one (innermost last). `applyInversePlacement` maps a whole
+  context by T⁻¹ with the Scene's rigid primitives (`ownedTrackJointsOf` keeps body-owned
+  rail joints from moving twice; the mirror reflects about y = 0 by `mirrorBodies("v")`
+  plus a shift measured on a probe body / joint tracked by id).
 - **pose.ts** — **pose-level sketch**: draw-mode driving dimensions (`isPoseDim`, both
   ends instance-owned) and sketch constraints (`isPoseConstraint`, every end
   instance-owned — a single-line H/V included) on component-instance geometry. They
@@ -1502,7 +1570,13 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
   permission may come back as "prompt".
 - **view.ts** — camera transform `screen = world * scale + (tx, ty)`; `screenToWorld`,
   `worldToScreen`, cursor-anchored `zoomAt` (scale clamped to MIN_SCALE..MAX_SCALE = 0.05..20).
-- **renderer.ts** — **component focus pass** (`highlightOccurrences`): after everything is
+- **renderer.ts** — **context ghost pass** (`ghostScenes: Scene[]`, v21): right after the
+  grid + guides and under every live body, each ghost level draws via `drawGhostScene` —
+  body outlines with holes (even-odd) in theme ink at `GHOST_FILL_ALPHA` / stroke
+  `GHOST_STROKE_ALPHA`, hollow `JOINT_R − 1` joint rings, thin `drawRailArrow`s; no labels,
+  hulls or handles. Temporary context dimensions arrive in the normal `measurements` feed
+  flagged `MeasureInfo.temp` and take `TEMP_MEASURE_COLOR` (selection / flash still win).
+  **Component focus pass** (`highlightOccurrences`): after everything is
   drawn, a surface-coloured veil (`FOCUS_VEIL_ALPHA` 0.8) fades the picture and the hovered
   component's occurrences are redrawn on top (bodies via the `drawBodyShape` closure, a
   dashed hull per occurrence via `drawMaterialHull`, joints via `drawJoint`). **Construction
@@ -1847,6 +1921,17 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
     its **chassis group**; Shift-rigid-drag of a grabbed member moves the whole instance
     sim-style (internal mechanism articulates). The breadcrumb bar (`#crumb-bar`) overlays
     the canvas top-left. The `#component-group` toolbar group hides in sim, like the others.
+  - **Context ghost state** (v21, see context.ts): `viaStack: (number | null)[]` parallel
+    to `editPath` (pushed by `enterComponent(defId, via, withGhost)` — the instance
+    double-click passes `inst.id` + `e.ctrlKey`; the browser's ✎ / empty-component entry
+    pass null), `ghostDepth` (`setGhostDepth` from the crumb eyes), `ghostLevels` /
+    `ghostDirty` / `ghostTargets` (`invalidateGhost` → `ensureGhost` rebuilds lazily from
+    `ghostSources()` = `rootData` + ancestor def data; `ghostScenes()` feeds the renderer
+    and the snap targets), `tempDims: TempDim[][]` per level (+ `dimEditTemp` for the
+    value editor, `LeftDrag.measureLabel.temp` for label drags). `setDocument(doc, path,
+    via)` re-enters with the recorded `via` (history entries carry it) and drops temp dims.
+    `updateCrumbBar` renders the eyes: context i is *placeable* iff every `viaStack[m]`,
+    m ≥ i, is non-null; shown iff placeable and `n − i ≤ ghostDepth`.
   - **Theme** (`#theme-btn`): a dark/light toggle that sets `data-theme` on `<html>` (CSS vars drive
     the chrome) and passes the matching `DARK_THEME`/`LIGHT_THEME` palette to the renderer; the
     choice persists in `localStorage` (`disjointed:theme`, separate from scene autosave).
@@ -2115,7 +2200,16 @@ Select mode (default, no tool armed):
   instances), and Shift-drag poses their internal mechanism sim-style. **Double-click an
   instance** (or ✎ in the component browser) to edit its definition in its own context —
   breadcrumbs at the top-left, every tool available, changes **cascade to all instances
-  live**, Esc (idle) or a breadcrumb exits. Grounding inside a definition = "fixed to the
+  live**, Esc (idle) or a breadcrumb exits. **Ctrl+double-click** enters **in context**: the
+  whole enclosing assembly is drawn faded in the definition's frame (the entered instance
+  sits on the live definition) — inert, but its corners / midpoints / edges / joints / rails
+  are **object-snap targets** (positions only: nothing can be constrained to the ghost), and
+  the Measure tool can pick its joints / corners / edges / rails for **temporary context
+  dimensions** (muted tint, driven, never saved, gone on exit; double-click the value to
+  **move your geometry** so the dimension reads it — a corner reshapes, an edge / body point
+  carries the whole part; the dimension stays driven). The **breadcrumb eyes** (◉ / ◌ beside
+  each ancestor crumb) choose how far out the ghost reaches; a level entered from the
+  component browser has no placement and can't be shown. Grounding inside a definition = "fixed to the
   component frame" (the rigid chassis); grounding an instance's body in the assembly fixes
   its chassis in the world. The **component browser** (toolbar toggle) renames / inserts /
   edits / deletes definitions. **⊞ with exactly one instance selected forks it** ("make
@@ -2474,7 +2568,11 @@ Persistence:
   constant radius, downstream pin propagates the rotation). Serialize/load round-trips both
   constraint kinds intact; removing a slider drops its actuator (rider survives as a free joint);
   removing a motor's body drops the motor (via joint-pruning).
-- **sketch.ts (scripts)** — sketch constraints + driving dimensions end-to-end:
+- **sketch.ts (scripts)** — sketch constraints + driving dimensions end-to-end (+4 checks
+  for the multi-pass write-back: a distorted H/V rectangle carrying a vertically
+  constrained joint pair with a 100 mm dimension repairs in one solve — back to a
+  rectangle, pair vertical and 100 apart — and a conflicting H on that pair still rejects
+  with the geometry untouched):
   `addSketchConstraint` validation (kind/ref mismatches, bodyPoint, same-element,
   unresolvable); H/V/coincident solving on free joints, on a body edge (reshapes the body,
   other joints anchored), and through the node↔joint link (a constraint on a linked joint
@@ -2669,6 +2767,20 @@ Persistence:
   holes. `removeBodyFeatures`: joint + outer vertex + one hole vertex in one call, the
   3-corner floor refuses the outline edit, holes left too small go whole, and deleting
   vertices across three holes (one whole) handles the index shift.
+- **context-ghost.ts** — the context ghost (v21, 30 checks): a placed (rotated +
+  translated) instance's ghost maps an external body's corners and a free joint by the
+  inverse placement; the reference instance's bodies and record are stripped while an
+  assembly-level joint placed on its body survives as a free point at the exact def-local
+  spot it covers; a sibling instance of the same def stays (mapped); no guides / dims /
+  sketch in the ghost; the source snapshot is untouched; depth 0 and `via: null` yield
+  null; `measureInfoFor` measures a live point against a ghost joint; a **mirrored**
+  reference instance reflects the world into the def frame (free joint + every corner);
+  **nesting** (root → Outer → Inner, Outer's data built directly with an Inner instance at
+  (0, 40) / 90°, Outer placed at (200, 100) / 45°): two levels, the root landmark composed
+  through both inverse placements, Outer's plate through one, Inner's own body dropped,
+  depth 1 = the immediate parent only, a broken chain hides everything outside it; and
+  `applyInversePlacement` exactly undoes a hand-built mirrored + rotated + translated
+  placement of plain material.
 - **split-combine.ts** — Split + Combine (69 checks). Union primitive: overlapping squares
   → one 8-gon of the right area, shared edge → 4-vertex rectangle, corner touch → pinched,
   disjoint → two regions, two C shapes → a new hole, partially covered hole shrinks, input
@@ -2719,6 +2831,18 @@ Persistence:
   cm code 5; a rotated body exports rotated.
 
 ## Bugs found & fixed so far
+- **A definition's sketch could deadlock — every solve rejected, drags left uncorrected**
+  (seen on "Door Rail Big": an H/V rectangle with driving dimensions and a vertically
+  constrained, 100 mm-dimensioned joint pair could be pulled out of square). Once the body
+  was slightly distorted, repairing it went through `applyRigidParts`' best-fit rigid
+  motion — a small *rotation*, three corners in place and one off — which carried the
+  body's unchanged joint variables along and tilted the pair; the post-apply residual
+  check then failed and `solveAndApply` restored the snapshot, so nothing was ever
+  enforced again (on load or after any drag), while the joint items were the ones
+  reported. Not a conflict: with the pair excluded the body snapped square at once and the
+  full system then solved. Fixed with the **multi-pass write-back** (`APPLY_PASSES`):
+  a failed check re-solves from the applied state before rejecting. Regression checks in
+  `scripts/sketch.ts`.
 - **Copy/paste dropped the hole index on vertex / edge refs** (`insertSelection`'s ref remap
   rebuilt `{ kind, bodyId, index }` without `hole`), so a constraint / dimension on a hole
   corner pasted onto the outer outline's corner of the same index. Fixed while adding
@@ -2909,6 +3033,15 @@ Persistence:
   the saved scene headlessly and by driving the app in Chrome with Playwright.
 
 ## Backlog / next steps (not yet built)
+- **Context-ghost follow-ups** (v21 scope decisions): no way to **switch the reference
+  instance** once inside (re-enter through the other instance); a level entered from the
+  component browser / an empty component has no placement (its eye stays dimmed); the
+  ghost drops the parent's **guides** (could return as snap-only lines); temporary context
+  dimensions are **per session** (not in undo history, not saved — a "pin as guide"
+  action turning a ghost feature into a persistent def guide point would be the way to
+  keep one); no hotkey for the eyes; the ghost also shows in sim inside a definition
+  (static, by design). The one-shot move emulates a drag of the picked feature — a
+  modifier to force a whole-part move from a corner pick is not built.
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);
   an auto-constraint on/off toggle in the toolbar; auto-coincident while *dragging* (today
   it's inferred only while drawing); a radius dimension on a *sharp* corner can't be

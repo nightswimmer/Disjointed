@@ -588,6 +588,9 @@ export interface MeasureInfo {
    *  a definition edit reset instance poses, or a held partner couldn't follow a drag)
    *  — rendered in an error style until re-applied. */
   violated?: boolean;
+  /** A temporary context dimension (one end on the faded enclosing-assembly ghost while a
+   *  definition is edited): drawn in the muted context tint, never persisted. */
+  temp?: boolean;
   labelPos: Vec2;
   /** The disk a diameter dimension measures (its value is 2·r; drawn with a ⌀ prefix). */
   circle?: { c: Vec2; r: number };
@@ -2863,15 +2866,7 @@ export class Scene {
       // The corner may have become a disk's (nodes removed down to one): then no display.
       const corner = this.cornerOfRef(m.refA);
       info = corner ? radiusInfo(m.id, corner, labelPos) : null;
-    } else if (a.kind === "point" && b.kind === "point") {
-      info = pointPointInfo(m.id, a.p, b.p, m.axis, labelPos);
-    } else if (a.kind === "line" && b.kind === "line") {
-      info = lineLineInfo(m.id, a, b, labelPos);
-    } else {
-      const p = a.kind === "point" ? a.p : (b as { kind: "point"; p: Vec2 }).p;
-      const line = a.kind === "line" ? a : (b as { kind: "line"; a: Vec2; b: Vec2 });
-      info = pointLineInfo(m.id, p, line, labelPos);
-    }
+    } else info = measureInfoFor(m.id, a, b, m.axis, labelPos);
     if (info && m.driving) {
       info.driving = true;
       if (m.mode === "draw" && m.target !== undefined && info.kind === "distance") {
@@ -5892,8 +5887,29 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
 }
 
 /** Representative centre of a resolved reference (the label anchors to the midpoint of the two). */
-function refCenter(r: ResolvedMeasureRef): Vec2 {
+export function refCenter(r: ResolvedMeasureRef): Vec2 {
   return r.kind === "point" ? r.p : scale(add(r.a, r.b), 0.5);
+}
+
+/**
+ * The value + drawing geometry of a distance / angle dimension between two *resolved*
+ * references (point+point along `axis`, point+line perpendicular, line+line distance
+ * or angle). Scene-independent, so a dimension whose ends live in different scenes —
+ * a temporary context dimension onto the enclosing-assembly ghost — can use it too.
+ * Diameter / radius axes are not handled here (they need the disk / corner itself).
+ */
+export function measureInfoFor(
+  id: number,
+  a: ResolvedMeasureRef,
+  b: ResolvedMeasureRef,
+  axis: MeasureAxis,
+  labelPos: Vec2
+): MeasureInfo | null {
+  if (a.kind === "point" && b.kind === "point") return pointPointInfo(id, a.p, b.p, axis, labelPos);
+  if (a.kind === "line" && b.kind === "line") return lineLineInfo(id, a, b, labelPos);
+  const p = a.kind === "point" ? a.p : (b as { kind: "point"; p: Vec2 }).p;
+  const line = a.kind === "line" ? a : (b as { kind: "line"; a: Vec2; b: Vec2 });
+  return pointLineInfo(id, p, line, labelPos);
 }
 
 /**

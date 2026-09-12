@@ -41,6 +41,12 @@ export interface RenderInput {
    *  ones nested inside other instances): the rest of the picture fades, these draw on
    *  top with the hover tint plus a dashed hull each. */
   highlightOccurrences: ComponentOccurrence[] | null;
+  /**
+   * Context ghost while a component definition is edited: the enclosing contexts'
+   * material (scratch scenes, already in this definition's frame — see context.ts),
+   * drawn faded under everything and never interactive. Empty at the root / when off.
+   */
+  ghostScenes: Scene[];
   /** Joints highlighted as in-progress tool picks (connect's first pick, rail picks). */
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
@@ -305,6 +311,11 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       crosshair(ctx, a, px, theme.ink, false);
     }
   }
+
+  // Context ghost: the enclosing assembly, faded, under the live definition. Bodies as
+  // thin outlines with a whisper of fill, joints as hollow rings, rails as thin arrows —
+  // enough to align to, muted enough never to be mistaken for editable material.
+  for (const g of input.ghostScenes) drawGhostScene(ctx, g, px, theme);
 
   // Bodies.
   const selectedBody =
@@ -960,6 +971,58 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
  *  towards the background (0.8 leaves ~20% of the original strength). */
 const FOCUS_VEIL_ALPHA = 0.8;
 
+/**
+ * Draw one context-ghost level: every body outline (holes included), every joint as a
+ * hollow ring and every rail as a thin double arrow, all in the ink tone at low alpha
+ * so the picture reads as "surroundings", not as material of this definition.
+ */
+function drawGhostScene(
+  ctx: CanvasRenderingContext2D,
+  g: Scene,
+  px: (n: number) => number,
+  theme: Theme
+): void {
+  const stroke = theme.ink + GHOST_STROKE_ALPHA;
+  ctx.save();
+  ctx.setLineDash([]);
+  for (const body of g.bodies) {
+    const verts = g.bodyWorldVerts(body);
+    const holes = g.bodyHolesWorld(body);
+    ctx.beginPath();
+    verts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+    for (const loop of holes) {
+      loop.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+    }
+    ctx.fillStyle = theme.ink + GHOST_FILL_ALPHA;
+    ctx.fill("evenodd");
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = px(1.2);
+    ctx.stroke();
+  }
+  for (const c of g.constraints) {
+    if (c.kind !== "slider") continue;
+    const ja = g.getJoint(c.railA);
+    const jb = g.getJoint(c.railB);
+    if (!ja || !jb) continue;
+    drawRailArrow(ctx, g.jointWorld(ja), g.jointWorld(jb), stroke, px(1), px(RAIL_HEAD * 0.8));
+  }
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = px(1.2);
+  for (const j of g.joints) {
+    const p = g.jointWorld(j);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, px(JOINT_R - 1), 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** Context-ghost alphas (hex suffixes on the theme ink): a whisper of fill, a light stroke. */
+const GHOST_FILL_ALPHA = "0d";
+const GHOST_STROKE_ALPHA = "55";
+
 /** Accent colour for pattern overlays (fixed across themes, like the other semantic accents). */
 const PATTERN_COLOR = "#f28cb1";
 
@@ -1089,6 +1152,8 @@ function drawLabelPill(
 
 /** Accent colour for measurements (fixed across themes, like the other semantic accents). */
 const MEASURE_COLOR = "#46c2cb";
+/** Temporary context dimensions (definition ↔ enclosing-assembly ghost): a muted measure tint. */
+const TEMP_MEASURE_COLOR = "#7fa6a9";
 /** Construction guidelines: muted, CAD-centre-line grey (reads on both themes). */
 const GUIDE_COLOR = "#9aa0ac";
 /** Accent colour for sketch constraints (violet, distinct from every other accent). */
@@ -1276,7 +1341,11 @@ function drawMeasurement(
   // A violated driving dimension (its measured value drifted from the target — e.g. a
   // definition edit reset instance poses, or a grounded partner couldn't follow a drag)
   // stays in the error red until re-applied.
-  const color = flashed || info.violated ? FLASH_COLOR : selected ? theme.ink : MEASURE_COLOR;
+  // A temporary context dimension (onto the enclosing-assembly ghost) takes a muted
+  // tint of the measure colour: it reads as a reference to the surroundings, not as
+  // part of this definition's dimension scheme.
+  const color =
+    flashed || info.violated ? FLASH_COLOR : selected ? theme.ink : info.temp ? TEMP_MEASURE_COLOR : MEASURE_COLOR;
   ctx.strokeStyle = color;
 
   // Extension / leader lines: thin and dashed.

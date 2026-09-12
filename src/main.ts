@@ -33,15 +33,20 @@ import {
   MeasureHighlight,
   VERTEX_LINK_EPS,
   MeasureRef,
+  MeasureAxis,
   ResolvedMeasureRef,
   SketchConstraintKind,
   sameMeasureRef,
+  measureInfoFor,
+  measureAxisForPlacement,
+  refCenter,
   Unit,
   UNIT_TO_MM,
   cascadeComponentChange,
   reexpandData,
   PatternSeed,
 } from "./model";
+import { buildContextGhost, GhostSource } from "./context";
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
 import { collectCutSheet, toDxf, toSvg } from "./export";
 import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig, resetPoseBaselines } from "./solver";
@@ -60,7 +65,7 @@ type Tool =
   | "linearActuator" | "motor" | "measure" | "patternLinear" | "patternCircular"
   | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
 /** An existing element picked in normal/select mode. */
-type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "guide" | "pattern"; id: number };
+type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "guide" | "pattern" | "tempDim"; id: number };
 
 /** The tools that place a sketch constraint (tool name = constraint kind). */
 const CONSTRAINT_TOOLS = new Set<Tool>([
@@ -136,6 +141,42 @@ const scene = new Scene();
  */
 let editPath: number[] = [];
 let rootData: SceneData | null = null;
+/**
+ * Context ghost (see context.ts): while a definition is open, the enclosing assembly
+ * can be shown faded in the definition's own frame. `viaStack[k]` is the instance in
+ * context k (0 = root) through which definition `editPath[k]` was entered — null when
+ * entered from the component browser with no instance to place by (the placement chain
+ * breaks there). `ghostDepth` = how many enclosing levels are shown, counted outward
+ * from the immediate parent (0 = off; Infinity = the whole assembly); the breadcrumb
+ * eyes set it. `ghostLevels` is the built ghost, aligned with the contexts (rebuilt
+ * lazily after any change — `ghostDirty`), and `ghostTargets` caches its object-snap
+ * features (refs stripped: snapping onto the ghost never mints a constraint).
+ */
+let viaStack: (number | null)[] = [];
+let ghostDepth = 0;
+let ghostLevels: (Scene | null)[] = [];
+let ghostDirty = true;
+let ghostTargets: { points: SnapPoint[]; lines: SnapLine[] } | null = null;
+/** A measure reference into one level of the context ghost (never persisted). */
+type GhostRef = { kind: "ghost"; level: number; ref: MeasureRef };
+/** A reference the measure tool can pick: live geometry, or a ghost feature. */
+type TempRef = MeasureRef | GhostRef;
+/**
+ * A temporary context dimension: at least one end on the ghost. Read-only in the CAD
+ * sense (always driven), never saved, lives only while its definition level is open.
+ * Typing a value performs a one-shot move of the live side (see applyTempDimValue).
+ * Ids are negative so they never collide with the scene's measurement ids.
+ */
+interface TempDim {
+  id: number;
+  refA: TempRef;
+  refB: TempRef;
+  labelOffset: Vec2;
+  axis: MeasureAxis;
+}
+/** Temporary dimensions per open definition level (`tempDims[editPath.length - 1]`). */
+let tempDims: TempDim[][] = [];
+let tempDimSeq = -1;
 /** Camera saved per context depth, restored when exiting back to it. */
 const savedViews: { scale: number; tx: number; ty: number }[] = [];
 /** One-shot pending placement: the next canvas click drops an instance of this def. */
@@ -305,7 +346,7 @@ let rotateDrag: RotateDrag | null = null;
 /** Motor tool: first click picks the pivot joint, second the crank pin on the same body. */
 let motorPivotDraft: number | null = null;
 /** Measure tool: the references picked so far (0–2); the third click places the label. */
-let measurePicks: MeasureRef[] = [];
+let measurePicks: TempRef[] = [];
 /** How close (screen px) a click must land to a measurement's value label to pick it. */
 const LABEL_PICK_RADIUS = 16;
 /** Constraint tools: the reference(s) picked so far (0–1; the finishing pick commits). */
@@ -319,6 +360,8 @@ let sketchGlyphCache: SketchGlyphView[] = [];
 const GLYPH_PICK_RADIUS = 10;
 /** Measurement being edited in the inline dimension-value input, or null. */
 let dimEditId: number | null = null;
+/** The temporary context dimension the value editor is open on (one-shot move), or null. */
+let dimEditTemp: number | null = null;
 /**
  * Visibility toggles (session-only, like the grid): hiding is purely visual — hidden
  * constraints still solve, hidden measurements still exist — but the hidden layer isn't
@@ -338,7 +381,7 @@ function setMeasureVisible(on: boolean): void {
   measureVisBtn.classList.toggle("active", on);
   if (!on) {
     closeDimEditor();
-    if (selection?.kind === "measure") selection = null;
+    if (selection?.kind === "measure" || selection?.kind === "tempDim") selection = null;
   }
 }
 
@@ -497,7 +540,8 @@ type LeftDrag =
   | { kind: "vertex"; bodyId: number; index: number; hole: number | null; grabOffset: Vec2; moved: boolean; osnap?: DragObjSnap; align?: DragAlign }
   // Per-corner radius handle: the cursor's position maps straight to that corner's radius.
   | { kind: "fillet"; bodyId: number; index: number; hole: number | null; moved: boolean }
-  | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean }
+  // `temp` marks a temporary context dimension's label (main-side list, not the scene).
+  | { kind: "measureLabel"; id: number; grabOffset: Vec2; moved: boolean; temp?: boolean }
   // A pattern's handle: an axis end (re-aims + re-spaces that direction) or the circular centre.
   | { kind: "patternHandle"; id: number; axis: number | "centre"; moved: boolean }
   // Whole-guideline move (angle preserved; anchored on its point `a`)…
@@ -547,6 +591,10 @@ function dragAnchorWorld(d: LeftDrag): Vec2 {
   }
   if (d.kind === "body") return add(scene.getBody(d.id)!.pos, d.anchorOffset);
   if (d.kind === "measureLabel") {
+    if (d.temp) {
+      const td = getTempDim(d.id);
+      return (td && tempDimLabelPos(td)) ?? vec(0, 0);
+    }
     return scene.measurementLabelPos(scene.getMeasurement(d.id)!) ?? vec(0, 0);
   }
   if (d.kind === "patternHandle") {
@@ -596,10 +644,10 @@ function bodyDragAnchor(bodyId: number, grab: Vec2): Vec2 {
 type ObjSnapPick = { ref: MeasureRef; anchor: Vec2; spec: DragAnchorSpec };
 
 /** The control loops (outer outline + holes) of a body in world space. */
-function bodyControlLoops(body: Body): { verts: Vec2[]; hole: number | null }[] {
-  const loops = [{ verts: scene.bodyControlWorld(body), hole: null as number | null }];
+function bodyControlLoops(body: Body, s: Scene = scene): { verts: Vec2[]; hole: number | null }[] {
+  const loops = [{ verts: s.bodyControlWorld(body), hole: null as number | null }];
   for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
-    loops.push({ verts: scene.bodyHoleControlWorld(body, hi), hole: hi });
+    loops.push({ verts: s.bodyHoleControlWorld(body, hi), hole: hi });
   }
   return loops;
 }
@@ -748,16 +796,49 @@ function objSnapTargets(
   excludeJoints: Set<number>,
   excludeVertex?: { bodyId: number; keys: Set<string> }
 ): { points: SnapPoint[]; lines: SnapLine[] } {
+  const own = objSnapTargetsOf(scene, excludeBodies, excludeJoints, excludeVertex);
+  // The context ghost's features snap too (a hole onto the pin that will hold it), as
+  // positions only: their refs are stripped, so no implicit constraint, guide
+  // auto-coincident or measurement can ever bind live geometry to the ghost.
+  const ghost = ghostSnapTargets();
+  if (!ghost) return own;
+  return { points: own.points.concat(ghost.points), lines: own.lines.concat(ghost.lines) };
+}
+
+/** The ghost's object-snap features (cached per build), or null when no ghost is shown. */
+function ghostSnapTargets(): { points: SnapPoint[]; lines: SnapLine[] } | null {
+  const levels = ghostScenes();
+  if (levels.length === 0) return null;
+  if (!ghostTargets) {
+    const points: SnapPoint[] = [];
+    const lines: SnapLine[] = [];
+    for (const g of levels) {
+      const t = objSnapTargetsOf(g, new Set(), new Set());
+      for (const p of t.points) points.push({ p: p.p, ref: null });
+      for (const l of t.lines) lines.push({ a: l.a, b: l.b, infinite: l.infinite, ref: null });
+    }
+    ghostTargets = { points, lines };
+  }
+  return ghostTargets;
+}
+
+/** The object-snap features of one scene (the live scene, or a context-ghost level). */
+function objSnapTargetsOf(
+  s: Scene,
+  excludeBodies: Set<number>,
+  excludeJoints: Set<number>,
+  excludeVertex?: { bodyId: number; keys: Set<string> }
+): { points: SnapPoint[]; lines: SnapLine[] } {
   const points: SnapPoint[] = [];
   const lines: SnapLine[] = [];
-  for (const body of scene.bodies) {
+  for (const body of s.bodies) {
     if (excludeBodies.has(body.id)) continue;
     // A vertex reshape / feature-set drag: its own body's other features are fair
     // targets (a hole centre onto a corner, say), but not the moving vertices, the edges
     // they end (and their midpoints), or the centroid — all of which move and would stick.
     const ex = excludeVertex?.bodyId === body.id ? excludeVertex.keys : null;
     if (!ex) points.push({ p: body.pos, ref: null });
-    for (const { verts, hole } of bodyControlLoops(body)) {
+    for (const { verts, hole } of bodyControlLoops(body, s)) {
       const n = verts.length;
       const exAt = (i: number): boolean => !!ex && ex.has(vertKey(hole, i));
       for (let i = 0; i < n; i++) {
@@ -782,22 +863,22 @@ function objSnapTargets(
     }
   }
   const jointExcluded = (id: number): boolean => {
-    const j = scene.getJoint(id);
+    const j = s.getJoint(id);
     return !j || excludeJoints.has(id) || (j.bodyId !== null && excludeBodies.has(j.bodyId));
   };
-  for (const j of scene.joints) {
-    if (!jointExcluded(j.id)) points.push({ p: scene.jointWorld(j), ref: { kind: "joint", jointId: j.id } });
+  for (const j of s.joints) {
+    if (!jointExcluded(j.id)) points.push({ p: s.jointWorld(j), ref: { kind: "joint", jointId: j.id } });
   }
-  for (const c of scene.constraints) {
+  for (const c of s.constraints) {
     if (c.kind !== "slider" || jointExcluded(c.railA) || jointExcluded(c.railB)) continue;
     lines.push({
-      a: scene.jointWorld(scene.getJoint(c.railA)!),
-      b: scene.jointWorld(scene.getJoint(c.railB)!),
+      a: s.jointWorld(s.getJoint(c.railA)!),
+      b: s.jointWorld(s.getJoint(c.railB)!),
       infinite: false,
       ref: { kind: "rail", sliderId: c.id },
     });
   }
-  for (const g of scene.guides) {
+  for (const g of s.guides) {
     points.push({ p: g.a, ref: { kind: "guidePoint", guideId: g.id, which: "a" } });
     points.push({ p: g.b, ref: { kind: "guidePoint", guideId: g.id, which: "b" } });
     lines.push({ a: g.a, b: g.b, infinite: true, ref: { kind: "guideLine", guideId: g.id } });
@@ -1580,7 +1661,7 @@ function defaultCursor(): string {
 const HINTS: Record<Mode | Tool | "select", string> = {
   draw: "",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · with a body selected, Shift+drag a box from empty space to select several of its corners / holes / joints (Ctrl+Shift adds) — drag any of them to move the set, Delete removes it, Ctrl+C copies its holes + joints (with their constraints) and Ctrl+V pastes them into the selected body at the cursor · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
+  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · with a body selected, Shift+drag a box from empty space to select several of its corners / holes / joints (Ctrl+Shift adds) — drag any of them to move the set, Delete removes it, Ctrl+C copies its holes + joints (with their constraints) and Ctrl+V pastes them into the selected body at the cursor · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition (Ctrl+double-click shows the surrounding assembly faded in its frame — a context ghost to snap and dimension to; the breadcrumb eyes set how far out it reaches) · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
   body: "Empty space: click vertices to draw a polygon. Joints: click joints to build a body, click a node again to finish, then move out to set thickness and click.",
   hole: "Round hole: press inside a body and drag out the radius. Polygon hole: click inside a body to start a cut-out, then click more vertices (all inside that body); click the first vertex (or press Enter) to close it.",
   split: "Click a point on a body's outline (edge or corner) to start the cut, click inside to route it, then click the outline again to split the body in two along the path.",
@@ -1596,7 +1677,7 @@ const HINTS: Record<Mode | Tool | "select", string> = {
   rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. A multi-selection or group rotates as one about its centre. Snaps to 45°.",
   linearActuator: "Click a slider or rail to make it self-driving — its carriage travels back and forth when animation runs (a rail with no rider gets a free one).",
   motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
-  measure: "Click two references — a joint, body corner, body edge, rail, guideline, or a point on a body — then click where the value should sit.",
+  measure: "Click two references — a joint, body corner, body edge, rail, guideline, or a point on a body — then click where the value should sit. Inside a component with the context ghost shown, a faded joint / corner / edge / rail makes a temporary dimension (double-click its value to move your geometry there).",
   coincident: "Click two points (joints, body corners, or guideline points) to make them share a position — or a point and a line (body edge, rail or guideline) to hold the point on the infinite line.",
   horizontal: "Click a body edge, rail or guideline — or two points — to make it horizontal.",
   vertical: "Click a body edge, rail or guideline — or two points — to make it vertical.",
@@ -2021,8 +2102,9 @@ function scheduleAutosave(): void {
 
 // --- undo / redo (snapshot history of the drawn layout) ------------------
 const HISTORY_LIMIT = 100;
-/** JSON document snapshots + the editing path they were taken in. */
-const history: { snap: string; path: number[] }[] = [];
+/** JSON document snapshots + the editing path they were taken in (and the instances
+ *  each level was entered through, so undo / redo restore the same context ghost). */
+const history: { snap: string; path: number[]; via: (number | null)[] }[] = [];
 let historyIndex = -1;
 
 /** Record the current state as a history step (deduped) and drop the redo branch. */
@@ -2033,7 +2115,7 @@ function pushHistory(): void {
     return; // nothing actually changed
   }
   history.splice(historyIndex + 1); // discard any redo entries past the current point
-  history.push({ snap, path: [...editPath] });
+  history.push({ snap, path: [...editPath], via: [...viaStack] });
   if (history.length > HISTORY_LIMIT) history.shift();
   historyIndex = history.length - 1;
 }
@@ -2045,6 +2127,7 @@ function markDirty(): void {
   // solve (sim entry, or a rigid Shift-drag) re-locks the relative angles as now drawn.
   resetPoseBaselines();
   syncComponentContext();
+  invalidateGhost(); // the cascade refreshed the enclosing snapshots the ghost is built from
   pushHistory();
   scheduleAutosave();
   updateCompPanel();
@@ -2052,21 +2135,27 @@ function markDirty(): void {
   armBackupTimer();
 }
 
-/** Load a whole document and re-enter the given editing path (root when empty). */
-function setDocument(doc: SceneData, path: number[]): void {
+/** Load a whole document and re-enter the given editing path (root when empty); `via`
+ *  names the instance each level was entered through (context ghost placement). */
+function setDocument(doc: SceneData, path: number[], via: (number | null)[] = []): void {
   resetPoseBaselines(); // new document, new drawn poses — stale baselines must go
   scene.load(doc); // validates; loads the root context + component definitions
   editPath = [];
+  viaStack = [];
+  tempDims = []; // temporary context dimensions don't survive a document swap
   rootData = null;
   savedViews.length = 0;
   for (const defId of path) {
     const def = scene.getComponent(defId);
     if (!def) break;
     if (editPath.length === 0) rootData = scene.serializeContext();
+    viaStack.push(via[editPath.length] ?? null);
+    tempDims.push([]);
     editPath.push(defId);
     savedViews.push({ ...view });
     scene.loadContext(def.data);
   }
+  invalidateGhost();
   resetTransient(); // selection / drafts may reference ids that no longer exist
   updateCrumbBar();
   updateCompPanel();
@@ -2080,14 +2169,14 @@ function undo(): void {
   if (mode !== "draw" || historyIndex <= 0) return;
   historyIndex--;
   const e = history[historyIndex];
-  setDocument(JSON.parse(e.snap) as SceneData, e.path);
+  setDocument(JSON.parse(e.snap) as SceneData, e.path, e.via);
 }
 
 function redo(): void {
   if (mode !== "draw" || historyIndex >= history.length - 1) return;
   historyIndex++;
   const e = history[historyIndex];
-  setDocument(JSON.parse(e.snap) as SceneData, e.path);
+  setDocument(JSON.parse(e.snap) as SceneData, e.path, e.via);
 }
 
 /** Offer `text` as a file download named `name`. */
@@ -2613,8 +2702,15 @@ function selectInstance(inst: ComponentInstance): void {
   setMulti(bodies, joints);
 }
 
-/** Enter a definition's own editing context (all normal tools work inside it). */
-function enterComponent(defId: number): void {
+/**
+ * Enter a definition's own editing context (all normal tools work inside it). `via` is
+ * the instance (in the context being left) the definition is entered through — it
+ * places the context ghost; null (component browser) leaves the ghost unplaceable at
+ * this level. `withGhost` shows the whole enclosing assembly straight away
+ * (Ctrl+double-click); a plain entry starts with the ghost off (the breadcrumb eyes
+ * turn it on).
+ */
+function enterComponent(defId: number, via: number | null = null, withGhost = false): void {
   const def = scene.getComponent(defId);
   if (!def) return;
   if (editPath[editPath.length - 1] === defId) return; // already editing this definition
@@ -2622,6 +2718,10 @@ function enterComponent(defId: number): void {
   syncComponentContext(); // store whatever definition we're leaving behind
   if (editPath.length === 0) rootData = scene.serializeContext();
   editPath.push(defId);
+  viaStack.push(via);
+  tempDims.push([]);
+  ghostDepth = withGhost ? Infinity : 0;
+  invalidateGhost();
   savedViews.push({ ...view });
   scene.loadContext(def.data);
   resetTransient();
@@ -2638,6 +2738,8 @@ function exitComponent(levels = 1): void {
   for (let k = 0; k < levels && editPath.length > 0; k++) {
     syncComponentContext(); // def.data updated + cascaded; rootData refreshed
     editPath.pop();
+    viaStack.pop();
+    tempDims.pop(); // this level's temporary context dimensions end with it
     const v = savedViews.pop();
     const parentData =
       editPath.length === 0 ? rootData! : scene.getComponent(editPath[editPath.length - 1])!.data;
@@ -2654,16 +2756,25 @@ function exitComponent(levels = 1): void {
   // violated), then let free geometry follow the moved instances.
   enforcePose(scene);
   solveSketch(scene);
+  invalidateGhost();
   resetTransient();
   updateCrumbBar();
   updateCompPanel();
   pushHistory();
 }
 
+/**
+ * The breadcrumb bar: one crumb per context on the editing path, and beside every
+ * ancestor crumb an **eye** that shows / hides that context in the context ghost —
+ * clicking an eye sets the ghost depth to reach exactly that level (a shown level's
+ * eye hides it and everything outside it). Eyes are disabled from the first level
+ * whose placement is unknown (entered from the browser, no instance to place by).
+ */
 function updateCrumbBar(): void {
   crumbBar.classList.toggle("hidden", editPath.length === 0);
   crumbBar.innerHTML = "";
   if (editPath.length === 0) return;
+  const n = editPath.length;
   const names = ["Assembly", ...editPath.map((id) => scene.getComponent(id)?.name ?? `#${id}`)];
   names.forEach((name, i) => {
     if (i > 0) {
@@ -2682,11 +2793,391 @@ function updateCrumbBar(): void {
       btn.className = "crumb";
       btn.textContent = name;
       btn.title = `Back to ${name}`;
-      btn.addEventListener("click", () => exitComponent(editPath.length - i));
+      btn.addEventListener("click", () => exitComponent(n - i));
       crumbBar.appendChild(btn);
+      // Context i is placeable only if every placement from it inward is known.
+      const placeable = viaStack.slice(i, n).every((v) => v !== null);
+      const shown = placeable && n - i <= ghostDepth;
+      const eye = document.createElement("button");
+      eye.className = "crumb-eye" + (shown ? " on" : "") + (placeable ? "" : " off");
+      eye.textContent = shown ? "◉" : "◌";
+      eye.disabled = !placeable;
+      eye.title = !placeable
+        ? `Can't show ${name} here — this level was entered without an instance to place it by (Ctrl+double-click an instance to edit it in context)`
+        : shown
+          ? `Hide ${name} (and everything outside it) from the context ghost`
+          : `Show the context ghost out to ${name}`;
+      eye.addEventListener("click", () => setGhostDepth(shown ? n - i - 1 : n - i));
+      crumbBar.appendChild(eye);
     }
   });
 }
+
+// --- context ghost (the enclosing assembly, faded, in the definition's frame) ---------
+/** Set how many enclosing levels the context ghost shows (0 = off) and refresh. */
+function setGhostDepth(depth: number): void {
+  ghostDepth = Math.max(0, depth);
+  invalidateGhost();
+  updateCrumbBar();
+}
+
+function invalidateGhost(): void {
+  ghostDirty = true;
+  ghostTargets = null;
+}
+
+/** The enclosing contexts of the open definition, outermost first (empty at the root). */
+function ghostSources(): GhostSource[] {
+  const out: GhostSource[] = [];
+  for (let k = 0; k < editPath.length; k++) {
+    const data = k === 0 ? rootData : scene.getComponent(editPath[k - 1])?.data ?? null;
+    if (!data) break;
+    out.push({ data, via: viaStack[k] ?? null });
+  }
+  return out;
+}
+
+/** Rebuild the ghost if anything it depends on changed since the last build. */
+function ensureGhost(): void {
+  if (!ghostDirty) return;
+  ghostDirty = false;
+  ghostTargets = null;
+  ghostLevels =
+    editPath.length > 0 && ghostDepth > 0 ? buildContextGhost(ghostSources(), scene.components, ghostDepth) : [];
+}
+
+/** The shown ghost levels (scratch scenes in this definition's frame), for drawing and snapping. */
+function ghostScenes(): Scene[] {
+  ensureGhost();
+  return ghostLevels.filter((g): g is Scene => g !== null);
+}
+
+/**
+ * The ghost feature a measure-tool click at `p` would pick (innermost level first):
+ * a joint, a body corner, a rail, a body edge. Nothing else — no body interiors, disk
+ * rims, guides or pattern axes: the ghost offers alignment features, not material.
+ */
+function ghostRefAt(p: Vec2): GhostRef | null {
+  if (mode !== "draw") return null;
+  ensureGhost();
+  for (let k = ghostLevels.length - 1; k >= 0; k--) {
+    const g = ghostLevels[k];
+    if (!g) continue;
+    const j = g.jointAt(p, pickRadius());
+    if (j) return { kind: "ghost", level: k, ref: { kind: "joint", jointId: j.id } };
+    const v = bodyVertexRefAt(p, g);
+    if (v) return { kind: "ghost", level: k, ref: v };
+    const sl = g.sliderAt(p, pickRadius());
+    if (sl) return { kind: "ghost", level: k, ref: { kind: "rail", sliderId: sl.id } };
+    const e = bodyEdgeRefAt(p, g);
+    if (e) return { kind: "ghost", level: k, ref: e };
+  }
+  return null;
+}
+
+/** Resolve a live or ghost reference to world geometry (null when its element is gone). */
+function resolveTemp(r: TempRef): ResolvedMeasureRef | null {
+  if (r.kind !== "ghost") return scene.resolveMeasureRef(r);
+  ensureGhost();
+  return ghostLevels[r.level]?.resolveMeasureRef(r.ref) ?? null;
+}
+
+function sameTempRef(a: TempRef, b: TempRef): boolean {
+  if (a.kind === "ghost" || b.kind === "ghost") {
+    return a.kind === "ghost" && b.kind === "ghost" && a.level === b.level && sameMeasureRef(a.ref, b.ref);
+  }
+  return sameMeasureRef(a, b);
+}
+
+// --- temporary context dimensions -----------------------------------------------------
+/** This definition level's temporary dimensions (none at the root). */
+function curTempDims(): TempDim[] {
+  return editPath.length > 0 ? (tempDims[editPath.length - 1] ??= []) : [];
+}
+
+function getTempDim(id: number): TempDim | undefined {
+  return curTempDims().find((t) => t.id === id);
+}
+
+function tempDimAnchor(td: TempDim): Vec2 | null {
+  const a = resolveTemp(td.refA);
+  const b = resolveTemp(td.refB);
+  return a && b ? scale(add(refCenter(a), refCenter(b)), 0.5) : null;
+}
+
+function tempDimLabelPos(td: TempDim): Vec2 | null {
+  const anchor = tempDimAnchor(td);
+  return anchor ? add(anchor, td.labelOffset) : null;
+}
+
+/** A temporary dimension's value + drawing geometry this frame (null if an end is gone). */
+function tempDimInfo(td: TempDim): MeasureInfo | null {
+  const a = resolveTemp(td.refA);
+  const b = resolveTemp(td.refB);
+  if (!a || !b) return null;
+  const labelPos = add(scale(add(refCenter(a), refCenter(b)), 0.5), td.labelOffset);
+  const info = measureInfoFor(td.id, a, b, td.axis, labelPos);
+  if (info) info.temp = true;
+  return info;
+}
+
+/** Preview for the measure tool once one pick is on the ghost (label at the cursor). */
+function tempDimPreview(refA: TempRef, refB: TempRef, labelPos: Vec2): MeasureInfo | null {
+  const a = resolveTemp(refA);
+  const b = resolveTemp(refB);
+  if (!a || !b) return null;
+  const axis = a.kind === "point" && b.kind === "point" ? measureAxisForPlacement(a.p, b.p, labelPos) : "direct";
+  const info = measureInfoFor(-1, a, b, axis, labelPos);
+  if (info) info.temp = true;
+  return info;
+}
+
+/** Create a temporary dimension between two picks (at least one on the ghost). */
+function addTempDim(refA: TempRef, refB: TempRef, labelPos: Vec2): TempDim | null {
+  const a = resolveTemp(refA);
+  const b = resolveTemp(refB);
+  if (!a || !b) return null;
+  const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
+  const td: TempDim = {
+    id: tempDimSeq--,
+    refA,
+    refB,
+    labelOffset: sub(labelPos, anchor),
+    axis: a.kind === "point" && b.kind === "point" ? measureAxisForPlacement(a.p, b.p, labelPos) : "direct",
+  };
+  curTempDims().push(td);
+  return td;
+}
+
+/** Move a temporary dimension's label (a point pair re-derives h / v / direct, like the scene's). */
+function setTempDimLabel(td: TempDim, labelPos: Vec2): void {
+  const a = resolveTemp(td.refA);
+  const b = resolveTemp(td.refB);
+  if (!a || !b) return;
+  const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
+  td.labelOffset = sub(labelPos, anchor);
+  if (a.kind === "point" && b.kind === "point") td.axis = measureAxisForPlacement(a.p, b.p, labelPos);
+}
+
+function removeTempDim(id: number): void {
+  const list = curTempDims();
+  const i = list.findIndex((t) => t.id === id);
+  if (i >= 0) list.splice(i, 1);
+}
+
+/** The temporary dimension whose label sits under `p` (topmost first), or null. */
+function tempDimLabelAt(p: Vec2): TempDim | null {
+  if (!measureVisible || mode !== "draw") return null;
+  const list = curTempDims();
+  for (let i = list.length - 1; i >= 0; i--) {
+    const lp = tempDimLabelPos(list[i]);
+    if (lp && dist(lp, p) <= LABEL_PICK_RADIUS / view.scale) return list[i];
+  }
+  return null;
+}
+
+/** Drop temporary dimensions whose ends no longer resolve (a def edit removed a corner,
+ *  a cascade removed the sibling body a ghost ref named…); called once per frame. */
+function pruneTempDims(): void {
+  const list = curTempDims();
+  if (list.length === 0) return;
+  const keep = list.filter((t) => resolveTemp(t.refA) && resolveTemp(t.refB));
+  if (keep.length !== list.length) {
+    list.length = 0;
+    list.push(...keep);
+    if (selection?.kind === "tempDim" && !keep.some((t) => t.id === selection!.id)) selection = null;
+  }
+}
+
+/** The selection as the renderer sees it: in sim only a measurement selection is
+ *  meaningful (labels stay editable there); a selected temporary context dimension
+ *  highlights like a measurement (its negative id can't collide with the scene's). */
+function renderSelection(): RenderInput["selection"] {
+  if (!selection) return null;
+  const { kind, id } = selection;
+  if (kind === "tempDim") return mode === "draw" ? { kind: "measure", id } : null;
+  if (mode === "draw" || kind === "measure") return { kind, id };
+  return null;
+}
+
+/** Renderer feed: this level's temporary dimensions (draw mode, measurements visible). */
+function tempDimsView(): MeasureInfo[] {
+  if (!measureVisible || mode !== "draw") return [];
+  const out: MeasureInfo[] = [];
+  for (const td of curTempDims()) {
+    const info = tempDimInfo(td);
+    if (info) out.push(info);
+  }
+  return out;
+}
+
+/**
+ * The rigid unit a live reference moves with when a temporary dimension is typed into:
+ * a component instance inside the definition moves whole (its shape is design-locked),
+ * a grouped body takes its group (bodies + locked free joints), else the body alone.
+ */
+function moveUnitOfBody(bodyId: number): { bodies: number[]; joints: number[]; instanceId: number | null } {
+  const inst = scene.instanceOfBody(bodyId);
+  if (inst) {
+    const bodies = new Set<number>();
+    const joints = new Set<number>();
+    addInstanceMembers(inst, bodies, joints);
+    return { bodies: [...bodies], joints: [...joints], instanceId: inst.id };
+  }
+  const g = scene.groupOf(bodyId);
+  if (g) return { bodies: [...g.bodyIds], joints: [...g.jointIds], instanceId: null };
+  return { bodies: [bodyId], joints: [], instanceId: null };
+}
+
+/**
+ * One-shot move for a temporary context dimension: type a value → the **live** side
+ * moves so the dimension measures it, exactly as if it had been dragged there (the
+ * ghost side is the surroundings and never moves; the dimension stays driven). What
+ * moves follows the picked feature, like a drag of it would: a corner reshapes its
+ * body, a joint slides within its body, an edge / body point / rail carries the whole
+ * rigid unit (body, group or instance). The definition's own constraints and driving
+ * dimensions hold through the anchored sketch solve; if they leave the value off
+ * target the edit is rejected (scene restored, red flash). Returns whether it applied.
+ */
+function applyTempDimValue(td: TempDim, target: number): boolean {
+  const reject = (): boolean => {
+    flashSketchItems([{ id: td.id, kind: "dimension", error: Infinity }]);
+    return false;
+  };
+  const liveIsA = td.refA.kind !== "ghost";
+  const liveIsB = td.refB.kind !== "ghost";
+  if (liveIsA === liveIsB) return reject(); // both ends on the ghost: nothing here can move
+  const liveRef = (liveIsA ? td.refA : td.refB) as MeasureRef;
+  const a = resolveTemp(td.refA);
+  const b = resolveTemp(td.refB);
+  const info = tempDimInfo(td);
+  if (!a || !b || !info || info.kind !== "distance") return reject();
+  const live = liveIsA ? a : b;
+  const fixed = liveIsA ? b : a;
+  const sgn = (x: number): number => (x < 0 ? -1 : 1);
+  let delta: Vec2;
+  if (live.kind === "point" && fixed.kind === "point") {
+    if (td.axis === "h") delta = vec(fixed.p.x + sgn(live.p.x - fixed.p.x) * target - live.p.x, 0);
+    else if (td.axis === "v") delta = vec(0, fixed.p.y + sgn(live.p.y - fixed.p.y) * target - live.p.y);
+    else {
+      const d = sub(live.p, fixed.p);
+      const l = Math.hypot(d.x, d.y);
+      const u = l > 1e-9 ? scale(d, 1 / l) : vec(1, 0);
+      delta = sub(add(fixed.p, scale(u, target)), live.p);
+    }
+  } else if (live.kind === "point" && fixed.kind === "line") {
+    const n = perp(normalize(sub(fixed.b, fixed.a)));
+    const d = dot(sub(live.p, fixed.a), n);
+    delta = scale(n, sgn(d) * target - d);
+  } else if (live.kind === "line" && fixed.kind === "point") {
+    // Moving the line by δ along its normal changes the point's signed distance by −δ.
+    const n = perp(normalize(sub(live.b, live.a)));
+    const d = dot(sub(fixed.p, live.a), n);
+    delta = scale(n, d - sgn(d) * target);
+  } else if (live.kind === "line" && fixed.kind === "line") {
+    const n = perp(normalize(sub(fixed.b, fixed.a)));
+    const d = dot(sub(refCenter(live), fixed.a), n);
+    delta = scale(n, sgn(d) * target - d);
+  } else return reject();
+  if (!Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return reject();
+
+  const before = JSON.stringify(scene.serializeContext());
+  const anchors = new Set<string>();
+  const movedInstances = new Set<number>();
+  const moveUnit = (unit: { bodies: number[]; joints: number[]; instanceId: number | null }): void => {
+    const carried = scene.ownedTrackJointsOf(unit.bodies);
+    for (const id of unit.bodies) {
+      scene.moveBody(id, delta);
+      for (const k of anchorVarsForBody(scene, id)) anchors.add(k);
+    }
+    for (const id of unit.joints) {
+      const j = scene.getJoint(id);
+      if (!j || j.bodyId !== null || carried.has(id)) continue;
+      scene.moveJoint(id, delta);
+      for (const k of anchorVarsForJoint(scene, id)) anchors.add(k);
+    }
+    if (unit.instanceId !== null) movedInstances.add(unit.instanceId);
+  };
+  switch (liveRef.kind) {
+    case "vertex":
+      if (scene.instanceOfBody(liveRef.bodyId)) moveUnit(moveUnitOfBody(liveRef.bodyId));
+      else {
+        scene.moveBodyVertex(liveRef.bodyId, liveRef.index, delta, liveRef.hole ?? null);
+        anchors.add(anchorVarForVertex(liveRef.bodyId, liveRef.index, liveRef.hole ?? null));
+      }
+      break;
+    case "joint": {
+      const j = scene.getJoint(liveRef.jointId);
+      if (!j) return reject();
+      const inst = scene.instanceOfJoint(j.id);
+      if (inst) {
+        const bodies = new Set<number>();
+        const joints = new Set<number>();
+        addInstanceMembers(inst, bodies, joints);
+        moveUnit({ bodies: [...bodies], joints: [...joints], instanceId: inst.id });
+      } else if (j.bodyId === null && scene.groupOfJoint(j.id)) {
+        const g = scene.groupOfJoint(j.id)!;
+        moveUnit({ bodies: [...g.bodyIds], joints: [...g.jointIds], instanceId: null });
+      } else {
+        scene.moveJoint(j.id, delta);
+        for (const k of anchorVarsForJoint(scene, j.id)) anchors.add(k);
+      }
+      break;
+    }
+    case "edge":
+    case "bodyPoint":
+      moveUnit(moveUnitOfBody(liveRef.bodyId));
+      break;
+    case "rail": {
+      const c = scene.constraints.find((cc) => cc.id === liveRef.sliderId);
+      if (!c || c.kind !== "slider") return reject();
+      const done = new Set<number>();
+      for (const jid of [c.railA, c.railB]) {
+        const j = scene.getJoint(jid);
+        if (!j) continue;
+        if (j.bodyId !== null) {
+          const unit = moveUnitOfBody(j.bodyId);
+          if (unit.bodies.some((id) => done.has(id))) continue;
+          unit.bodies.forEach((id) => done.add(id));
+          moveUnit(unit);
+        } else if (!done.has(-jid)) {
+          done.add(-jid);
+          scene.moveJoint(jid, delta);
+          for (const k of anchorVarsForJoint(scene, jid)) anchors.add(k);
+        }
+      }
+      break;
+    }
+    case "guidePoint": {
+      const g = scene.getGuide(liveRef.guideId);
+      if (!g) return reject();
+      scene.moveGuidePoint(liveRef.guideId, liveRef.which, add(liveRef.which === "a" ? g.a : g.b, delta));
+      anchors.add(anchorVarForGuidePoint(liveRef.guideId, liveRef.which));
+      break;
+    }
+    case "guideLine":
+      scene.moveGuide(liveRef.guideId, delta);
+      for (const k of anchorVarsForGuide(liveRef.guideId)) anchors.add(k);
+      break;
+    default:
+      return reject(); // a pattern axis is derived geometry — edit the pattern instead
+  }
+  // Like a drag: pose partners follow the moved instances, then the anchored sketch
+  // solve lets free geometry adapt; if the anchored solve is infeasible the symmetric
+  // one decides where things can actually go.
+  enforcePose(scene, movedInstances.size ? movedInstances : undefined);
+  if (anchors.size === 0 || solveSketch(scene, anchors).length > 0) solveSketch(scene);
+  const after = tempDimInfo(td);
+  if (!after || Math.abs(after.value - target) > TEMP_DIM_TOL) {
+    scene.loadContext(JSON.parse(before) as SceneData);
+    return reject();
+  }
+  markDirty();
+  return true;
+}
+
+/** How far a one-shot move may land from the typed value before it counts as refused. */
+const TEMP_DIM_TOL = 1e-3;
 
 // --- component browser panel -------------------------------------------------
 let compPanelVisible = false;
@@ -3471,15 +3962,15 @@ function constraintPointRefAt(p: Vec2, excludeGuide?: number): MeasureRef | null
 }
 
 /** Topmost body control vertex — outer outline or hole — within pick range, as a ref. */
-function bodyVertexRefAt(p: Vec2): MeasureRef | null {
-  for (let i = scene.bodies.length - 1; i >= 0; i--) {
-    const body = scene.bodies[i];
-    const verts = scene.bodyControlWorld(body);
+function bodyVertexRefAt(p: Vec2, s: Scene = scene): MeasureRef | null {
+  for (let i = s.bodies.length - 1; i >= 0; i--) {
+    const body = s.bodies[i];
+    const verts = s.bodyControlWorld(body);
     for (let vi = 0; vi < verts.length; vi++) {
       if (dist(verts[vi], p) <= pickRadius()) return { kind: "vertex", bodyId: body.id, index: vi };
     }
     for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
-      const hv = scene.bodyHoleControlWorld(body, hi);
+      const hv = s.bodyHoleControlWorld(body, hi);
       for (let vi = 0; vi < hv.length; vi++) {
         if (dist(hv[vi], p) <= pickRadius())
           return { kind: "vertex", bodyId: body.id, index: vi, hole: hi };
@@ -3490,9 +3981,9 @@ function bodyVertexRefAt(p: Vec2): MeasureRef | null {
 }
 
 /** Topmost body control edge — outer outline or hole — within pick range, as a ref. */
-function bodyEdgeRefAt(p: Vec2): MeasureRef | null {
-  for (let i = scene.bodies.length - 1; i >= 0; i--) {
-    const body = scene.bodies[i];
+function bodyEdgeRefAt(p: Vec2, s: Scene = scene): MeasureRef | null {
+  for (let i = s.bodies.length - 1; i >= 0; i--) {
+    const body = s.bodies[i];
     const scanEdges = (verts: Vec2[], hole: number | null): MeasureRef | null => {
       if (verts.length < 2) return null;
       for (let ei = 0; ei < verts.length; ei++) {
@@ -3504,10 +3995,10 @@ function bodyEdgeRefAt(p: Vec2): MeasureRef | null {
       }
       return null;
     };
-    const outer = scanEdges(scene.bodyControlWorld(body), null);
+    const outer = scanEdges(s.bodyControlWorld(body), null);
     if (outer) return outer;
     for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
-      const hit = scanEdges(scene.bodyHoleControlWorld(body, hi), hi);
+      const hit = scanEdges(s.bodyHoleControlWorld(body, hi), hi);
       if (hit) return hit;
     }
   }
@@ -3751,10 +4242,24 @@ function openDimEditor(m: Measurement): void {
   const lp = scene.measurementLabelPos(m);
   if (!info || !lp || info.kind !== "distance") return; // angle dimensions can't drive (v1)
   dimEditId = m.id;
+  showDimEditorAt(lp, info.value);
+}
+
+/** The value editor over a temporary context dimension: Enter performs a one-shot move
+ *  of the live side to the typed value (the dimension itself stays driven). */
+function openTempDimEditor(td: TempDim): void {
+  const info = tempDimInfo(td);
+  const lp = tempDimLabelPos(td);
+  if (!info || !lp || info.kind !== "distance") return;
+  dimEditTemp = td.id;
+  showDimEditorAt(lp, info.value);
+}
+
+function showDimEditorAt(lp: Vec2, value: number): void {
   const sp = worldToScreen(view, lp);
   dimEditInput.style.left = `${sp.x}px`;
   dimEditInput.style.top = `${sp.y}px`;
-  dimEditInput.value = String(Math.round(info.value * 10) / 10);
+  dimEditInput.value = String(Math.round(value * 10) / 10);
   dimEditInput.classList.remove("hidden");
   dimEditInput.focus();
   dimEditInput.select();
@@ -3762,6 +4267,7 @@ function openDimEditor(m: Measurement): void {
 
 function closeDimEditor(): void {
   dimEditId = null;
+  dimEditTemp = null;
   patternEdit = null;
   dimEditInput.classList.add("hidden");
   dimEditInput.blur();
@@ -3773,8 +4279,22 @@ function commitDimEditor(): void {
     return;
   }
   const id = dimEditId;
+  const tempId = dimEditTemp;
   const raw = dimEditInput.value.trim();
   closeDimEditor(); // nulls dimEditId first, so the blur listener doesn't re-commit
+  if (tempId !== null) {
+    // Temporary context dimension: a value is a one-shot move; an empty field is a no-op
+    // (it is always driven — there is nothing to clear).
+    const td = getTempDim(tempId);
+    if (!td || raw === "") return;
+    const target = Number(raw);
+    if (!Number.isFinite(target) || target <= 0) {
+      flashSketchItems([{ id: tempId, kind: "dimension", error: Infinity }]);
+      return;
+    }
+    applyTempDimValue(td, target);
+    return;
+  }
   if (id === null) return;
   const m = scene.getMeasurement(id);
   if (!m) return;
@@ -3802,7 +4322,7 @@ dimEditInput.addEventListener("keydown", (e) => {
   else if (e.key === "Escape") closeDimEditor();
 });
 dimEditInput.addEventListener("blur", () => {
-  if (dimEditId !== null || patternEdit) commitDimEditor();
+  if (dimEditId !== null || dimEditTemp !== null || patternEdit) commitDimEditor();
 });
 
 // --- measure tool ----------------------------------------------------------
@@ -3923,13 +4443,25 @@ function handleMeasureClick(p: Vec2): void {
         return;
       }
     }
-    const ref = measureRefAt(p);
+    // Live geometry first; with nothing there, a feature of the context ghost (a
+    // temporary dimension onto the surroundings — see addTempDim).
+    const ref: TempRef | null = measureRefAt(p) ?? ghostRefAt(p);
     if (!ref) return; // empty space — keep waiting for a reference
-    if (measurePicks.length === 1 && sameMeasureRef(measurePicks[0], ref)) return;
+    if (measurePicks.length === 1 && sameTempRef(measurePicks[0], ref)) return;
     measurePicks.push(ref);
     return;
   }
-  const m = scene.addMeasurement(mode === "sim" ? "sim" : "draw", measurePicks[0], measurePicks[1], p);
+  const [pa, pb] = measurePicks;
+  if (pa.kind === "ghost" || pb.kind === "ghost") {
+    const td = addTempDim(pa, pb, p);
+    disarmTool();
+    if (td) {
+      setMeasureVisible(true);
+      selection = { kind: "tempDim", id: td.id };
+    }
+    return;
+  }
+  const m = scene.addMeasurement(mode === "sim" ? "sim" : "draw", pa, pb, p);
   disarmTool(); // clears the picks (and, via resetTransient, the selection)
   if (m) {
     setMeasureVisible(true); // placing a measurement while hidden would be invisible
@@ -3965,6 +4497,11 @@ function sketchGlyphAt(p: Vec2): number | null {
 /** Normal/select mode: pick a measurement label (topmost overlay), then a joint, a slider rail, a body. */
 function handleSelectClick(p: Vec2): void {
   multiSel = null; // a plain click rebuilds the selection from what's under the cursor
+  const tl = tempDimLabelAt(p);
+  if (tl) {
+    selection = { kind: "tempDim", id: tl.id };
+    return;
+  }
   const ml = measurementLabelAt(p);
   if (ml) {
     selection = { kind: "measure", id: ml.id };
@@ -4303,6 +4840,11 @@ function deleteSelection(): void {
   }
   if (selection.kind === "rail" && scene.instanceOfConstraint(selection.id)) {
     notify("This rail belongs to a component instance — edit the definition, or delete the whole instance.");
+    return;
+  }
+  if (selection.kind === "tempDim") {
+    removeTempDim(selection.id); // not part of the document: no undo step, nothing to save
+    selection = null;
     return;
   }
   // Bodies, joints and rails delete through the whole-slider cascade (v20): any part of a
@@ -5540,6 +6082,11 @@ canvas.addEventListener("mousedown", (e) => {
           const anchor = scene.measurementLabelPos(m) ?? world;
           leftDrag = { kind: "measureLabel", id: m.id, grabOffset: sub(world, anchor), moved: false };
           canvas.style.cursor = "move";
+        } else if (selection?.kind === "tempDim") {
+          const td = getTempDim(selection.id);
+          const anchor = (td && tempDimLabelPos(td)) ?? world;
+          leftDrag = { kind: "measureLabel", id: selection.id, grabOffset: sub(world, anchor), moved: false, temp: true };
+          canvas.style.cursor = "move";
         } else if (selection?.kind === "body") {
           // Object snap on: the reference feature nearest the grab is the anchor (and
           // what snaps); otherwise the centroid or nearest corner grid-snaps.
@@ -5700,7 +6247,10 @@ canvas.addEventListener("mousemove", (e) => {
     // A measurement label follows the cursor exactly (no grid snap — it's an annotation,
     // and a new placement re-derives h/v/direct for a point–point measurement).
     if (leftDrag.kind === "measureLabel") {
-      scene.setMeasurementLabel(leftDrag.id, sub(world, leftDrag.grabOffset));
+      if (leftDrag.temp) {
+        const td = getTempDim(leftDrag.id);
+        if (td) setTempDimLabel(td, sub(world, leftDrag.grabOffset));
+      } else scene.setMeasurementLabel(leftDrag.id, sub(world, leftDrag.grabOffset));
       leftDrag.moved = true;
       return;
     }
@@ -5867,7 +6417,9 @@ window.addEventListener("mouseup", (e) => {
         // drag needs none: a radius change moves no control vertices or joints.)
         solveSketchLive();
       }
-      markDirty(); // persist a reposition (a plain click just selects)
+      // Persist a reposition (a plain click just selects). A temporary context
+      // dimension's label isn't document state — nothing to record.
+      if (!(finished.kind === "measureLabel" && finished.temp)) markDirty();
       // Released on a previewed alignment: place the implicit constraint (after the
       // settle, so it's added to — and solved against — the resting geometry).
       if ("align" in finished && finished.align) placeAlignConstraint(finished, finished.align);
@@ -5927,18 +6479,26 @@ canvas.addEventListener("dblclick", (e) => {
       openPatternEditor(pl.id, pl.field, pl.axis);
       return;
     }
+    const tl = tempDimLabelAt(eventWorld(e));
+    if (tl) {
+      leftDrag = null;
+      openTempDimEditor(tl); // one-shot move of the live side to the typed value
+      return;
+    }
     const ml = measurementLabelAt(eventWorld(e));
     if (ml) {
       leftDrag = null; // the double-click's mousedowns started a label drag — cancel it
       openDimEditor(ml);
       return;
     }
-    // Double-click a component instance to open its definition for editing.
+    // Double-click a component instance to open its definition for editing — through
+    // this instance, so the context ghost can place the surroundings; with Ctrl the
+    // whole enclosing assembly shows faded straight away.
     const b = scene.bodyAt(eventWorld(e));
     const inst = b ? scene.instanceOfBody(b.id) : undefined;
     if (inst) {
       leftDrag = null; // cancel the drag the double-click's mousedowns started
-      enterComponent(inst.defId);
+      enterComponent(inst.defId, inst.id, e.ctrlKey || e.metaKey);
       return;
     }
   }
@@ -6125,7 +6685,7 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   // A selected measurement is deletable in either mode (sim keeps its own set).
-  if ((e.key === "Delete" || e.key === "Backspace") && selection?.kind === "measure") {
+  if ((e.key === "Delete" || e.key === "Backspace") && (selection?.kind === "measure" || selection?.kind === "tempDim")) {
     deleteSelection();
     return;
   }
@@ -6515,15 +7075,17 @@ function measureDraftView(): {
   if (tool !== "measure") return null;
   // A diameter pick (the same disk vertex twice) highlights the disk's rim, not its
   // centre; a radius pick (the same corner vertex twice) highlights the corner's arc.
-  const same = measurePicks.length === 2 && sameMeasureRef(measurePicks[0], measurePicks[1]);
-  const disk = same ? scene.diskOfRef(measurePicks[0]) : null;
-  const cornerArc = same && !disk ? (scene.cornerOfRef(measurePicks[0])?.arc ?? null) : null;
+  const same = measurePicks.length === 2 && sameTempRef(measurePicks[0], measurePicks[1]);
+  const first = measurePicks[0];
+  const plainFirst = first && first.kind !== "ghost" ? first : null;
+  const disk = same && plainFirst ? scene.diskOfRef(plainFirst) : null;
+  const cornerArc = same && plainFirst && !disk ? (scene.cornerOfRef(plainFirst)?.arc ?? null) : null;
   const refs: MeasureHighlight[] = disk
     ? [{ kind: "circle", c: disk.c, r: disk.r }]
     : cornerArc
       ? [{ kind: "arc", ...cornerArc }]
       : measurePicks
-          .map((r) => scene.resolveMeasureRef(r))
+          .map((r) => resolveTemp(r))
           .filter((r): r is ResolvedMeasureRef => r !== null);
   let hover: MeasureHighlight | null = null;
   let preview: MeasureInfo | null = null;
@@ -6531,14 +7093,16 @@ function measureDraftView(): {
     if (measurePicks.length < 2) {
       const rim = measurePicks.length === 0 ? diskRimAt(cursor) : null;
       const arc = measurePicks.length === 0 && !rim ? cornerArcAt(cursor) : null;
-      const h = rim || arc ? null : measureRefAt(cursor);
+      const h: TempRef | null = rim || arc ? null : measureRefAt(cursor) ?? ghostRefAt(cursor);
       hover = rim
         ? { kind: "circle", c: rim.c, r: rim.r }
         : arc
           ? { kind: "arc", ...arc.arc }
           : h
-            ? scene.resolveMeasureRef(h)
+            ? resolveTemp(h)
             : null;
+    } else if (measurePicks[0].kind === "ghost" || measurePicks[1].kind === "ghost") {
+      preview = tempDimPreview(measurePicks[0], measurePicks[1], cursor);
     } else {
       preview = scene.measurePreview(measurePicks[0], measurePicks[1], cursor);
     }
@@ -6752,6 +7316,7 @@ function frame(now?: number): void {
   syncPropsPanel();
   syncUnitSelect();
   syncCompPanelHighlight();
+  pruneTempDims();
   if (sketchFlash && performance.now() >= sketchFlash.until) sketchFlash = null;
   // A hover is a matter of time: while the cursor rests mid-drag (no pointer events
   // arrive then) promote a hover that has lasted long enough — only then, so the target
@@ -6788,9 +7353,12 @@ function frame(now?: number): void {
     hoverJoint,
     hoverBody: mode === "draw" && tool === null ? hoverBody : null,
     highlightOccurrences: highlightedOccurrences(),
+    ghostScenes: ghostScenes(),
     activeJoints: activeJoints(),
-    // In sim only a measurement selection is meaningful (labels stay editable there).
-    selection: mode === "draw" ? selection : selection?.kind === "measure" ? selection : null,
+    // In sim only a measurement selection is meaningful (labels stay editable there). A
+    // selected temporary context dimension highlights like a measurement (its negative
+    // id can't collide with the scene's).
+    selection: renderSelection(),
     multiSelected:
       mode === "draw" && multiSel
         ? { bodies: [...multiSel.bodies], joints: [...multiSel.joints] }
@@ -6812,7 +7380,7 @@ function frame(now?: number): void {
     gridVisible,
     breaks: mode === "sim" ? solveBreaks : [],
     containmentErrors,
-    measurements: measurementsView(),
+    measurements: measurementsView().concat(tempDimsView()),
     measureDraft: measureDraftView(),
     sketchGlyphs: sketchGlyphsView(),
     sketchDraft: sketchDraftView(),

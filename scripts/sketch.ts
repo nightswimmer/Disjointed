@@ -948,6 +948,45 @@ const TOL = sketchConfig.tol;
   check("B did not drift sideways", near(b.x, 0, 1e-6), `${b.x}`);
 }
 
+// --- write-back drift: a distorted H/V rectangle carrying a vertical joint pair ---------
+// Repairing the outline goes through a best-fit rigid *rotation* (three corners in place,
+// one off), which carries the body's unchanged joints along and tilts the pair — the
+// post-apply check used to fail and reject every solve, leaving the definition stuck
+// with its constraints unenforced. Extra solve-and-apply passes settle it instead.
+{
+  const s = new Scene();
+  const b = s.addBody([{ x: 0, y: 0 }, { x: 0, y: 300 }, { x: 21, y: 300 }, { x: 21, y: 0 }]);
+  const edge = (i: number): MeasureRef => ({ kind: "edge", bodyId: b.id, index: i });
+  s.addSketchConstraint("vertical", edge(0));
+  s.addSketchConstraint("horizontal", edge(1));
+  s.addSketchConstraint("vertical", edge(2));
+  s.addSketchConstraint("horizontal", edge(3));
+  const j1 = s.addJoint(b.id, { x: 10, y: 45 });
+  const j2 = s.addJoint(b.id, { x: 10, y: 145 });
+  const jr = (j: { id: number }): MeasureRef => ({ kind: "joint", jointId: j.id });
+  s.addSketchConstraint("vertical", jr(j1), jr(j2));
+  check("joint pair dimension drives", applyDrivingDimension(s, s.addMeasurement("draw", jr(j1), jr(j2), { x: 60, y: 95 })!.id, 100).length === 0);
+  s.moveBodyVertex(b.id, 2, { x: 20, y: 9 }, null); // as a drag left it while solves were rejected
+  const breaks = solveSketch(s);
+  check("distorted H/V rectangle with a vertical joint pair repairs (no reject)", breaks.length === 0, JSON.stringify(breaks));
+  const c = s.bodyControlWorld(b);
+  check(
+    "…back to a rectangle",
+    near(c[0].x, c[1].x, TOL) && near(c[1].y, c[2].y, TOL) && near(c[2].x, c[3].x, TOL) && near(c[3].y, c[0].y, TOL),
+    c.map((p) => `(${p.x.toFixed(2)},${p.y.toFixed(2)})`).join(" ")
+  );
+  const w1 = s.jointWorld(j1);
+  const w2 = s.jointWorld(j2);
+  check("…joint pair vertical and 100 apart", near(w1.x, w2.x, TOL) && near(Math.abs(w2.y - w1.y), 100, TOL), `x ${w1.x.toFixed(3)} / ${w2.x.toFixed(3)}, dy ${(w2.y - w1.y).toFixed(3)}`);
+  // A genuinely impossible system is still rejected, geometry untouched.
+  const geomBefore = JSON.stringify({ c: s.bodyControlWorld(b), j: [s.jointWorld(j1), s.jointWorld(j2)] });
+  const bad = s.addSketchConstraint("horizontal", jr(j1), jr(j2))!;
+  const rejected = solveSketch(s);
+  const geomAfter = JSON.stringify({ c: s.bodyControlWorld(b), j: [s.jointWorld(j1), s.jointWorld(j2)] });
+  check("conflicting H on the vertical pair still rejects, geometry untouched", rejected.length > 0 && geomAfter === geomBefore, `${rejected.length} break(s)`);
+  s.removeSketchConstraint(bad.id);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

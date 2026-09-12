@@ -519,6 +519,30 @@ input[type="color"]#body-color::-webkit-color-swatch {
 #crumb-bar .crumb-sep {
   color: var(--text-dim);
 }
+/* Context-ghost eye beside an ancestor crumb: filled = that context is shown faded in
+   the definition's frame, hollow = hidden, dimmed = unplaceable (no instance to place by). */
+#crumb-bar .crumb-eye {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 3px;
+  margin-right: 2px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+#crumb-bar .crumb-eye.on {
+  color: var(--accent);
+}
+#crumb-bar .crumb-eye:hover:not(:disabled) {
+  background: var(--control-hover);
+}
+#crumb-bar .crumb-eye.off {
+  opacity: 0.35;
+  cursor: default;
+}
 
 /* Component browser panel (top-right of the canvas). */
 #comp-panel {
