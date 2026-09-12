@@ -234,12 +234,31 @@
             <svg class="icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.3" y1="4.3" x2="5.7" y2="5.7"/><line x1="14.3" y1="14.3" x2="15.7" y2="15.7"/><line x1="4.3" y1="15.7" x2="5.7" y2="14.3"/><line x1="14.3" y1="5.7" x2="15.7" y2="4.3"/></svg>
             <svg class="icon-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16 11.6A6.6 6.6 0 0 1 8.4 4 6.6 6.6 0 1 0 16 11.6z" fill="currentColor" stroke="none"/></svg>
           </button>
+          <!-- Help (src/help.ts): opens the manual beside the canvas; while it is open,
+               clicking any control shows its topic. ? toggles it too; F1 opens the contents. -->
+          <button id="help-btn" class="icon-btn" title="Help — open the manual; while it is open, click any control to read about it (?)" aria-label="Help">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .9-1 1.6v.4"/><circle cx="10" cy="14.6" r="0.9" fill="currentColor" stroke="none"/></svg>
+          </button>
         </div>
         <div class="spacer"></div>
         <div id="hint" class="hint"></div>
       </header>
       <div id="canvas-wrap">
         <canvas id="scene"></canvas>
+        <!-- Help drawer (src/help.ts): the manual from public/help/ beside the canvas. -->
+        <aside id="help-drawer" class="hidden" aria-label="Help">
+          <div id="help-grip" title="Drag to resize"></div>
+          <div id="help-head">
+            <span id="help-title">Help</span>
+            <a id="help-popout" class="icon-btn" href="help/index.html" target="_blank" rel="noopener" title="Open the manual in a new tab" aria-label="Open the manual in a new tab">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 4H4v12h12v-4"/><path d="M11 3h6v6"/><path d="M17 3l-8 8"/></svg>
+            </a>
+            <button type="button" id="help-close" class="icon-btn" title="Close help" aria-label="Close help">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="5" x2="15" y2="15"/><line x1="15" y1="5" x2="5" y2="15"/></svg>
+            </button>
+          </div>
+          <iframe id="help-frame" title="Manual"></iframe>
+        </aside>
         <div id="sim-error" class="hidden" role="alert"></div>
         <!-- Toast notifications (src/notify.ts) — the app's replacement for window.alert. -->
         <div id="toast-stack" aria-live="polite"></div>

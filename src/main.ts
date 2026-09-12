@@ -58,6 +58,8 @@ import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolat
 import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt, rotateViewTo, rotateToScreen, rotateToWorld } from "./view";
+import { installHelp } from "./help";
+import { CanvasTopic } from "./helpmap";
 
 type Mode = "draw" | "sim";
 type Tool =
@@ -203,10 +205,13 @@ let theme: "dark" | "light" =
 function applyTheme(): void {
   document.documentElement.dataset.theme = theme;
 }
-function toggleTheme(): void {
-  theme = theme === "dark" ? "light" : "dark";
+function setTheme(next: "dark" | "light"): void {
+  theme = next;
   localStorage.setItem(THEME_KEY, theme);
   applyTheme();
+}
+function toggleTheme(): void {
+  setTheme(theme === "dark" ? "light" : "dark");
 }
 applyTheme();
 themeBtn.addEventListener("click", toggleTheme);
@@ -6725,6 +6730,12 @@ window.addEventListener("keydown", (e) => {
     void openFile();
     return;
   }
+  // F1 opens the manual at its table of contents (from anywhere, fields included).
+  if (e.key === "F1" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    help.open("toc");
+    return;
+  }
   // Keys typed into a toolbar field (or the inline dimension editor) belong to that
   // field — not to canvas shortcuts like Delete or the tool letters.
   const t = e.target;
@@ -6733,6 +6744,12 @@ window.addEventListener("keydown", (e) => {
     t instanceof HTMLSelectElement ||
     t instanceof HTMLTextAreaElement
   ) {
+    return;
+  }
+  // ? toggles the help drawer; while it is open, clicking a control shows its topic.
+  if (e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    help.toggle();
     return;
   }
   // Space toggles the actuator animation (sim mode only).
@@ -7486,7 +7503,14 @@ function frame(now?: number): void {
   containmentErrors = mode === "draw" ? new Set(scene.jointsOutsideBody()) : new Set();
   if (containmentErrors.size !== prevOutside) updateHint();
   pruneFeatureSel(); // the feature selection follows the single body selection + live geometry
-  render(ctx, {
+  render(ctx, renderInput());
+  requestAnimationFrame(frame);
+}
+
+/** Everything the renderer needs for the current frame (also replayed by the automation
+ *  hook to capture the canvas as SVG for the manual). */
+function renderInput(): RenderInput {
+  return {
     scene,
     view,
     mode,
@@ -7543,8 +7567,7 @@ function frame(now?: number): void {
     dragAlign: dragAlignView(),
     flash: sketchFlash?.ids ?? null,
     theme: theme === "light" ? LIGHT_THEME : DARK_THEME,
-  });
-  requestAnimationFrame(frame);
+  };
 }
 
 resize();
@@ -7553,3 +7576,119 @@ pushHistory(); // seed the undo history with the initial (restored) layout
 void initFileState(restored);
 updateHint();
 requestAnimationFrame(frame);
+
+// --- in-app help (src/help.ts) -----------------------------------------------------
+/**
+ * Help mode: the manual topic for whatever is drawn under a canvas point (screen px).
+ * Same hit tests and priorities as a selecting click (labels and badges first, then
+ * joints, guides, rails, holes, bodies), with a joint's role deciding its topic. Empty
+ * canvas explains the armed tool, else the current mode.
+ */
+function canvasTopicAt(s: Vec2): string {
+  const el = (t: CanvasTopic): string => t;
+  const p = screenToWorld(view, s);
+  const r = pickRadius();
+  const cs = scene.constraints;
+  if (viewRotate && dialHit(s)) return "view";
+  if (tempDimLabelAt(p)) return el("el-context-dimension");
+  if (measurementLabelAt(p)) return el("el-dimension");
+  if (patternLabelAt(p) || patternHandleAt(p)) return el("el-pattern");
+  const badge = sketchGlyphAt(p);
+  if (badge !== null) {
+    // Each constraint kind has its own topic (shared with its tool); the badge overview
+    // is the fallback for a badge whose constraint is gone.
+    const kind = scene.getSketchConstraint(badge)?.kind;
+    return kind ? `tool-${kind}` : el("el-constraint");
+  }
+  if (selection?.kind === "body" && (selectedBodyFilletHandleAt(p) || selectedBodyNodeAt(p))) return el("el-handles");
+  const j = scene.jointAt(p, r, mode === "sim" ? "rider" : "rail");
+  if (j) {
+    const id = j.id;
+    if (cs.some((c) => c.kind === "motor" && (c.pivotJointId === id || c.crankJointId === id))) return el("el-motor");
+    if (cs.some((c) => c.kind === "linearActuator" && c.riderId === id)) return el("el-actuator");
+    if (cs.some((c) => c.kind === "slider" && c.locked.includes(id))) return el("el-slider");
+    if (cs.some((c) => c.kind === "slider" && c.riders.includes(id))) return el("el-rider");
+    if (cs.some((c) => c.kind === "ground" && c.joint === id)) return el("el-ground");
+    if (cs.some((c) => c.kind === "pin" && c.rigid === true && (c.jointA === id || c.jointB === id))) return el("el-weld");
+    if (cs.some((c) => c.kind === "pin" && (c.jointA === id || c.jointB === id))) return el("el-pin");
+    if (cs.some((c) => c.kind === "slider" && (c.railA === id || c.railB === id))) return el("el-rail");
+    if (scene.instanceOfJoint(id)) return el("el-instance");
+    return el(j.bodyId === null ? "el-free-joint" : "el-joint");
+  }
+  if (scene.guidePointAt(p, r) || scene.guideAt(p, r)) return el("el-guide");
+  const rail = scene.sliderAt(p, r);
+  if (rail) return el(cs.some((c) => c.kind === "linearActuator" && c.sliderId === rail.id) ? "el-actuator" : "el-rail");
+  const hole = scene.holeAt(p);
+  if (!hole && patternAxisRefAt(p)) return el("el-pattern");
+  if (hole) return el("el-hole");
+  const body = scene.bodyAt(p);
+  if (body) {
+    if (scene.instanceOfBody(body.id)) return el("el-instance");
+    if (scene.groupOf(body.id)) return el("el-group");
+    if (body.grounded) return el("el-grounded-body");
+    return el("el-body");
+  }
+  if (ghostRefAt(p)) return el("el-ghost");
+  if (mode === "sim" && solveBreaks.some((b) => distToSegment(p, b.a, b.b) <= r)) return "impossible";
+  return tool ? `tool-${tool}` : `mode-${mode}`;
+}
+const help = installHelp({ canvasTopic: (at) => canvasTopicAt(vec(at.x, at.y)) });
+
+// --- automation hook (src/automation.ts) ---------------------------------------------
+// Only for the manual generator (scripts/manual): dev server, or `?automation` in the URL.
+// Loaded lazily so the production bundle carries none of it unless asked for.
+if (import.meta.env.DEV || new URLSearchParams(location.search).has("automation")) {
+  void import("./automation").then(({ installAutomation }) =>
+    installAutomation({
+      scene,
+      view,
+      canvas,
+      loadDocument: applyLoadedScene,
+      setMode,
+      setTool: (t) => setTool(t as Tool),
+      disarmTool,
+      fitView,
+      setTheme,
+      getTheme: () => theme,
+      setGridVisible: (on) => {
+        gridVisible = on;
+        gridBtn.classList.toggle("active", on);
+      },
+      setSnap: (on) => {
+        snapEnabled = on;
+        snapBtn.classList.toggle("active", on);
+      },
+      setObjSnap: (on) => {
+        objSnapEnabled = on;
+        osnapBtn.classList.toggle("active", on);
+      },
+      setGridStep,
+      setSelection: (sel) => {
+        multiSel = null;
+        selection = sel as Selection | null;
+      },
+      setMulti: (bodies, joints) => setMulti(new Set(bodies), new Set(joints)),
+      enterComponent,
+      exitComponent,
+      setCompPanelVisible,
+      setAnimating,
+      setCursor: (p) => {
+        cursor = p;
+      },
+      renderInput,
+      state: () => ({
+        mode,
+        tool,
+        selection,
+        multiSel: multiSel ? { bodies: [...multiSel.bodies], joints: [...multiSel.joints] } : null,
+        editPath: [...editPath],
+        theme,
+        animating,
+        gridVisible,
+        snapEnabled,
+        objSnapEnabled,
+        helpOpen: help.isOpen(),
+      }),
+    })
+  );
+}

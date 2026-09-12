@@ -6,6 +6,8 @@ you can then drag and watch move.
 
 > Status: working. Draw a mechanism (freehand or from joints), edit it, switch to simulate, and
 > drag any part of it to drive it. The solver and shape/edit logic are covered by headless tests.
+> A built-in manual opens beside the canvas (the `?` button): click any button or anything on
+> the canvas to read what it is and does.
 
 ## Concepts
 
@@ -544,6 +546,20 @@ items flash red).
 - **Tab** — switch between Draw and Simulate mode.
 - `Ctrl/Cmd+S` save, `Ctrl/Cmd+Shift+S` save as, `Ctrl/Cmd+O` open (see below).
 
+### Help
+- **Help** (the `?` button next to the theme toggle, or the `?` key) opens the manual in a
+  drawer beside the canvas. While it is open the pointer becomes a question mark and every
+  click is a question: click a **toolbar button** to read about that tool, or click **anything
+  on the canvas** — a body, a hole, a joint, a pin, a ground, a rail, a slider, a guideline, a
+  dimension label, a constraint badge (each constraint kind has its own page), a pattern, a
+  component instance — to read what that element is and does. Nothing is activated while the
+  drawer is open; close it (the button, `?`, Esc or the ✕) to get back to work.
+- `F1` opens the manual at its table of contents. The manual also has a short tutorial that
+  builds a four-bar linkage, and a keyboard-shortcut reference.
+- Drag the drawer's left edge to resize it; the arrow button opens the manual in its own tab.
+  Its pictures are vector drawings made by the app's own renderer and follow the light / dark
+  theme.
+
 ### Save, load & backups
 - **Save** (`Ctrl/Cmd+S`, or the toolbar button) writes your mechanism as a `.json` file. In
   Chrome, Edge and other Chromium browsers the first save asks where to put it and every
@@ -572,7 +588,16 @@ npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
 npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed), the context ghost (the enclosing assembly mapped into a definition's frame)
+npm run manual   # regenerate the manual's illustrations (public/help/img) and toolbar glyph tables, and check that every help topic exists
 ```
+
+The manual lives in `public/help/` and is a static page. Its illustrations are generated, not
+drawn by hand: `scripts/manual/shoot.ts` drives the real app in your installed Chrome through
+Playwright (no browser download), builds fixture mechanisms with the Scene API, performs the
+gestures, and captures the canvas through the app's own renderer as SVG (theme colours become
+CSS variables, so one file serves both themes). Add a shot in `scripts/manual/shots.ts` and a
+`<section class="topic" id="…">` in `public/help/index.html`; the generator fails if a topic
+the app can ask for is missing.
 
 ## How it works
 

@@ -861,3 +861,77 @@ input[type="color"]#body-color::-webkit-color-swatch {
 #backup-btn.paused {
   color: #f0b441;
 }
+
+/* --- in-app help (src/help.ts) ------------------------------------------------- */
+
+/* "What's this" mode: every control offers help on click. */
+body.help-armed,
+body.help-armed * {
+  cursor: help !important;
+}
+
+/* The drawer sits beside the canvas as a flex sibling, so the canvas shrinks. A canvas
+   refuses to shrink below its backing-store width unless min-width is released. */
+#canvas-wrap.help-open #scene {
+  width: auto;
+  flex: 1 1 0;
+  min-width: 0;
+}
+#help-drawer {
+  position: relative;
+  flex: 0 0 auto;
+  width: 440px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--panel-border);
+  min-width: 0;
+}
+#help-drawer.hidden {
+  display: none;
+}
+#help-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 3;
+}
+#help-grip:hover {
+  background: var(--accent-dim);
+}
+#help-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px 4px 10px;
+  border-bottom: 1px solid var(--panel-border);
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+}
+#help-title {
+  flex: 1;
+}
+#help-head .icon-btn {
+  width: 28px;
+  height: 28px;
+  color: var(--text);
+  text-decoration: none;
+}
+#help-head .icon-btn svg {
+  width: 18px;
+  height: 18px;
+}
+#help-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  border: 0;
+  background: var(--bg);
+}
+/* Overlays anchored to the right edge of the canvas area move in with the drawer. */
+#canvas-wrap.help-open #comp-panel {
+  right: calc(12px + var(--help-w, 440px));
+}
