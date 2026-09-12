@@ -332,6 +332,112 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   check("inscribed radius: the excluded hole is ignored", near(s.bodyInscribedRadius(body, { x: 20, y: 50 }, 0), 20, 1e-6));
 }
 
+// --- radius dimensions on rounded corners --------------------------------------
+{
+  const s = new Scene();
+  const sq = [
+    { x: 0, y: 0 },
+    { x: 100, y: 0 },
+    { x: 100, y: 100 },
+    { x: 0, y: 100 },
+  ];
+  const body = s.addBody(sq, 10, "fillet");
+  const ref0: MeasureRef = { kind: "vertex", bodyId: body.id, index: 0 };
+  const ref2: MeasureRef = { kind: "vertex", bodyId: body.id, index: 2 };
+
+  const c0 = s.cornerOfRef(ref0);
+  check("cornerOfRef finds a rounded corner", !!c0 && near(c0.r, 10) && !!c0.arc && near(c0.arc.r, 10));
+  check("corner arc centre sits inside the corner", !!c0?.arc && near(c0.arc.c.x, 10) && near(c0.arc.c.y, 10));
+  const disk = s.addBody([{ x: 300, y: 300 }], 25, "offset");
+  check("cornerOfRef rejects a disk centre", s.cornerOfRef({ kind: "vertex", bodyId: disk.id, index: 0 }) === null);
+  check("cornerOfRef rejects a non-vertex ref", s.cornerOfRef({ kind: "bodyPoint", bodyId: body.id, local: { x: 0, y: 0 } }) === null);
+
+  // The same corner vertex twice → a radius dimension.
+  const m = s.addMeasurement("draw", ref0, ref0, { x: -30, y: -30 })!;
+  check("same-corner pair gets the radius axis", m.axis === "radius", m.axis);
+  let info = s.measureInfo(m)!;
+  check("radius value is r", near(info.value, 10), `${info.value}`);
+  check("radius info carries the fillet + single arrow", !!info.fillet && near(info.fillet.r, 10) && info.singleArrow === true);
+  check(
+    "radius line runs from the arc centre out to the arc towards the label",
+    !!info.dim && near(info.dim.a.x, 10) && near(info.dim.a.y, 10) && near(Math.hypot(info.dim.b.x - 10, info.dim.b.y - 10), 10)
+  );
+  check("leader from the arc to a label beyond it", info.ext.length === 1);
+  s.setMeasurementLabel(m.id, { x: 50, y: 50 });
+  check("label move keeps the radius axis", s.getMeasurement(m.id)!.axis === "radius");
+
+  // Driving on a uniform outline (no per-corner override) sets every corner via the default.
+  check("driving the radius succeeds", applyDrivingDimension(s, m.id, 20).length === 0);
+  check(
+    "uniform outline: the default follows, every corner with it",
+    near(body.radius, 20) && body.radii === undefined && s.bodyCornerRadii(body).every((r) => near(r, 20))
+  );
+  info = s.measureInfo(m)!;
+  check("dimension marked driving, value tracks", m.driving === true && near(info.value, 20) && !info.violated);
+
+  // Once a corner carries its own override the outline isn't uniform any more: the
+  // dimension drives just its corner (as an override).
+  s.setBodyCornerRadius(body.id, 2, 5);
+  info = s.measureInfo(m)!;
+  check("dimensioned corner unaffected by another corner's override", near(info.value, 20) && !info.violated);
+  check("driving again on a non-uniform outline succeeds", applyDrivingDimension(s, m.id, 8).length === 0);
+  const radii = s.bodyCornerRadii(body);
+  check("only the dimensioned corner changed", near(radii[0], 8) && near(radii[1], 20) && near(radii[2], 5) && near(radii[3], 20), radii.join(","));
+
+  // The Ctrl-drag path: every corner at once, overrides dropped → uniform again.
+  s.setOutlineRadiusUniform(body.id, 12);
+  check(
+    "uniform set drops overrides and sets the default",
+    body.radii === undefined && near(body.radius, 12) && s.outlineRadiiUniform(body.id, null)
+  );
+  check("radius dimension reads violated after the direct resize", s.measureInfo(m)!.violated === true);
+  solveSketch(s);
+  check(
+    "solveSketch re-applies a driving radius — to every corner of the uniform outline",
+    s.bodyCornerRadii(body).every((r) => near(r, 8, 1e-9)) && !s.measureInfo(m)!.violated,
+    s.bodyCornerRadii(body).join(",")
+  );
+
+  // A first driving distance dimension scales the body uniformly; the dimensioned
+  // radius is put back afterwards (and never blocks the scale).
+  const mEdge = s.addMeasurement("draw", ref0, { kind: "vertex", bodyId: body.id, index: 1 }, { x: 50, y: -30 })!;
+  check("outer driving dimension scales the body", applyDrivingDimension(s, mEdge.id, 200).length === 0);
+  const vw = s.bodyControlWorld(body);
+  check("body doubled", near(vw[1].x - vw[0].x, 200, 1e-6));
+  check(
+    "dimensioned radius kept through the scale",
+    s.bodyCornerRadii(body).every((r) => near(r, 8, 1e-6)) && !s.measureInfo(m)!.violated,
+    s.bodyCornerRadii(body).join(",")
+  );
+
+  // Preview + serialize / load round-trip.
+  const pv = s.measurePreview(ref2, ref2, { x: 120, y: 120 })!;
+  check("preview of a same-corner pair is a radius too", !!pv.fillet && near(pv.value, 8, 1e-6));
+  const t = new Scene();
+  t.load(JSON.parse(JSON.stringify(s.serialize())) as SceneData);
+  const tm = t.getMeasurement(m.id)!;
+  check("radius axis survives load", tm.axis === "radius" && near(t.measureInfo(tm)!.value, 8, 1e-6));
+
+  // Hole corners work the same way, scoped to the hole's own outline.
+  const hb = s.addBody(
+    sq.map((p) => ({ x: p.x + 300, y: p.y })),
+    0,
+    "fillet",
+    [{ control: [{ x: 320, y: 20 }, { x: 380, y: 20 }, { x: 380, y: 80 }, { x: 320, y: 80 }], radius: 4 }]
+  );
+  const hr: MeasureRef = { kind: "vertex", bodyId: hb.id, index: 1, hole: 0 };
+  const hm = s.addMeasurement("draw", hr, hr, { x: 350, y: 50 })!;
+  check("hole corner radius dimension", hm.axis === "radius" && near(s.measureInfo(hm)!.value, 4));
+  check(
+    "driving a hole corner radius (uniform hole → all its corners, outer untouched)",
+    applyDrivingDimension(s, hm.id, 6).length === 0 && near(hb.holes![0].radius, 6) && hb.holes![0].radii === undefined && near(hb.radius, 0)
+  );
+
+  // Removing the corner's vertex drops the dimension like any vertex ref.
+  s.removeBodyVertex(hb.id, 1, 0);
+  check("vertex removal drops its radius dimension", s.getMeasurement(hm.id) === undefined);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

@@ -71,6 +71,42 @@ the selected body** (a different one too) at the cursor; features that would lan
 the target outline are skipped with a notice, and the pasted holes + joints become the new
 feature selection. Outline corners never copy (they belong to the source shape). Shift+drag
 on a body / joint is still the rigid drag; a plain Shift+click on empty space still deselects.
+**Corner-radius dimensions + uniform rounding + badge hover reveal** (no format change beyond
+a new `MeasureAxis` value): **Ctrl/Cmd+drag a radius handle** rounds **every corner of that
+outline** (outer, or that hole) together — `Scene.setOutlineRadiusUniform(bodyId, r, hole)`
+sets the outline default and drops every per-corner override, so the corners read as
+**uniform** (`outlineRadiiUniform` = no `radii` array); Ctrl is read per mouse move, and the
+mousedown handler tests the radius handle *before* the Ctrl+click multi-select toggle so the
+press starts the drag. **Radius dimensions**: `MeasureAxis` gained `"radius"` — the same
+vertex ref twice on any **non-disk corner** (`Scene.cornerOfRef(ref) → CornerRef { bodyId,
+hole, index, v, r, arc }`, built by `outlineCorners(bodyId, hole)` from `filletCornerArcs`
+in fillet mode / the full circle around the point in offset mode; `measureAxisFor` picks it
+after the disk check). `measureInfo` → `radiusInfo` (value r, `MeasureInfo.fillet`, the dim
+line from the arc centre out to the arc towards the label with `singleArrow` (arrow at the
+arc end only) + a dashed leader beyond it; a sharp corner has no line, just the leader; the
+renderer prefixes `R` and draws a **small dot at the arc centre**). Measure tool: a **first
+pick on a rounded corner's arc** (`cornerArcAt`: |dist − r| within pick range and the angle
+on the arc; topmost body, outer or hole; sharp corners have no arc to pick) pushes the
+vertex ref twice and goes to label placement, the draft highlighting the **arc**
+(`MeasureHighlight` gained `{ kind: "arc", c, r, a0, sweep }`); an arc as a *second* pick is
+the corner point (`measureRefAt`). **Driving** a radius (`applyDrivingDimension`, before the
+same-pattern check) → `Scene.setCornerRadiusDriven(bodyId, index, r, hole)`: with the outline
+**uniform** every corner follows (the default is set), otherwise only that corner (an
+override); a pattern member hole edits its seed hole. `enforceDiameterDims` became
+**`enforceSizeDims`** (diameters *and* radii re-applied after every `solveSketch` / body
+scale), `buildSystem` / `scaleEligibleBody` / `isPoseDim` skip radius dims like diameters.
+Direct resizes demote conflicting driving size dims back to driven through
+**`demoteSizeDims(bodyId, hole, corner?)`** (was `demoteDiameterDims`): a plain handle drag
+demotes only that corner's, a Ctrl-drag every radius dim on the outline, `[` / `]` those on
+corners without their own override. **Badge hover reveal**: hovering a constraint badge (the
+topmost one under the cursor — `hoveredBadge` in `sketchGlyphsView`) sets
+`SketchGlyphView.hover = { refs, link }`: the renderer highlights the constraint's resolved
+elements in violet (`drawMeasureRefHighlight`) and draws a **dotted line** along the shortest
+segment between them (`sketchLink` / `closestOnRef` in main — null when they touch: a shared
+corner, a point on its line, crossing lines, or < 2 px apart). Tests:
+`scripts/measurements.ts` (radius section: cornerOfRef, axis, info geometry, uniform vs
+override driving, `setOutlineRadiusUniform`, re-enforce after solve + scale, preview, load,
+hole corners, vertex-removal cascade).
 **View navigation**: zoom range 0.05×–200×; a **fit-to-screen** button + `F` shortcut frames the
 whole mechanism (bodies, joints, ground anchors) centered with a margin; **Tab** toggles
 draw ↔ simulate mode.
@@ -1444,7 +1480,9 @@ and `reexpandData` re-expands it with the flag on an inner-def edit. Toolbar too
   `sketchGlyphs: SketchGlyphView[]` (positions computed by main so hit-testing matches);
   badges render **faded** (alpha 0.2) unless `faded: false` — main sets it when the cursor
   is over one of the constraint's elements or a badge — with selection / reject-flash
-  always at full strength;
+  always at full strength; the glyph whose **badge** is hovered carries `hover: { refs,
+  link }` — its resolved elements are highlighted in violet and `link` (the shortest
+  segment between them, null when they touch) is drawn as a dotted violet line;
   `sketchDraft` highlights constraint-tool picks in violet (reusing
   `drawMeasureRefHighlight`, which took a colour param); `dragSnap` draws the object-snap
   reference (solid) and its snapped target (dashed; a line target extended across the view
@@ -2756,7 +2794,8 @@ Persistence:
 ## Backlog / next steps (not yet built)
 - **Sketch-constraint follow-ups**: driving *angle* dimensions (v1 is distances only);
   an auto-constraint on/off toggle in the toolbar; auto-coincident while *dragging* (today
-  it's inferred only while drawing); constraint badges could use hover feedback.
+  it's inferred only while drawing); a radius dimension on a *sharp* corner can't be
+  placed by picking (no arc to click) — round it first.
   (`mirrorBody` now remaps constraint/measurement refs; copy/paste carries the
   fully-internal ones + driving dimensions.)
 - **Pose-dimension / pose-constraint follow-ups**: ~~sketch *constraints* between

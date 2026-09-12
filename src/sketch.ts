@@ -736,9 +736,9 @@ function buildSystem(
     // Pose dimensions (both ends on instance geometry) are not shape material: they
     // move rigid parts and are enforced by pose.ts, never by this solver.
     .filter((m) => !(scene.refInstanceOwned(m.refA) && scene.refInstanceOwned(m.refB)))
-    // Diameter dimensions set a disk's radius directly (no vertex moves) — see
-    // `enforceDiameterDims`; they have no place in the vertex/joint system.
-    .filter((m) => m.axis !== "diameter")
+    // Diameter / radius dimensions set a disk's or corner's radius directly (no vertex
+    // moves) — see `enforceSizeDims`; they have no place in the vertex/joint system.
+    .filter((m) => m.axis !== "diameter" && m.axis !== "radius")
     .filter((m) => !override || m.id !== override.m.id)
     .map((m) => ({ m, target: m.target! }));
   if (override) dims.push(override);
@@ -989,23 +989,30 @@ function solveAndApply(scene: Scene, override?: DimSpec, anchors?: ReadonlySet<s
  */
 export function solveSketch(scene: Scene, anchors?: ReadonlySet<string>): SketchBreak[] {
   const breaks = solveAndApply(scene, undefined, anchors);
-  enforceDiameterDims(scene);
+  enforceSizeDims(scene);
   return breaks;
 }
 
 /**
- * Re-apply every driving diameter dimension: set its disk's radius to target / 2. A
- * disk's radius never moves a vertex or joint, so this is independent of the vertex
- * system — but a uniform body scale (first-dimension behaviour) scales hole radii too,
- * and this puts a dimensioned disk back. A dimension whose disk is gone (a node was
- * added to the hole) is left alone; it renders violated / not at all.
+ * Re-apply every driving diameter / radius dimension: set its disk's radius to
+ * target / 2, its corner's radius to target. Neither moves a vertex or joint, so this
+ * is independent of the vertex system — but a uniform body scale (first-dimension
+ * behaviour) scales corner radii too, and this puts a dimensioned disk / corner back.
+ * A dimension whose disk / corner is gone is left alone; it renders violated / not at
+ * all.
  */
-export function enforceDiameterDims(scene: Scene): void {
+export function enforceSizeDims(scene: Scene): void {
   for (const m of scene.measurements) {
-    if (m.mode !== "draw" || !m.driving || m.target === undefined || m.axis !== "diameter") continue;
-    const disk = scene.diskOfRef(m.refA);
-    if (!disk || Math.abs(disk.r * 2 - m.target) <= sketchConfig.tol) continue;
-    scene.setDiskRadius(disk.bodyId, m.target / 2, disk.hole);
+    if (m.mode !== "draw" || !m.driving || m.target === undefined) continue;
+    if (m.axis === "diameter") {
+      const disk = scene.diskOfRef(m.refA);
+      if (!disk || Math.abs(disk.r * 2 - m.target) <= sketchConfig.tol) continue;
+      scene.setDiskRadius(disk.bodyId, m.target / 2, disk.hole);
+    } else if (m.axis === "radius") {
+      const corner = scene.cornerOfRef(m.refA);
+      if (!corner || Math.abs(corner.r - m.target) <= sketchConfig.tol) continue;
+      scene.setCornerRadiusDriven(corner.bodyId, corner.index, m.target, corner.hole);
+    }
   }
 }
 
@@ -1143,6 +1150,17 @@ export function applyDrivingDimension(
   const reject = [{ id: measurementId, kind: "dimension" as const, error: Infinity }];
   if (!m || m.mode !== "draw" || !(target > 0)) return reject;
   if (scene.refInstanceOwned(m.refA) && scene.refInstanceOwned(m.refB)) return reject;
+  if (m.axis === "radius") {
+    // A corner's rounding radius is its own parameter: set it directly (every corner of
+    // a uniform outline, else just this one — `setCornerRadiusDriven`). No vertex or
+    // joint moves, so nothing else in the sketch can be disturbed. (A pattern hole's
+    // corner is fine here: the seed's radius is what the members copy.)
+    const corner = scene.cornerOfRef(m.refA);
+    if (!corner) return reject;
+    scene.setCornerRadiusDriven(corner.bodyId, corner.index, target, corner.hole);
+    scene.setMeasurementDriving(m.id, target);
+    return [];
+  }
   // Both ends inside one pattern (seed ↔ member, member ↔ member): the spacing is the
   // pattern's own parameter — edit it on the pattern, not through a dimension.
   const pa = scene.patternOfRef(m.refA);
@@ -1162,7 +1180,7 @@ export function applyDrivingDimension(
   if (body !== null && info.value > EPS) {
     const snap = snapshot(scene);
     scene.scaleBody(body, target / info.value);
-    enforceDiameterDims(scene); // dimensioned disks on the body keep their diameter
+    enforceSizeDims(scene); // dimensioned disks / corners on the body keep their size
     scene.setMeasurementDriving(m.id, target);
     const check = scene.measureInfo(m);
     if (!check || Math.abs(check.value - target) > sketchConfig.tol) {
@@ -1226,8 +1244,8 @@ function scaleEligibleBody(scene: Scene, m: Measurement): number | null {
   if (a === null || a !== b) return null;
   for (const other of scene.measurements) {
     if (other.id === m.id || other.mode !== "draw" || !other.driving) continue;
-    // A diameter dimension is re-applied after a scale, so it never blocks one.
-    if (other.axis === "diameter") continue;
+    // A diameter / radius dimension is re-applied after a scale, so it never blocks one.
+    if (other.axis === "diameter" || other.axis === "radius") continue;
     if (refTouchesBody(scene, other.refA, a) || refTouchesBody(scene, other.refB, a)) {
       return null;
     }

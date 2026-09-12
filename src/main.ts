@@ -3754,6 +3754,40 @@ function diskRimAt(p: Vec2): { ref: MeasureRef; c: Vec2; r: number } | null {
   return null;
 }
 
+/** Whether `angle` lies on the arc starting at `a0` sweeping `sweep` (signed) radians. */
+function angleOnArc(angle: number, a0: number, sweep: number): boolean {
+  const twoPi = Math.PI * 2;
+  const d = sweep >= 0 ? angle - a0 : a0 - angle;
+  return ((d % twoPi) + twoPi) % twoPi <= Math.abs(sweep) + 1e-6;
+}
+
+/**
+ * The topmost rounded corner (outer outline or hole of any body) whose drawn arc passes
+ * within pick range of `p`: its vertex ref plus the arc (for the highlight). Used by
+ * the measure tool to pick a corner radius. A sharp corner has no arc to pick.
+ */
+function cornerArcAt(p: Vec2): { ref: MeasureRef; arc: { c: Vec2; r: number; a0: number; sweep: number } } | null {
+  const tol = pickRadius();
+  for (let i = scene.bodies.length - 1; i >= 0; i--) {
+    const body = scene.bodies[i];
+    const loops: (number | null)[] = [null];
+    for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) loops.push(hi);
+    for (const hole of loops) {
+      for (const corner of scene.outlineCorners(body.id, hole)) {
+        const arc = corner.arc;
+        if (!arc || Math.abs(dist(p, arc.c) - arc.r) > tol) continue;
+        if (!angleOnArc(Math.atan2(p.y - arc.c.y, p.x - arc.c.x), arc.a0, arc.sweep)) continue;
+        const ref: MeasureRef =
+          hole === null
+            ? { kind: "vertex", bodyId: body.id, index: corner.index }
+            : { kind: "vertex", bodyId: body.id, index: corner.index, hole };
+        return { ref, arc };
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * The measure reference a click at `p` would pick, by priority: a joint, a body control
  * vertex, a slider rail, a body control-polygon edge, and finally any point inside a
@@ -3769,6 +3803,10 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   // and, as the *first* pick, a diameter dimension (see handleMeasureClick).
   const rim = diskRimAt(p);
   if (rim) return rim.ref;
+  // A rounded corner's arc picks its control vertex as a point ref — and, as the
+  // *first* pick, a radius dimension (see handleMeasureClick).
+  const arc = cornerArcAt(p);
+  if (arc) return arc.ref;
   // Guides are draw-mode-only aids (invisible in sim), so only draw-mode picks see them.
   if (mode === "draw") {
     const gp = scene.guidePointAt(p, pickRadius());
@@ -3802,6 +3840,13 @@ function handleMeasureClick(p: Vec2): void {
       const rim = diskRimAt(p);
       if (rim) {
         measurePicks.push(rim.ref, rim.ref);
+        return;
+      }
+      // First pick on a rounded corner's arc: a radius dimension, the same way (the
+      // corner's vertex twice — the model reads such a pair as "radius").
+      const arc = cornerArcAt(p);
+      if (arc) {
+        measurePicks.push(arc.ref, arc.ref);
         return;
       }
     }
@@ -4061,16 +4106,23 @@ function selectedBodyFilletHandleAt(p: Vec2): FilletHandle | null {
  * Dropping the cursor (nearly) onto the vertex snaps the corner sharp (radius 0).
  */
 /**
- * A direct resize of a disk (rim-handle drag, `[` / `]` keys) overrides any driving
- * diameter dimension on it: those go back to driven (reference) dimensions, so the
- * new size stands instead of reading as a violation. Returns true when one was cleared.
+ * A direct resize of an outline (rim / radius-handle drag, `[` / `]` keys) overrides
+ * any driving diameter or radius dimension it changes: those go back to driven
+ * (reference) dimensions, so the new size stands instead of reading as a violation.
+ * `corner` limits the radius dimensions demoted to the corners it accepts (null = every
+ * corner of the outline). Returns true when one was cleared.
  */
-function demoteDiameterDims(bodyId: number, hole: number | null): boolean {
+function demoteSizeDims(bodyId: number, hole: number | null, corner: ((index: number) => boolean) | null): boolean {
   let any = false;
   for (const m of scene.measurements) {
-    if (m.mode !== "draw" || !m.driving || m.axis !== "diameter") continue;
-    const disk = scene.diskOfRef(m.refA);
-    if (!disk || disk.bodyId !== bodyId || disk.hole !== hole) continue;
+    if (m.mode !== "draw" || !m.driving) continue;
+    if (m.axis === "diameter") {
+      const disk = scene.diskOfRef(m.refA);
+      if (!disk || disk.bodyId !== bodyId || disk.hole !== hole) continue;
+    } else if (m.axis === "radius") {
+      const c = scene.cornerOfRef(m.refA);
+      if (!c || c.bodyId !== bodyId || c.hole !== hole || (corner && !corner(c.index))) continue;
+    } else continue;
     scene.clearMeasurementDriving(m.id);
     any = true;
   }
@@ -5330,9 +5382,16 @@ canvas.addEventListener("mousedown", (e) => {
     } else if (isPatternTool(tool)) {
       handlePatternClick(world);
     } else if (tool === null) {
+      // A selected body shows draggable corner handles — outer outline and holes alike;
+      // grabbing one reshapes the body (square = move the vertex, circle = adjust that
+      // corner's radius; nearest wins).
+      const node = selectedBodyNodeAt(world);
+      const fh = selectedBodyFilletHandleAt(world);
+      const onFillet = !!fh && selection?.kind === "body" && (!node || dist(world, fh.at) < dist(world, node.at));
       // Ctrl/Cmd+click: toggle what's under the cursor in the multi-selection; on empty
-      // space, start an additive box select instead.
-      if (e.ctrlKey || e.metaKey) {
+      // space, start an additive box select instead. (Ctrl on a radius handle is the
+      // "round every corner" drag — see the fillet drag in mousemove — so it falls through.)
+      if ((e.ctrlKey || e.metaKey) && !onFillet) {
         // Ctrl+Shift+drag from empty space extends the selected body's feature selection.
         if (e.shiftKey && featureBoxStartAt(world)) {
           featureBox = { start: world, end: world, additive: true, moved: false };
@@ -5343,12 +5402,6 @@ canvas.addEventListener("mousedown", (e) => {
         }
         return;
       }
-      // A selected body shows draggable corner handles — outer outline and holes alike;
-      // grabbing one reshapes the body (square = move the vertex, circle = adjust that
-      // corner's radius; nearest wins).
-      const node = selectedBodyNodeAt(world);
-      const fh = selectedBodyFilletHandleAt(world);
-      const onFillet = !!fh && selection?.kind === "body" && (!node || dist(world, fh.at) < dist(world, node.at));
       // A press on a member of the feature selection drags the whole set (a radius
       // handle still wins — it never moves geometry).
       const fref = onFillet ? null : featureHitAt(world);
@@ -5597,12 +5650,22 @@ canvas.addEventListener("mousemove", (e) => {
       const body = scene.getBody(leftDrag.bodyId);
       const r = body ? filletDragRadius(body, leftDrag.index, world, leftDrag.hole) : null;
       if (r !== null) {
+        const { bodyId, index, hole } = leftDrag;
         // A disk (one-point offset outline) has one radius: set it as the outline default
         // so a diameter dimension / `[` `]` keys and the rim handle all move the same value.
-        if (body && scene.diskOfRef({ kind: "vertex", bodyId: body.id, index: 0, hole: leftDrag.hole ?? undefined })) {
-          scene.setDiskRadius(leftDrag.bodyId, r, leftDrag.hole);
-          demoteDiameterDims(leftDrag.bodyId, leftDrag.hole); // the handle now sets the size
-        } else scene.setBodyCornerRadius(leftDrag.bodyId, leftDrag.index, r, leftDrag.hole);
+        if (body && scene.diskOfRef({ kind: "vertex", bodyId: body.id, index: 0, hole: hole ?? undefined })) {
+          scene.setDiskRadius(bodyId, r, hole);
+          demoteSizeDims(bodyId, hole, null); // the handle now sets the size
+        } else if (e.ctrlKey || e.metaKey) {
+          // Ctrl: every corner of this outline follows the handle — the default is set
+          // and per-corner overrides dropped, so the corners read as uniform from here on
+          // (a radius dimension on any of them then drives them all).
+          scene.setOutlineRadiusUniform(bodyId, r, hole);
+          demoteSizeDims(bodyId, hole, null);
+        } else {
+          scene.setBodyCornerRadius(bodyId, index, r, hole);
+          demoteSizeDims(bodyId, hole, (i) => i === index); // the handle now sets this corner
+        }
         leftDrag.moved = true;
       }
       return;
@@ -6014,8 +6077,13 @@ window.addEventListener("keydown", (e) => {
       const disk = scene.diskOfRef({ kind: "vertex", bodyId: body.id, index: 0 });
       if (disk) {
         scene.setDiskRadius(body.id, disk.r + step); // from the *effective* radius
-        demoteDiameterDims(body.id, null); // a direct resize overrides a driving diameter
-      } else scene.setBodyRadius(body.id, body.radius + step);
+        demoteSizeDims(body.id, null, null); // a direct resize overrides a driving diameter
+      } else {
+        scene.setBodyRadius(body.id, body.radius + step);
+        // The default moved: radius dimensions on corners without their own override
+        // were just overridden directly (overridden corners didn't change).
+        demoteSizeDims(body.id, null, (i) => typeof body.radii?.[i] !== "number");
+      }
       markDirty();
     }
     e.preventDefault();
@@ -6356,23 +6424,32 @@ function measureDraftView(): {
   preview: MeasureInfo | null;
 } | null {
   if (tool !== "measure") return null;
-  // A diameter pick (the same disk vertex twice) highlights the disk's rim, not its centre.
-  const disk =
-    measurePicks.length === 2 && sameMeasureRef(measurePicks[0], measurePicks[1])
-      ? scene.diskOfRef(measurePicks[0])
-      : null;
+  // A diameter pick (the same disk vertex twice) highlights the disk's rim, not its
+  // centre; a radius pick (the same corner vertex twice) highlights the corner's arc.
+  const same = measurePicks.length === 2 && sameMeasureRef(measurePicks[0], measurePicks[1]);
+  const disk = same ? scene.diskOfRef(measurePicks[0]) : null;
+  const cornerArc = same && !disk ? (scene.cornerOfRef(measurePicks[0])?.arc ?? null) : null;
   const refs: MeasureHighlight[] = disk
     ? [{ kind: "circle", c: disk.c, r: disk.r }]
-    : measurePicks
-        .map((r) => scene.resolveMeasureRef(r))
-        .filter((r): r is ResolvedMeasureRef => r !== null);
+    : cornerArc
+      ? [{ kind: "arc", ...cornerArc }]
+      : measurePicks
+          .map((r) => scene.resolveMeasureRef(r))
+          .filter((r): r is ResolvedMeasureRef => r !== null);
   let hover: MeasureHighlight | null = null;
   let preview: MeasureInfo | null = null;
   if (cursor) {
     if (measurePicks.length < 2) {
       const rim = measurePicks.length === 0 ? diskRimAt(cursor) : null;
-      const h = rim ? null : measureRefAt(cursor);
-      hover = rim ? { kind: "circle", c: rim.c, r: rim.r } : h ? scene.resolveMeasureRef(h) : null;
+      const arc = measurePicks.length === 0 && !rim ? cornerArcAt(cursor) : null;
+      const h = rim || arc ? null : measureRefAt(cursor);
+      hover = rim
+        ? { kind: "circle", c: rim.c, r: rim.r }
+        : arc
+          ? { kind: "arc", ...arc.arc }
+          : h
+            ? scene.resolveMeasureRef(h)
+            : null;
     } else {
       preview = scene.measurePreview(measurePicks[0], measurePicks[1], cursor);
     }
@@ -6435,6 +6512,7 @@ function sketchGlyphsView(): SketchGlyphView[] {
   const px = (n: number) => n / view.scale;
   const stack = new Map<string, number>();
   const out: SketchGlyphView[] = [];
+  let hoveredBadge = -1; // index in `out` of the topmost constraint whose badge is under the cursor
   for (const c of scene.sketch) {
     const allRefs = c.refB ? [c.refA, c.refB] : [c.refA];
     const badgeRefs = c.kind === "coincident" ? [c.refA] : allRefs;
@@ -6463,17 +6541,75 @@ function sketchGlyphsView(): SketchGlyphView[] {
       }
     }
     if (!badges.length) continue;
-    const hot =
-      cursor !== null &&
-      (allRefs.some((ref) => refHovered(ref, cursor!)) ||
-        badges.some((b) => dist(b, cursor!) <= GLYPH_PICK_RADIUS / view.scale));
+    const badgeHot = cursor !== null && badges.some((b) => dist(b, cursor!) <= GLYPH_PICK_RADIUS / view.scale);
+    const hot = badgeHot || (cursor !== null && allRefs.some((ref) => refHovered(ref, cursor!)));
     // A pose constraint that can't currently hold (grounded partner, a def-edit reset,
     // an instance rotated against it) shows in the error style, like a violated dim.
     const violated = poseConstraintViolated(scene, c);
     out.push({ id: c.id, kind: c.kind, badges, faded: !hot && !violated, violated });
+    if (badgeHot) hoveredBadge = out.length - 1;
+  }
+  // Hovering a badge reveals what it constrains: the elements light up and, when they
+  // sit apart, a dotted line joins them. Only the topmost badge under the cursor (the
+  // one a click would select) gets it, so stacked badges don't all fire at once.
+  if (hoveredBadge >= 0) {
+    const c = scene.sketch.find((k) => k.id === out[hoveredBadge].id)!;
+    const refs = (c.refB ? [c.refA, c.refB] : [c.refA])
+      .map((ref) => scene.resolveMeasureRef(ref))
+      .filter((r): r is ResolvedMeasureRef => r !== null);
+    const link = refs.length === 2 ? sketchLink(refs[0], refs[1]) : null;
+    out[hoveredBadge].hover = { refs, link };
   }
   sketchGlyphCache = out;
   return out;
+}
+
+/** Closest point to `p` on a resolved reference (a guide extends without end). */
+function closestOnRef(p: Vec2, r: ResolvedMeasureRef): Vec2 {
+  if (r.kind === "point") return r.p;
+  const ab = sub(r.b, r.a);
+  const l2 = lenSq(ab);
+  if (l2 < 1e-12) return r.a;
+  let t = dot(sub(p, r.a), ab) / l2;
+  if (!r.infinite) t = Math.max(0, Math.min(1, t));
+  return add(r.a, scale(ab, t));
+}
+
+/**
+ * The shortest segment joining two resolved references, or null when they already
+ * touch (a shared corner, a point on its line, crossing lines) — nothing to draw then.
+ */
+function sketchLink(a: ResolvedMeasureRef, b: ResolvedMeasureRef): [Vec2, Vec2] | null {
+  if (a.kind === "line" && b.kind === "line") {
+    // Non-parallel lines meet where their parameters both fall within range.
+    const da = sub(a.b, a.a);
+    const db = sub(b.b, b.a);
+    const den = cross(da, db);
+    if (Math.abs(den) > 1e-12) {
+      const w = sub(b.a, a.a);
+      const t = cross(w, db) / den;
+      const u = cross(w, da) / den;
+      const inA = a.infinite || (t >= -1e-9 && t <= 1 + 1e-9);
+      const inB = b.infinite || (u >= -1e-9 && u <= 1 + 1e-9);
+      if (inA && inB) return null;
+    }
+  }
+  // Otherwise the closest pair involves one element's defining point: try each point
+  // of either element against the other and keep the shortest.
+  const ptsA = a.kind === "point" ? [a.p] : [a.a, a.b];
+  const ptsB = b.kind === "point" ? [b.p] : [b.a, b.b];
+  let best: [Vec2, Vec2] | null = null;
+  let bestD = Infinity;
+  const consider = (p: Vec2, q: Vec2) => {
+    const d = dist(p, q);
+    if (d < bestD) {
+      bestD = d;
+      best = [p, q];
+    }
+  };
+  for (const p of ptsA) consider(p, closestOnRef(p, b));
+  for (const q of ptsB) consider(closestOnRef(q, a), q);
+  return bestD > 2 / view.scale ? best : null;
 }
 
 /** Constraint-tool overlay: the picked reference(s) and the one under the cursor. */

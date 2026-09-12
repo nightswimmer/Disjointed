@@ -27,6 +27,7 @@ import {
   polygonInertiaAboutCentroid,
   pointInPolygon,
   closestPointOnPolygon,
+  filletCornerArcs,
 } from "./geometry";
 import { unionRegions, segmentsCross, pointOnSegment, PolyRegion } from "./boolean";
 
@@ -431,9 +432,12 @@ export type MeasureMode = "draw" | "sim";
  * `"h"` horizontal (|Δx|), `"v"` vertical (|Δy|), `"direct"` straight-line.
  * `"diameter"` is the special case of a dimension whose two refs are the *same*
  * control vertex of a **disk outline** (a one-point offset-mode outer outline or hole):
- * it measures — and, when driving, sets — that disk's diameter.
+ * it measures — and, when driving, sets — that disk's diameter. `"radius"` is the
+ * same-ref case on any other control corner: it measures — and, when driving, sets —
+ * that corner's rounding radius (every corner of the outline when they are uniform,
+ * i.e. no per-corner override exists — see `setCornerRadiusDriven`).
  */
-export type MeasureAxis = "direct" | "h" | "v" | "diameter";
+export type MeasureAxis = "direct" | "h" | "v" | "diameter" | "radius";
 
 /**
  * A measurement reference — a point or a line, anchored to scene *elements* (never to
@@ -528,7 +532,28 @@ export type ResolvedMeasureRef =
  * A measure-tool highlight: a resolved reference, or a whole disk outline (the rim of
  * a circular hole / disk body picked for a diameter dimension).
  */
-export type MeasureHighlight = ResolvedMeasureRef | { kind: "circle"; c: Vec2; r: number };
+export type MeasureHighlight =
+  | ResolvedMeasureRef
+  | { kind: "circle"; c: Vec2; r: number }
+  /** A rounded corner's arc (picked for a radius dimension): centre, radius, start angle, signed sweep. */
+  | { kind: "arc"; c: Vec2; r: number; a0: number; sweep: number };
+
+/** A roundable control corner (any non-disk outline corner) found from a vertex ref. */
+export interface CornerRef {
+  bodyId: number;
+  /** The hole index, or null for the body's outer outline. */
+  hole: number | null;
+  /** Corner index in the outline's control polygon. */
+  index: number;
+  /** The control vertex (world). */
+  v: Vec2;
+  /** Effective corner radius (its override, or the outline default). */
+  r: number;
+  /** The drawn arc (world) when the corner is actually rounded, else null: the centre
+   *  of the fillet arc (or the vertex itself in offset mode, where the whole circle
+   *  around the point is the arc). */
+  arc: { c: Vec2; r: number; a0: number; sweep: number } | null;
+}
 
 /** A disk outline (one-point offset-mode outer outline or hole) found from a vertex ref. */
 export interface DiskRef {
@@ -556,8 +581,12 @@ export interface MeasureInfo {
   labelPos: Vec2;
   /** The disk a diameter dimension measures (its value is 2·r; drawn with a ⌀ prefix). */
   circle?: { c: Vec2; r: number };
+  /** The corner arc a radius dimension measures (value r; drawn with an R prefix). */
+  fillet?: { c: Vec2; r: number };
   /** Arrowed dimension segment (distance only). */
   dim?: { a: Vec2; b: Vec2 };
+  /** Arrow only at `dim.b` (a radius line starts bare at the arc centre). */
+  singleArrow?: boolean;
   /** Dashed extension / leader segments. */
   ext: { a: Vec2; b: Vec2 }[];
   /** Angle arc (angle only): centre, radius, start angle, positive CCW sweep. */
@@ -2223,6 +2252,86 @@ export class Scene {
   }
 
   /**
+   * Every corner of one of a body's outlines (outer, or hole `hole`) as `CornerRef`s:
+   * the roundable control corners with their effective radius and drawn arc (the
+   * fillet arc, or in offset mode the whole circle around the point). Empty for a disk
+   * (a one-point offset outline — its size is a diameter, see `diskOfRef`).
+   */
+  outlineCorners(bodyId: number, hole: number | null): CornerRef[] {
+    const body = this.getBody(bodyId);
+    if (!body) return [];
+    const shape = hole === null ? body : body.holes?.[hole];
+    const ctrl = this.controlListOf(body, hole);
+    if (!shape || !ctrl || ctrl.length === 0) return [];
+    const round = shape.round ?? "fillet";
+    if (round === "offset" && ctrl.length === 1) return [];
+    const verts = ctrl.map((p) => add(body.pos, rotate(p, body.angle)));
+    const radii = this.bodyCornerRadii(body, hole);
+    if (round === "offset") {
+      return verts.map((v, index) => ({
+        bodyId,
+        hole,
+        index,
+        v,
+        r: radii[index],
+        arc: radii[index] > 0 ? { c: v, r: radii[index], a0: 0, sweep: Math.PI * 2 } : null,
+      }));
+    }
+    const arcs = filletCornerArcs(verts, radii);
+    return verts.map((v, index) => {
+      const a = arcs[index];
+      return {
+        bodyId,
+        hole,
+        index,
+        v,
+        r: radii[index],
+        arc: a && a.r > 0 ? { c: a.center, r: a.r, a0: a.a1, sweep: a.da } : null,
+      };
+    });
+  }
+
+  /** The roundable corner a vertex ref names (null for a disk's centre or a non-vertex ref). */
+  cornerOfRef(ref: MeasureRef): CornerRef | null {
+    if (ref.kind !== "vertex") return null;
+    return this.outlineCorners(ref.bodyId, ref.hole ?? null)[ref.index] ?? null;
+  }
+
+  /** Whether an outline's corners are uniform: no per-corner override exists. */
+  outlineRadiiUniform(bodyId: number, hole: number | null): boolean {
+    const body = this.getBody(bodyId);
+    const shape = hole === null ? body : body?.holes?.[hole];
+    return !!shape && !shape.radii;
+  }
+
+  /**
+   * Set every corner of an outline (outer, or hole `hole`) to `radius` at once: the
+   * outline default is set and every per-corner override dropped, so the corners read
+   * as uniform from here on (a Ctrl-drag of a radius handle).
+   */
+  setOutlineRadiusUniform(bodyId: number, radius: number, hole?: number | null): void {
+    const body = this.getBody(bodyId);
+    if (!body) return;
+    const shape = hole === null || hole === undefined ? body : body.holes?.[hole];
+    if (!shape) return;
+    delete shape.radii;
+    shape.radius = Math.max(0, radius);
+    this.rebuildBody(body);
+  }
+
+  /**
+   * What a driving radius dimension on corner `index` sets: with the outline uniform
+   * (no per-corner override — its corners were set together, e.g. by a Ctrl-drag)
+   * every corner follows; otherwise only that corner, as an override. A pattern
+   * member hole's corner edits the seed hole (members are derived from it).
+   */
+  setCornerRadiusDriven(bodyId: number, index: number, radius: number, hole: number | null): void {
+    const h = hole === null ? null : this.patternSeedHole(bodyId, hole);
+    if (this.outlineRadiiUniform(bodyId, h)) this.setOutlineRadiusUniform(bodyId, radius, h);
+    else this.setBodyCornerRadius(bodyId, index, radius, h);
+  }
+
+  /**
    * The disk outline a vertex ref names, if that outline is a one-point offset-mode
    * outline (a circular hole, or a disk body): its centre is the ref's vertex and its
    * radius the outline's effective corner radius. Null for any other ref.
@@ -2534,7 +2643,10 @@ export class Scene {
     b: ResolvedMeasureRef,
     labelPos: Vec2
   ): MeasureAxis {
-    if (sameMeasureRef(refA, refB) && this.diskOfRef(refA)) return "diameter";
+    if (sameMeasureRef(refA, refB)) {
+      if (this.diskOfRef(refA)) return "diameter";
+      if (this.cornerOfRef(refA)) return "radius";
+    }
     return a.kind === "point" && b.kind === "point" ? measureAxisForPlacement(a.p, b.p, labelPos) : "direct";
   }
 
@@ -2620,9 +2732,9 @@ export class Scene {
     if (!a || !b) return;
     const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
     m.labelOffset = sub(labelPos, anchor);
-    // A diameter dimension keeps its axis wherever the label goes (the label's direction
-    // only picks where the diameter line is drawn through the disk).
-    if (m.axis !== "diameter" && a.kind === "point" && b.kind === "point") {
+    // A diameter / radius dimension keeps its axis wherever the label goes (the label's
+    // direction only picks where the dimension line is drawn through the disk / arc).
+    if (m.axis !== "diameter" && m.axis !== "radius" && a.kind === "point" && b.kind === "point") {
       const before = m.axis;
       m.axis = measureAxisForPlacement(a.p, b.p, labelPos);
       // A driving dimension that changed axis measures a different quantity — its held
@@ -2646,6 +2758,10 @@ export class Scene {
       // The disk may have stopped being one (a node added to the hole): then no display.
       const disk = this.diskOfRef(m.refA);
       info = disk ? diameterInfo(m.id, disk.c, disk.r, labelPos) : null;
+    } else if (m.axis === "radius") {
+      // The corner may have become a disk's (nodes removed down to one): then no display.
+      const corner = this.cornerOfRef(m.refA);
+      info = corner ? radiusInfo(m.id, corner, labelPos) : null;
     } else if (a.kind === "point" && b.kind === "point") {
       info = pointPointInfo(m.id, a.p, b.p, m.axis, labelPos);
     } else if (a.kind === "line" && b.kind === "line") {
@@ -5583,6 +5699,26 @@ function diameterInfo(id: number, c: Vec2, r: number, labelPos: Vec2): MeasureIn
   const ext: { a: Vec2; b: Vec2 }[] = [];
   if (l > r) pushExt(ext, near, labelPos);
   return { id, kind: "distance", value: 2 * r, labelPos, circle: { c, r }, dim: { a: far, b: near }, ext };
+}
+
+/**
+ * Radius of a rounded corner: the dimension line runs from the arc centre out to the
+ * arc towards the label (arrowed at the arc end only), with a dashed leader on to a
+ * label beyond the arc. A sharp corner (r = 0) has no line — just a leader from the
+ * vertex. Value = r.
+ */
+function radiusInfo(id: number, corner: CornerRef, labelPos: Vec2): MeasureInfo {
+  const c = corner.arc ? corner.arc.c : corner.v;
+  const r = corner.r;
+  const w = sub(labelPos, c);
+  const l = len(w);
+  const u = l > 1e-9 ? scale(w, 1 / l) : vec(1, 0);
+  const tip = add(c, scale(u, r));
+  const ext: { a: Vec2; b: Vec2 }[] = [];
+  if (l > r) pushExt(ext, tip, labelPos);
+  const info: MeasureInfo = { id, kind: "distance", value: r, labelPos, fillet: { c, r }, ext, singleArrow: true };
+  if (r > 1e-9) info.dim = { a: c, b: tip };
+  return info;
 }
 
 function pointLineInfo(

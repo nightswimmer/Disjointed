@@ -12,7 +12,8 @@ you can then drag and watch move.
 - **Body** — a rigid shape with rounded-able corners. It's defined by an editable **control
   polygon** plus a **corner radius** — with optional **per-corner overrides**, so each corner
   can carry its own radius; the outline you see is derived from those, so you can reshape it
-  (drag corners) or round it (drag a corner's round radius handle) any time. A body can carry
+  (drag corners) or round it (drag a corner's round radius handle — **Ctrl+drag** rounds every
+  corner at once) any time, and you can **dimension a corner's radius**. A body can carry
   **holes** (inner cut-outs — drawn with the **Hole** tool or imported from DXF) — each hole is a full editable outline of
   its own: drag its nodes, round its corners, and a **circular hole** (drag one out with the
   Hole tool, or import a DXF circle) is a true parametric disk: move it by its centre node,
@@ -102,7 +103,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `A` | Click a **rail** to drop a self-driving rider on it. In Simulate mode with animation running, the rider travels back and forth along the rail. Off-animation it's just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
-| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a guideline). Click the **rim of a round hole** (or disk body) as the first pick for a **diameter** dimension — it needs no second reference, the next click places the label. Works in **both modes** — see *Measurements* below. |
+| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a guideline). Click the **rim of a round hole** (or disk body) as the first pick for a **diameter** dimension — it needs no second reference, the next click places the label. Likewise, click a **rounded corner's arc** as the first pick for a **radius** dimension. Works in **both modes** — see *Measurements* below. |
 | **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position — or a **point and a line** (body edge, rail or guideline, either order) to hold the point on the **infinite** line. |
 | **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, rail or guideline** (one click), or **two points**, to make it horizontal / vertical. |
 | **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails or guidelines) to constrain their directions — or, for Equal, their lengths (Equal doesn't take guidelines: an infinite line has no length). |
@@ -115,7 +116,9 @@ moves both, reshaping the body around it. A selected body shows handles on its o
 **and on every hole**: **square handles** move vertices, and each corner also gets a **round
 radius handle** sitting on its fillet arc — drag it away from the corner to round just that
 corner, drop it onto the corner to make it sharp, **double-click** it to go back to the body's
-default radius. **`[` / `]`** still decrease / increase the body-wide default radius (this is
+default radius. Hold **Ctrl** (Cmd on Mac) while dragging a radius handle to round **every
+corner of that outline together** (the outer outline, or that hole) — per-corner overrides are
+dropped, so the corners are uniform again. **`[` / `]`** still decrease / increase the body-wide default radius (this is
 how you round a freehand polygon: draw it, select it, press `]`; corners with their own radius
 keep it). On a circular (disk) hole the round handle rides the rim — drag it to resize the
 hole, drag the centre node to move it (with **Object snap** on, a dragged node — a hole
@@ -237,6 +240,13 @@ set of measurements. What gets measured follows from the two references you pick
   can type a value into it (double-click the label) and it **drives** the hole's diameter;
   resizing the disk directly afterwards (rim handle, `[` / `]`) turns it back into a
   reference dimension.
+- **A rounded corner** — click its arc and place the label: a **radius** dimension (`R`),
+  drawn from the arc centre (marked with a dot) out to the arc towards the label. In draw
+  mode, typing a value **drives** the corner's radius: if the outline's corners are
+  **uniform** (no corner has its own radius — e.g. after a Ctrl-drag of a radius handle or
+  `[` / `]`), the value sets **every corner** of that outline; otherwise just that corner.
+  Dragging a radius handle directly afterwards turns the affected dimension back into a
+  reference. A sharp corner has no arc to click — round it a little first.
 
 References anchor to the elements themselves, so in **Simulate mode the values update live**
 as the mechanism moves — measure a stroke length by dimensioning two joints, or a transmission
@@ -250,7 +260,8 @@ works in both modes. Measurements are saved with the mechanism.
   satisfy a constraint the moment you place it, and a constraint that *can't* be satisfied is
   rejected (the conflicting items flash red, nothing moves). Each constraint shows a small
   violet **badge** (◎ H V ∥ ⊥ =) beside its element — faded until you **hover the element**
-  (or the badge): click to select, **Delete** to remove. A toolbar toggle next to the
+  (or the badge — hovering a badge also **highlights the elements it constrains**, with a
+  dotted line between them when they're apart): click to select, **Delete** to remove. A toolbar toggle next to the
   constraint tools **shows/hides all badges** (constraints keep working while hidden), and a
   matching toggle next to Measure shows/hides **all measurements** — in both modes.
 - **Constraints by dragging**: the common cases need no tool — mid-drag, hover a target to arm

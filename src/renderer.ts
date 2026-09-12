@@ -202,6 +202,12 @@ export interface SketchGlyphView {
   /** A pose constraint (on component instances) that currently fails to hold — drawn
    *  in the error style until re-applied, like a violated driving dimension. */
   violated?: boolean;
+  /**
+   * Set on the one constraint whose badge is under the cursor: its referenced elements
+   * (highlighted in the sketch violet) and, when those elements don't touch, the shortest
+   * segment between them (drawn dotted) — computed by main.
+   */
+  hover?: { refs: ResolvedMeasureRef[]; link: [Vec2, Vec2] | null };
 }
 
 /** On-screen joint radius in CSS pixels (kept constant regardless of zoom). */
@@ -840,6 +846,24 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   for (const g of input.sketchGlyphs) {
     drawSketchGlyph(ctx, g, view, dpr, theme, g.id === selectedSketch, !!input.flash?.has(g.id));
   }
+  // Badge hover: light up the constraint's elements and, when they sit apart, join them
+  // with a dotted line so the relationship reads at a glance.
+  for (const g of input.sketchGlyphs) {
+    if (!g.hover) continue;
+    for (const r of g.hover.refs) drawMeasureRefHighlight(ctx, r, px, false, viewRect, SKETCH_COLOR);
+    if (g.hover.link) {
+      const [from, to] = g.hover.link;
+      ctx.save();
+      ctx.strokeStyle = SKETCH_COLOR;
+      ctx.lineWidth = px(1.5);
+      ctx.setLineDash([px(3), px(4)]);
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
   if (input.sketchDraft) {
     const { refs, hover } = input.sketchDraft;
     if (hover) drawMeasureRefHighlight(ctx, hover, px, true, viewRect, SKETCH_COLOR);
@@ -1091,7 +1115,8 @@ const SKETCH_SYMBOL: Record<SketchConstraintKind, string> = {
  */
 function measureText(info: MeasureInfo, paren: boolean, unit: string): string {
   const v = Math.round(info.value * 10) / 10;
-  const t = info.kind === "angle" ? `${v}°` : info.circle ? `⌀${v} ${unit}` : `${v} ${unit}`;
+  const t =
+    info.kind === "angle" ? `${v}°` : info.circle ? `⌀${v} ${unit}` : info.fillet ? `R${v} ${unit}` : `${v} ${unit}`;
   return paren ? `(${t})` : t;
 }
 
@@ -1185,12 +1210,13 @@ function drawMeasureRefHighlight(
     ctx.setLineDash([]);
     return;
   }
-  if (ref.kind === "circle") {
+  if (ref.kind === "circle" || ref.kind === "arc") {
     ctx.save();
     ctx.globalAlpha = isHover ? 0.4 : 0.7;
     ctx.lineWidth = px(5);
     ctx.beginPath();
-    ctx.arc(ref.c.x, ref.c.y, ref.r, 0, Math.PI * 2);
+    if (ref.kind === "arc") ctx.arc(ref.c.x, ref.c.y, ref.r, ref.a0, ref.a0 + ref.sweep, ref.sweep < 0);
+    else ctx.arc(ref.c.x, ref.c.y, ref.r, 0, Math.PI * 2);
     ctx.stroke();
     ctx.restore();
   } else if (ref.kind === "point") {
@@ -1272,9 +1298,19 @@ function drawMeasurement(
     ctx.setLineDash([]);
     const u = normalize(sub(a, b));
     if ((u.x !== 0 || u.y !== 0) && Math.hypot(b.x - a.x, b.y - a.y) > px(4)) {
-      drawArrowHead(ctx, a, u, px(7));
+      if (!info.singleArrow) drawArrowHead(ctx, a, u, px(7)); // a radius line starts bare at the centre
       drawArrowHead(ctx, b, scale(u, -1), px(7));
     }
+  }
+  if (info.fillet) {
+    // A radius dimension marks the arc centre it measures from with a small dot.
+    ctx.save();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(info.fillet.c.x, info.fillet.c.y, px(2.5), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
   if (info.arc) {
     const { c, r, a0, sweep } = info.arc;
