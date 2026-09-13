@@ -49,6 +49,7 @@ motion; actuators / motors animate.
 | `main.ts` | Everything UI: tools, drags, snapping, selection, history, persistence, backup, component contexts, animation loop |
 | `notify.ts` | Toasts — the project-wide replacement for `alert` |
 | `filestore.ts` | File System Access API wrappers + IndexedDB handle storage |
+| `toolbar.ts` | Toolbar section rack: drag a group by its caption to reorder (live FLIP reflow), order in localStorage |
 | `help.ts` / `helpmap.ts` | Help drawer + help mode; DOM-free UI→topic map shared with the manual generator |
 | `automation.ts` / `svgcontext.ts` | Playwright hook; canvas-API-shaped SVG recorder (manual illustrations) |
 | `public/help/`, `scripts/manual/` | The manual and its generator (`shoot.ts`, `shots.ts`, `fixtures.ts`) |
@@ -186,11 +187,24 @@ motion; actuators / motors animate.
 
 ### UI conventions
 - Tools are **one-shot** (Rotate is a mode; the polyline/body draft spans clicks). Toolbar wiring is
-  by id / `data-*` / class, never button text. All user-facing warnings go through `notify`.
+  by id / `data-*` / class, never button text **and never by position** — the user reorders the
+  groups. All user-facing warnings go through `notify`.
+- **Toolbar = a rack of draggable groups** (`#tb-sections > .tb-sec`, `src/toolbar.ts`): each is a
+  two-row grid filled *column-major* (`grid-auto-flow: column`, so markup order reads down-then-
+  across; `.tb-tall` / `.tb-mid` span or centre a lone control) under a caption strip that is also
+  its drag handle. Dragging reorders the DOM live and FLIP-animates the others, deciding insertion
+  on `offsetLeft`/`offsetTop` (layout values, immune to the drag transform and to a running
+  slide); double-click a caption to reset. Per-mode visibility is the `draw-only` / `sim-only`
+  classes, never a hard-coded group list. Selection- or tool-dependent fields live in `#tb-props`
+  **outside** the rack so they can't reshuffle it; the armed-tool hint is the `#statusbar` line.
+- **Group visibility toggles are eyes on the caption** (grid, constraint badges, dimensions) —
+  the toggle applies to the whole group, and `.tb-cap .cap-eye` has to outweigh `button.active`
+  or it inherits the accent fill. The mode switch is one big button showing the mode it switches
+  *to* (the theme button's convention); its caption names the mode you are in.
 - Every mutation goes through `markDirty` → snapshot history + autosave + component-context sync +
   pose-baseline reset. `canonicalData()` is the root document without sim poses.
 - Session-only state (grid, snap, osnap, visibility toggles, solver tuning) is not persisted;
-  theme, help-drawer width, grid presets, backup settings live in localStorage.
+  theme, help-drawer width, grid presets, backup settings and the toolbar group order live in localStorage.
 - Selection kinds: single `selection` vs `multiSel` (groups and instances are selection-atomic)
   vs `featureSel` (vertices + joints of one body). Ctrl+G is a group toggle; plain G is Ground.
 - Two-click slider start pair: a press grabs the **rail joint** in draw mode, the **rider** in sim.
@@ -241,6 +255,8 @@ it for the exact cases.
   projected corner-pair size dimensions, single-click line dimensions, and stale what's-this strings.
 - Plain `L` is unbound; a full shortcut remap is planned.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.
+- The toolbar was regrouped into draggable groups for **draw mode**; sim mode inherits the rack
+  but its own grouping (Animation + solver tuning) has not been designed yet — see HANDOFF.md.
 
 ## Backlog (not built)
 - **Shape tools phases 2–4** (HANDOFF.md): bulge arcs on outlines → arc edges, curved slots, exact
@@ -254,7 +270,7 @@ it for the exact cases.
   driver target onto the rail first).
 - **Manual**: richer topic text, gesture-sequence illustrations (before/mid/after via `run` steps),
   PNG panel shots (path exists, no shots), pattern/component/ghost fixtures; option to let controls
-  act *and* navigate in help mode (one-line change in `help.ts`). Toolbar is > 1500 px wide in draw mode.
+  act *and* navigate in help mode (one-line change in `help.ts`). The draw-mode toolbar is ~1480 px wide and wraps groups below that.
 - **Patterns**: "make independent" UI undecided (`dissolvePattern` exists); labels not draggable;
   whole-body patterns; patterns inside defs don't expand as patterns.
 - **Components**: no per-instance scaling; no ports; per-instance actuator/motor speed overrides are

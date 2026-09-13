@@ -203,7 +203,7 @@ async function main(): Promise<void> {
         const svgs = [...b.querySelectorAll(":scope > svg")].map((s) => s.outerHTML);
         if (!key || !svgs.length) return;
         glyphs[key] = svgs;
-        const group = b.closest(".group[id]");
+        const group = b.closest(".tb-sec[id], .group[id]");
         if (group) (groups[group.id] = groups[group.id] || []).push(key);
       });
       return { glyphs, groups };

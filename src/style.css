@@ -9,6 +9,7 @@
   --text-dim: #9aa0ac;
   --control: #34373f; /* button / field background */
   --control-hover: #3e424c;
+  --sec-bg: rgba(0, 0, 0, 0.22); /* toolbar section chip: below --control, so buttons read as buttons */
 }
 
 :root[data-theme="light"] {
@@ -21,6 +22,7 @@
   --text-dim: #6b7280;
   --control: #ffffff;
   --control-hover: #e7eaf0;
+  --sec-bg: rgba(0, 0, 0, 0.06); /* toolbar section chip: below --control, so buttons read as buttons */
 }
 
 * {
@@ -52,11 +54,17 @@ body {
   display: flex;
 }
 
+/* ---------------------------------------------------------------------------
+   Toolbar: a rack of draggable sections (#tb-sections), a context-sensitive
+   properties strip (#tb-props) and the help button. Each section is a two-row
+   grid filled column by column, so its markup reads down-then-across, under a
+   caption strip that is also its drag handle (src/toolbar.ts).
+   --------------------------------------------------------------------------- */
 #toolbar {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 8px 4px;
   background: var(--panel);
   border-bottom: 1px solid var(--panel-border);
   user-select: none;
@@ -64,15 +72,250 @@ body {
   z-index: 1;
 }
 
+/* Flat rows of controls (the properties strip); sections use .tb-grid instead. */
 .group {
   display: flex;
   gap: 3px;
   align-items: center;
 }
 
-#mode-group {
-  padding-right: 10px;
-  border-right: 1px solid var(--panel-border);
+#tb-sections {
+  position: relative; /* the drop indicator is positioned in here */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 3px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.tb-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px 3px 1px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--sec-bg);
+}
+
+.tb-sec.hidden {
+  display: none;
+}
+
+/* Column-major: the first two controls form column 1, the next two column 2, … */
+.tb-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: 32px 32px;
+  grid-auto-columns: auto;
+  gap: 2px;
+  align-items: center;
+  justify-items: center;
+  justify-content: center;
+}
+
+/* A control that takes a whole column (the mode toggle, the role switch, the
+   colour chip, the grid eye). The child selector outweighs .icon-btn's fixed size. */
+.tb-grid > .tb-tall {
+  grid-row: span 2;
+  align-self: stretch;
+  height: auto;
+}
+
+.tb-grid > .tb-mid {
+  grid-row: span 2;
+  align-self: center;
+}
+
+.tb-grid > .tb-big {
+  width: 42px;
+}
+
+.tb-grid > .tb-big svg {
+  width: 26px;
+  height: 26px;
+}
+
+/* Caption = section name, its visibility eye (when the group has one) and the drag handle. */
+.tb-cap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+  cursor: grab;
+}
+
+.tb-cap:hover {
+  color: var(--text);
+  background: var(--control-hover);
+}
+
+/* The section being dragged follows the pointer; the others slide into the order they
+   will have when it lands, leaving its slot as the hole it will drop into. */
+.tb-sec.tb-dragging {
+  position: relative;
+  z-index: 40;
+  border-color: var(--accent);
+  background: var(--control);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+.tb-sec.tb-dragging .tb-cap {
+  cursor: grabbing;
+  color: var(--text);
+}
+
+/* While a section is in flight the whole page shows the grabbing cursor. */
+body.tb-dragging-on,
+body.tb-dragging-on * {
+  cursor: grabbing !important;
+}
+
+/* Properties strip: only there when something is selected / a tool wants it. */
+#tb-props {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 66px; /* the two control rows, so fields line up with the buttons */
+}
+
+#tb-props:has(> :not(.hidden)) {
+  padding-left: 8px;
+  border-left: 1px solid var(--panel-border);
+}
+
+#tb-props .group.hidden,
+#text-size-label.hidden {
+  display: none;
+}
+
+#help-btn {
+  align-self: center;
+  margin-left: auto;
+}
+
+/* The grid spacing / units fields are the widest things in the rack: trim them. */
+#sec-grid .combo-btn {
+  min-width: 50px;
+  padding: 0 5px 0 8px;
+}
+
+#sec-grid select {
+  padding: 5px 4px;
+}
+
+/* Draw ↔ Simulate toggle: shows the mode it switches *to* (the theme button's
+   convention); the caption under it names the mode you are in. */
+#mode-toggle .icon-draw {
+  display: none;
+}
+
+#mode-toggle[data-mode="draw"] .icon-draw {
+  display: block;
+}
+
+#mode-toggle[data-mode="draw"] .icon-sim {
+  display: none;
+}
+
+#mode-toggle {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+#mode-toggle:hover {
+  background: var(--accent);
+}
+
+#sec-mode .tb-cap {
+  color: var(--accent);
+}
+
+/* Visibility toggles (grid, constraint badges, dimensions) sit on their group's
+   caption, because that is what they apply to: a small borderless eye — open when the
+   group is shown, struck through when it is hidden (then at full text brightness, so a
+   hidden group is noticeable). */
+.tb-cap .cap-eye {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--text-dim);
+}
+
+.cap-eye svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cap-eye:hover {
+  color: var(--text);
+  background: var(--control-hover);
+}
+
+.cap-eye .icon-eye-off {
+  display: none;
+}
+
+.cap-eye:not(.active) {
+  color: var(--text);
+}
+
+.cap-eye:not(.active) .icon-eye {
+  display: none;
+}
+
+.cap-eye:not(.active) .icon-eye-off {
+  display: block;
+}
+
+/* Placeholders for tools that are not built yet: dimmed, and a click says so. */
+.todo-btn {
+  opacity: 0.38;
+}
+
+.todo-btn:hover {
+  opacity: 0.6;
+  background: var(--control);
+}
+
+/* Status bar: the hint line for the armed tool / current selection. One line —
+   the full text is on the element's tooltip. */
+#statusbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 2px 10px;
+  background: var(--panel);
+  border-top: 1px solid var(--panel-border);
+  z-index: 1;
 }
 
 button {
@@ -283,29 +526,14 @@ input[type="number"] {
   line-height: 1;
 }
 
-.spacer {
-  flex: 1;
-}
-
 .hint {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 12px;
   white-space: nowrap;
-}
-
-#tool-group.hidden,
-#edit-group.hidden,
-#color-group.hidden,
-#actuator-group.hidden,
-#sketch-group.hidden,
-#actuator-props.hidden,
-#motor-props.hidden,
-#shape-props.hidden,
-#poly-sides-label.hidden,
-#text-size-label.hidden,
-#run-btn.hidden,
-#autopause-btn.hidden {
-  display: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Inline dimension value editor: a small floating input over the double-clicked label.
@@ -346,16 +574,27 @@ input[type="number"] {
   border: 1px solid var(--panel-border);
   border-radius: 6px;
   overflow: hidden;
-  margin-right: 4px;
 }
 .role-toggle button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
   border: none;
   border-radius: 0;
-  height: 32px;
-  padding: 0 9px;
-  font-size: 12px;
+  padding: 0;
   background: var(--control);
   color: var(--text);
+}
+.role-toggle button svg {
+  display: block;
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .role-toggle button + button {
   border-left: 1px solid var(--panel-border);
@@ -483,7 +722,8 @@ input[type="number"]#motor-speed {
 /* Body-colour swatch: a square chip that matches the icon-button footprint. */
 input[type="color"]#body-color {
   width: 32px;
-  height: 32px;
+  height: 100%;
+  min-height: 32px;
   padding: 3px;
   background: var(--control);
   border: 1px solid var(--panel-border);

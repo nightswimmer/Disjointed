@@ -70,6 +70,21 @@ pick the next phase up without re-doing the brainstorm.
   for the shape tools would fit the existing `scripts/manual/shots.ts` pipeline (the
   role-styled preview is exposed through `RenderInput.shapeDraft`).
 
+## Toolbar — next step: sim mode
+
+The toolbar was regrouped into draggable groups **for draw mode only** (the harder half, by
+agreement). Sim mode works and inherits the rack, but was not designed:
+
+- Today it shows the mode-neutral groups (File, Mode, Grid, Measure, Snapping, View) plus
+  **Animation** (run + auto-pause), with the four solver-tuning knobs in the properties strip.
+  Per-mode visibility is the `draw-only` / `sim-only` class on a section, so adding or moving a
+  sim group is markup, not code.
+- Open questions: whether the solver knobs deserve their own (collapsible?) group rather than the
+  properties strip; whether sim wants a selection / drag-behaviour group; whether the two modes
+  should keep **separate saved orders** (one `disjointed:toolbarOrder` list today, shared).
+- Not decided: whether the mode button should show the mode you are *in* instead of the one it
+  switches *to* (the theme button's convention was followed).
+
 ## In-app manual — pending updates (UI-tweak batch, started 2026-09-13)
 
 The in-app help (manual generator in `scripts/manual/`, what's-this drawer, shortcut list) is
@@ -133,3 +148,26 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   second click (it places the label instead) — to dimension a line against an arbitrary
   point on a body, pick the point first, then the line. A pattern axis and a point-first
   pick keep the old behaviour (a click on nothing waits for a reference).
+
+- **Toolbar regrouped into draggable sections (2026-09-13).** The flat toolbar became a rack
+  of named sections (`#tb-sections > .tb-sec`), each a two-row grid filled column by column
+  under a caption that is also its drag handle (`src/toolbar.ts`; order in localStorage
+  `disjointed:toolbarOrder`, double-click a caption to restore the default). Manual: the
+  overview / toolbar illustrations and every "the toolbar's N group" phrasing need redoing —
+  the groups are now File · Mode · Animation (sim) · Role · Shapes · Colour · Pattern ·
+  Boolean · Mating · Actuators · Transform · Components · Constraints · Grid · Measure ·
+  Snapping · View, in a user-settable order, so text must say *which group* by name rather
+  than by position. New behaviour to document: the two mode buttons became **one big toggle**
+  showing the mode it switches *to* (caption = the mode you are in); the role switch shows
+  **icons** instead of Body / Cut / Ref text; grid / constraint-badge / dimension visibility
+  each became a small **eye on that group's caption** (struck through = hidden), since the
+  toggle applies to the whole group; dragging a group makes the others slide into the order
+  they will have when it lands; the armed-tool **hint moved out
+  of the toolbar into a status bar** along the bottom of the window (one line, full text on
+  its tooltip); the text-size, actuator/motor and solver-tuning fields live in a fixed
+  properties strip right of the rack. Placeholder buttons (dimmed, "not implemented yet"
+  toast) now hold places for **Subtract**, **Intersect**, **Tangential**, **Symmetrical** and
+  **Fixed** — the manual should not describe them as working tools. `GROUP_TOPICS` in
+  `src/helpmap.ts` now keys on the `sec-*` ids; the manual generator reads section membership
+  through `.tb-sec[id], .group[id]` (`scripts/manual/shoot.ts`), so `glyphs.js` /
+  `DISJOINTED_GROUPS` will change shape on the next `npm run manual`.

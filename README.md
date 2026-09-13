@@ -84,8 +84,31 @@ There are two modes, switched from the toolbar or by pressing **Tab**. The toolb
 compact **icon buttons** — hover any of
 them for a tooltip naming the tool and its shortcut. When something can't be done (an invalid
 selection, a rejected cut, a file that won't load) a **toast notification** slides in under the
-toolbar and fades out on its own; click it or its ✕ to dismiss it sooner. A **theme toggle** (sun / moon) at the right
-switches between **dark and light** themes; your choice is remembered across sessions.
+toolbar and fades out on its own; click it or its ✕ to dismiss it sooner. A **theme toggle** (sun / moon) in the
+**View** group switches between **dark and light** themes; your choice is remembered across sessions.
+
+### The toolbar
+Controls are gathered into named **groups** — File, Mode, Role, Shapes, Colour, Pattern, Boolean,
+Mating, Actuators, Transform, Components, Constraints, Grid, Measure, Snapping and View, plus
+**Animation** in sim mode. Each group is two rows tall and reads **down then across**, with its
+name on the caption strip underneath. **Drag a group by that caption** to move it along the
+toolbar: the other groups slide into the order they will have when you let go, and your
+arrangement is remembered across sessions. **Double-click** any caption to restore the default
+order. Groups that belong to the other mode simply disappear; on a narrow window the toolbar wraps
+whole groups onto a second row rather than clipping them.
+
+The **mode button** is the big one: it shows the mode it switches *to* (▶ while you draw, ✎ while
+you simulate), and the caption under it names the mode you are in. A group whose drawing can be
+hidden carries a small **eye** on its caption — **Grid**, **Constraints** (the badges) and
+**Measure** (the dimensions); a struck-through eye means that group's drawing is hidden, never
+that it stopped working. Buttons for tools that are not built yet (Subtract, Intersect,
+Tangential, Symmetrical, Fixed) are dimmed placeholders and say so when clicked.
+
+Fields that belong to a selection or an armed tool — text height, actuator / motor speed, the
+solver-tuning knobs — appear in a strip to the **right of the groups**, so nothing shifts when a
+selection comes or goes, and the **?** help button sits at the far right. The **status bar** along
+the bottom of the window spells out what the armed tool expects, or what you can do with the
+current selection; hover it to read the whole line when it is a long one.
 
 ### Draw
 Tools are **one-shot**: pick a tool (or press its shortcut), place one element, and you return
@@ -101,7 +124,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Slot** | `Shift+S` | Click where the slot starts and where it ends — or press and drag — then move out to set its **width** and click. A two-point rounded outline (a capsule): a link with rounded ends as a body, a slotted hole as a cut, the axis segment as a reference. |
 | **Line** | `Shift+L` | A **reference segment**: two points, or press and drag. Endpoints that land on joints / corners / reference points are held there by a coincident; the segment takes H / V / parallel / perpendicular / **equal** constraints like a body edge. Reference only. |
 | **Arc** | `Shift+A` | A **reference arc**: click its start and end, then a point it passes through. Its three points are handles and references; placements snap onto the arc. Reference only. |
-| **Text** | `Shift+T` | A **label**: click where it goes, type, Enter. Clicked **on a body** it is anchored to that body and rides with it; on empty space it stays put. Height from the toolbar field. **Double-click** a label to edit it, drag to move, Delete to remove. Never simulated or exported. |
+| **Text** | `Shift+T` | A **label**: click where it goes, type, Enter. Clicked **on a body** it is anchored to that body and rides with it; on empty space it stays put. Height from the field that appears in the properties strip while the tool is armed. **Double-click** a label to edit it, drag to move, Delete to remove. Never simulated or exported. |
 | **Linear pattern** | `I` | Repeat a **hole** (click inside its cut-out) or a **joint** along a line: click where the **next instance** should go — the row appears (3 instances) and its **×count** label opens, so type the count and press Enter. The tool stays armed for an optional **second direction** (click where the first instance of the other direction goes — a grid), or press Enter / Esc to keep a single row. A direction within ~5° of horizontal / vertical gets an **H / V constraint** automatically, like a body edge. |
 | **Circular pattern** | `Q` | Repeat a hole or a joint around a **centre**: click the seed, then the centre (snaps to joints, hole centres, corners and the grid) — 6 instances spread evenly, each turned with the arc; the count label opens for typing. |
 | **Split** | `X` | Cut a body in two. Click a point on a body's **outline** (a corner, or anywhere on an edge) to start the cut, click inside the body to route it (as many vertices as you like — each kept inside), then click the outline again to finish: the body splits along that path into two bodies (same colour, grounded flag and group; the new one sits right above the original in the stacking order). Existing corners keep their rounding, the cut corners start sharp. Holes stay whole on their side (a cut through a hole is refused); joints stay where they are and belong to the side they're on; a rail or motor whose two joints end up on different sides is dropped. Bodies built from joints are converted to an editable sharp outline first. Esc aborts. |
@@ -196,8 +219,8 @@ Shift+drag *on* a body or joint is still the rigid drag described above.
   and dimensions follow their corners/edges through the flip. **Component instances mirror
   too**: the instance becomes its definition's mirror image (motors spin the other way) while
   the definition and its other instances stay as they are — see *Components* below. Grouped
-  in the toolbar next to **Rotate**.
-- **Combine** (toolbar button next to **Split**, or **N**) — merge the **multi-selected bodies**
+  with **Rotate** in the **Transform** group.
+- **Combine** (the **Boolean** group, or **N**) — merge the **multi-selected bodies**
   (Ctrl+click or box-select two or more) into one body: the union of their shapes. They must
   **overlap or share an edge** (bodies that don't touch the rest, or touch only at a corner,
   are refused with a message saying why). The **first-selected** body survives — it keeps its
@@ -207,7 +230,7 @@ Shift+drag *on* a body or joint is still the rigid drag described above.
   holes not covered by the other bodies stay (a circular hole stays a true disk), and a region
   the union closes off becomes a new hole. Bodies built from joints are converted to an
   editable sharp outline first.
-- **Send to back / Bring to front** (toolbar buttons next to Mirror, or **PageDown / PageUp**) —
+- **Send to back / Bring to front** (the **Transform** group, or **PageDown / PageUp**) —
   move the selection to the bottom / top of the stacking order. Clicks always pick the topmost
   body, so this also decides what a click lands on: send a big imported reference body to the
   back and it stops covering — and stealing clicks from — the mechanism drawn over it. The
@@ -281,9 +304,9 @@ works in both modes. Measurements are saved with the mechanism.
   rejected (the conflicting items flash red, nothing moves). Each constraint shows a small
   violet **badge** (◎ H V ∥ ⊥ =) beside its element — faded until you **hover the element**
   (or the badge — hovering a badge also **highlights the elements it constrains**, with a
-  dotted line between them when they're apart): click to select, **Delete** to remove. A toolbar toggle next to the
-  constraint tools **shows/hides all badges** (constraints keep working while hidden), and a
-  matching toggle next to Measure shows/hides **all measurements** — in both modes.
+  dotted line between them when they're apart): click to select, **Delete** to remove. The **eye** on the **Constraints** group's caption
+  **shows/hides all badges** (constraints keep working while hidden), and the eye on the
+  **Measure** group shows/hides **all measurements** — in both modes.
 - **Constraints by dragging**: the common cases need no tool — mid-drag, hover a target to arm
   it, then release aligned with it (or on its line) and the H / V / coincident constraint is
   created. See *Implicit constraints while dragging* under Grid & snapping.
@@ -417,12 +440,12 @@ finite segment that does everything it did, and takes equal-length and length di
   selected instance re-pointed at the copy — nothing moves, and from then on the two components
   are edited completely independently. Components nested inside the definition stay shared.
 
-**Body colour.** A colour swatch in the toolbar sets the active colour: with **nothing selected**
+**Body colour.** The swatch in the **Colour** group sets the active colour: with **nothing selected**
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
 and editing it recolours the body.
 
 **Actuator / motor speed.** Select an actuator's rider, the rail it rides, or a motor's body
-(or its pivot / crank joint) and a small inline panel appears in the toolbar with a speed field
+(or its pivot / crank joint) and a small panel appears in the toolbar's properties strip with a speed field
 (in Hz) — and, for linear actuators, a `/\` ↔ `~` profile toggle (triangle for constant-speed
 end-to-end travel, sine for smooth ease in/out at the endstops).
 
@@ -451,7 +474,7 @@ the whole group translates and rotates together (a ground on one member anchors 
 drawn layout is preserved when you switch back to Draw.
 
 **Animate (▶ button or `Space`).** With any linear actuators / motors in the scene, press the
-run-animation button in the sim-mode toolbar (or Spacebar) to drive them all at their configured
+run-animation button in the **Animation** group (or Spacebar) to drive them all at their configured
 speeds. Press again to pause. Pressing play **resumes from the current pose** — phases auto-fit so
 the motion picks up smoothly from wherever you (or the previous animation) left things.
 
@@ -462,12 +485,12 @@ points that can't meet (pulled as close together as the rest of the assembly all
 involved are drawn **red**, and a red **"Assembly impossible"** banner appears. A
 connected-but-impossible piece won't disturb the parts that *can* be solved.
 
-**Auto-pause on impossible** (warning-triangle button in the sim-mode toolbar). Toggle it on to
+**Auto-pause on impossible** (the warning triangle in the **Animation** group). Toggle it on to
 have the animation halt automatically when the assembly can't be assembled — useful when running
 a motor or actuator into an unreachable configuration. A short debounce filters single-frame
 solver chatter, so it only fires once the impossibility persists for a few frames.
 
-**Solver tuning** (advanced, sim-mode toolbar). Four small controls let you trade solve accuracy
+**Solver tuning** (advanced, in sim mode's properties strip). Four small controls let you trade solve accuracy
 against per-frame cost live: the animation iteration cap (`it`), the convergence-sweep cap (`cl`),
 and the structural / break tolerances (`st` / `br`). The defaults are right for most mechanisms —
 these exist for dialing in complex closed-loop scenes where the animation occasionally flags a
@@ -475,7 +498,7 @@ solvable assembly as impossible. The browser console logs rolling solve statisti
 animation runs.
 
 ### Units, DXF import & cut-file export
-A **unit dropdown** in the toolbar's grid group declares what one world unit means — **mm, cm,
+A **unit dropdown** in the **Grid** group declares what one world unit means — **mm, cm,
 m or in** (default mm). It's purely a declaration (changing it never moves geometry): distance
 measurements show the unit, and imports convert into it. The choice is saved with the file.
 
@@ -492,7 +515,7 @@ shapes land multi-selected, ready to move or group. If an import covers your mec
 file loads it as a scene, same as the Load button. (`dxf import test.dxf` in the repo is a
 small sample to try.)
 
-**Export a cut file** with the Export button (next to Save): it writes the **selected body or
+**Export a cut file** with the Export button (the **File** group): it writes the **selected body or
 multi-selection — or every body when nothing is selected —** as a flat file ready for CNC /
 laser / plasma work. Pick **DXF** (true arcs, in your working units, for CAM software such as
 Fusion 360, VCarve, Carbide Create, Easel or SheetCAM) or **SVG** (in millimetres, for laser
@@ -506,8 +529,9 @@ while editing its definition), `Crank-body_2-…` for one body of several, `Cran
 a partial selection — with the date and time appended. An exported DXF drops straight back onto the canvas with its fillets editable.
 
 ### Grid & snapping
-The toolbar's grid group controls a world-locked grid: **Grid** toggles its visibility, **Snap**
-toggles snap-to-grid, and the **grid-size selector** sets the spacing: click the value to open a
+The **Grid** group controls a world-locked grid: the **eye** on its caption toggles the grid's
+visibility, the **Snapping** group's **Snap** button toggles snap-to-grid, and the **grid-size
+selector** sets the spacing: click the value to open a
 list of presets (1 to 200), pick one, or type your own in the **Custom…** field at the bottom and
 press Enter / `+` — it applies straight away and joins the list (custom sizes are remembered in the
 browser; the `×` next to one removes it). Decimals are allowed. The **units** dropdown sits right
@@ -516,7 +540,7 @@ and dragging snaps too: a per-vertex reshape snaps the grabbed corner, while mov
 snaps whichever is nearest the grab point — the body's centroid or one of its corners. Visibility
 and snapping are independent (you can snap to a hidden grid).
 
-**Object snap** (the toolbar button next to Snap; independent of grid snap) makes drags snap
+**Object snap** (the **Snapping** group, beside Snap; independent of grid snap) makes drags snap
 objects to each other. When you start dragging a body, joint or multi-selection, the feature of
 it nearest the grab becomes the **reference** — a **corner**, then an **edge midpoint**, then an
 **edge**, or the object's **centre** if nothing is close (holes count too). It's highlighted in
@@ -551,13 +575,13 @@ items flash red).
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor (0.05× to 200×).
 - **Right-drag** — pan the view (anywhere). To move a body or joint, select it and left-drag (see Select mode; turn on **Object snap** to drag by a corner / edge / centre and snap it onto other objects).
-- **Fit to screen** (`F`, or the toolbar button) — frame the whole mechanism centered in the canvas (a rotated view fits the tilted picture).
-- **Rotate the view** (`Shift+R`, or the toolbar button next to Fit; both modes) — a big ticked ring with a crosshair along the world X / Y axes appears over the canvas. Drag the ring or an arm to turn the whole picture about the screen centre; the angle snaps to 5° steps, hold **Shift** while dragging for any angle. The box under the centre shows the angle and takes an exact value (type it and press Enter, like a dimension). Double-click the centre (or press `0`) for 0°; Esc, `Shift+R` or a click elsewhere closes the dial. Pan and zoom keep working while it is open. The rotation is only how you look at the drawing: the mechanism, its horizontal / vertical constraints and the grid stay in their own axes (the grid turns with the drawing), and labels stay upright.
+- **Fit to screen** (`F`, or the **View** group) — frame the whole mechanism centered in the canvas (a rotated view fits the tilted picture).
+- **Rotate the view** (`Shift+R`, or the **View** group's dial button; both modes) — a big ticked ring with a crosshair along the world X / Y axes appears over the canvas. Drag the ring or an arm to turn the whole picture about the screen centre; the angle snaps to 5° steps, hold **Shift** while dragging for any angle. The box under the centre shows the angle and takes an exact value (type it and press Enter, like a dimension). Double-click the centre (or press `0`) for 0°; Esc, `Shift+R` or a click elsewhere closes the dial. Pan and zoom keep working while it is open. The rotation is only how you look at the drawing: the mechanism, its horizontal / vertical constraints and the grid stay in their own axes (the grid turns with the drawing), and labels stay upright.
 - **Tab** — switch between Draw and Simulate mode.
 - `Ctrl/Cmd+S` save, `Ctrl/Cmd+Shift+S` save as, `Ctrl/Cmd+O` open (see below).
 
 ### Help
-- **Help** (the `?` button next to the theme toggle, or the `?` key) opens the manual in a
+- **Help** (the `?` button at the far right of the toolbar, or the `?` key) opens the manual in a
   drawer beside the canvas. While it is open the pointer becomes a question mark and every
   click is a question: click a **toolbar button** to read about that tool, or click **anything
   on the canvas** — a body, a hole, a joint, a pin, a ground, a rail, a slider, a reference element, a
@@ -580,7 +604,7 @@ items flash red).
 - **Load** (`Ctrl/Cmd+O`, or the toolbar button) opens a `.json` — you can also drag-and-drop
   one onto the canvas. The loaded file becomes the save target, and stays so after a reload
   (the browser may ask permission once).
-- **Auto-backup** (the clock button next to Export) writes timestamped copies,
+- **Auto-backup** (the clock button in the **File** group) writes timestamped copies,
   `<name>-backup-<date-time>.json`, into a folder you choose. Pick how long after the first
   change a backup is written (1–30 min; the panel shows when the next one is due) and how many
   to keep (older ones are pruned). Saving cancels the pending backup, since the file is up to

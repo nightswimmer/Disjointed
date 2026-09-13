@@ -60,6 +60,7 @@ import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphV
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine, distToArc, regularPolygon, arcThrough, sampleArc } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt, rotateViewTo, rotateToScreen, rotateToWorld } from "./view";
 import { installHelp } from "./help";
+import { installToolbar } from "./toolbar";
 import { CanvasTopic } from "./helpmap";
 
 type Mode = "draw" | "sim";
@@ -96,8 +97,6 @@ const canvas = document.getElementById("scene") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
 const hintEl = document.getElementById("hint")!;
 const simErrorEl = document.getElementById("sim-error")!;
-const toolGroup = document.getElementById("tool-group")!;
-const editGroup = document.getElementById("edit-group")!;
 const gridBtn = document.getElementById("grid-btn") as HTMLButtonElement;
 const snapBtn = document.getElementById("snap-btn") as HTMLButtonElement;
 const osnapBtn = document.getElementById("osnap-btn") as HTMLButtonElement;
@@ -108,9 +107,12 @@ const gridSizeList = document.getElementById("grid-size-list") as HTMLDivElement
 const gridSizeAddForm = document.getElementById("grid-size-add") as HTMLFormElement;
 const gridSizeNew = document.getElementById("grid-size-new") as HTMLInputElement;
 const themeBtn = document.getElementById("theme-btn") as HTMLButtonElement;
-const colorGroup = document.getElementById("color-group")!;
+const modeToggle = document.getElementById("mode-toggle") as HTMLButtonElement;
+const modeCap = document.getElementById("mode-cap")!;
+/** Toolbar sections that only make sense in one mode (class on the section element). */
+const drawOnlySections = [...document.querySelectorAll<HTMLElement>(".tb-sec.draw-only")];
+const simOnlySections = [...document.querySelectorAll<HTMLElement>(".tb-sec.sim-only")];
 const colorInput = document.getElementById("body-color") as HTMLInputElement;
-const actuatorGroup = document.getElementById("actuator-group")!;
 const actuatorProps = document.getElementById("actuator-props")!;
 const motorProps = document.getElementById("motor-props")!;
 const actuatorSpeedInput = document.getElementById("actuator-speed") as HTMLInputElement;
@@ -128,7 +130,6 @@ const structTolCtrl = document.getElementById("struct-tol-ctrl")!;
 const structTolInput = document.getElementById("struct-tol") as HTMLInputElement;
 const breakTolCtrl = document.getElementById("break-tol-ctrl")!;
 const breakTolInput = document.getElementById("break-tol") as HTMLInputElement;
-const sketchGroup = document.getElementById("sketch-group")!;
 const dimEditInput = document.getElementById("dim-edit") as HTMLInputElement;
 const sketchVisBtn = document.getElementById("sketch-vis-btn") as HTMLButtonElement;
 const measureVisBtn = document.getElementById("measure-vis-btn") as HTMLButtonElement;
@@ -1857,6 +1858,12 @@ function containmentWarning(): string {
   return `⚠ ${what} (red) — ${fix}, or fix the body / component shape. · `;
 }
 
+/** Status-bar line; the bar shows one line, so the whole text goes on its tooltip. */
+function setHint(text: string): void {
+  hintEl.textContent = text;
+  hintEl.title = text;
+}
+
 function updateHint(): void {
   const base =
     viewRotate ? HINTS.viewRotate
@@ -1866,7 +1873,7 @@ function updateHint(): void {
     : isPatternTool(tool) ? patternHint()
     : isShapeTool(tool) ? shapeHint()
     : HINTS[tool];
-  hintEl.textContent = containmentWarning() + base;
+  setHint(containmentWarning() + base);
 }
 
 // --- toolbar wiring ------------------------------------------------------
@@ -1879,6 +1886,16 @@ document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((btn) => {
 document.querySelectorAll<HTMLButtonElement>(".role-btn").forEach((btn) => {
   btn.addEventListener("click", () => setRole(btn.dataset.role as ShapeRole));
 });
+// Buttons that hold a place in the toolbar for a tool that is not built yet.
+document.querySelectorAll<HTMLButtonElement>(".todo-btn").forEach((btn) => {
+  btn.addEventListener("click", () => notify(`${btn.dataset.todo ?? "This"} is not implemented yet.`));
+});
+// Sections are draggable by their caption; the order is remembered across sessions.
+const toolbarApi = installToolbar({
+  blocked: () => document.body.classList.contains("help-armed"),
+  onReset: () => notify("Toolbar groups back in their default order."),
+});
+void toolbarApi;
 textSizeInput.addEventListener("change", () => {
   const v = Number(textSizeInput.value);
   if (Number.isFinite(v) && v > 0) textSize = v;
@@ -2121,17 +2138,9 @@ function setMode(next: Mode): void {
   mode = next;
   // Animation is sim-only; always start sim with it off so dragging-to-drive works first.
   setAnimating(false);
-  document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((b) =>
-    b.classList.toggle("active", b.dataset.mode === mode)
-  );
-  toolGroup.classList.toggle("hidden", mode === "sim");
-  editGroup.classList.toggle("hidden", mode === "sim");
-  colorGroup.classList.toggle("hidden", mode === "sim");
-  actuatorGroup.classList.toggle("hidden", mode === "sim");
-  sketchGroup.classList.toggle("hidden", mode === "sim");
-  document.getElementById("component-group")!.classList.toggle("hidden", mode === "sim");
-  runBtn.classList.toggle("hidden", mode === "draw");
-  autopauseBtn.classList.toggle("hidden", mode === "draw");
+  syncModeToggle();
+  for (const s of drawOnlySections) s.classList.toggle("hidden", mode === "sim");
+  for (const s of simOnlySections) s.classList.toggle("hidden", mode === "draw");
   animIterCtrl.classList.toggle("hidden", mode === "draw");
   cleanupMaxCtrl.classList.toggle("hidden", mode === "draw");
   structTolCtrl.classList.toggle("hidden", mode === "draw");
@@ -2140,6 +2149,18 @@ function setMode(next: Mode): void {
   updateHint();
   updateSimError(); // show/hide the banner for the mode we just entered
   syncPropsPanel(); // selection cleared → properties panels hide
+}
+
+/** The mode toggle shows — and switches to — the mode you are *not* in; its caption names the one you are. */
+function syncModeToggle(): void {
+  const other = mode === "draw" ? "sim" : "draw";
+  modeToggle.dataset.mode = other;
+  modeToggle.title =
+    other === "sim"
+      ? "Simulate mode — drag to drive the mechanism"
+      : "Draw mode — build the mechanism";
+  modeToggle.setAttribute("aria-label", other === "sim" ? "Switch to simulate mode" : "Switch to draw mode");
+  modeCap.textContent = mode === "draw" ? "Draw" : "Simulate";
 }
 
 function setTool(next: Tool): void {
@@ -3532,7 +3553,7 @@ function makeComponentFromSelection(): void {
     if (copy) {
       markDirty();
       setCompPanelVisible(true);
-      hintEl.textContent = `Forked into new component “${copy.name}” — the selected instance now follows it.`;
+      setHint(`Forked into new component “${copy.name}” — the selected instance now follows it.`);
     }
     return;
   }
@@ -3544,7 +3565,7 @@ function makeComponentFromSelection(): void {
     markDirty();
     setCompPanelVisible(true);
     enterComponent(def.id);
-    hintEl.textContent = `Created empty component “${def.name}” — draw bodies or place instances of other components, then navigate back.`;
+    setHint(`Created empty component “${def.name}” — draw bodies or place instances of other components, then navigate back.`);
     return;
   }
   if (bodies.length === 0) {
@@ -3574,7 +3595,7 @@ function startInsertInstance(defId: number): void {
   disarmTool();
   pendingInsert = defId;
   canvas.style.cursor = "copy";
-  hintEl.textContent = `Click the canvas to place an instance of “${def?.name ?? "?"}” — Esc cancels.`;
+  setHint(`Click the canvas to place an instance of “${def?.name ?? "?"}” — Esc cancels.`);
 }
 
 /** Handle a canvas click while an instance placement is pending. Returns whether it hit. */
@@ -8188,6 +8209,7 @@ resize();
 const restored = restoreAutosave();
 pushHistory(); // seed the undo history with the initial (restored) layout
 void initFileState(restored);
+syncModeToggle();
 updateHint();
 requestAnimationFrame(frame);
 

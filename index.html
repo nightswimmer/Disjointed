@@ -7,23 +7,362 @@
   </head>
   <body>
     <div id="app">
+      <!--
+        Toolbar = a rack of draggable sections (#tb-sections) + a fixed right end.
+        Each .tb-sec is a two-row, column-major grid of controls (`grid-auto-flow: column`,
+        so the markup order reads down-then-across) under a caption strip that doubles as
+        the section's drag handle; src/toolbar.ts reorders them and remembers the order.
+        Wiring stays by id / data-* / class, so sections can be moved freely.
+      -->
       <header id="toolbar">
-        <div class="group" id="mode-group">
-          <button data-mode="draw" class="mode-btn active icon-btn" title="Draw mode — build the mechanism" aria-label="Draw mode">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 17l1-4L14 3l3 3L7 16l-4 1z"/><path d="M12 5l3 3"/></svg>
-          </button>
-          <button data-mode="sim" class="mode-btn icon-btn" title="Simulate mode — drag to drive the mechanism" aria-label="Simulate mode">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l11 6-11 6z" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button id="run-btn" class="icon-btn hidden" title="Run / pause actuator animation (Space)" aria-label="Run animation">
-            <svg class="icon-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l11 6-11 6z" fill="currentColor" stroke="none"/></svg>
-            <svg class="icon-pause" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="4" width="4" height="12" fill="currentColor" stroke="none"/><rect x="11" y="4" width="4" height="12" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button id="autopause-btn" class="icon-btn hidden" title="Auto-pause the animation when the assembly is impossible" aria-label="Auto-pause on impossible assembly" aria-pressed="false">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 L17 16 L3 16 Z"/><line x1="10" y1="8" x2="10" y2="12.5"/><circle cx="10" cy="14.5" r="0.9" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <!-- Solver tuning controls: values are seeded from solverConfig / animIterations in
-               main.ts at startup, so no defaults live here. -->
+        <div id="tb-sections">
+          <section class="tb-sec" id="sec-file" data-sec="file">
+            <div class="tb-grid">
+              <button id="load-btn" class="icon-btn" title="Load mechanism from a file (Ctrl+O)" aria-label="Load">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7a1 1 0 0 1 1-1h3l2 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>
+              </button>
+              <button id="save-btn" class="icon-btn" title="Save mechanism to a file (Ctrl+S) — Shift-click or Ctrl+Shift+S to save as a new file" aria-label="Save">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h9l3 3v9H4z"/><path d="M7 4v4h6V5"/><rect x="7" y="11" width="6" height="5"/></svg>
+              </button>
+              <button id="export-btn" class="icon-btn" title="Export a cut file (DXF / SVG) of the selected bodies — or all bodies when nothing is selected" aria-label="Export cut file">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9"/><path d="M6.5 8.5 10 12l3.5-3.5"/><path d="M4 13v2.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V13"/></svg>
+              </button>
+              <button id="backup-btn" class="icon-btn" title="Auto-backup: periodically write timestamped copies of the mechanism to a folder" aria-label="Auto-backup settings">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6"/><path d="M3.2 3.6v3.2h3.2"/><path d="M10 6.5V10l2.6 1.6"/></svg>
+              </button>
+              <button id="clear-btn" class="icon-btn icon-btn-danger" title="Delete everything" aria-label="Clear all">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="6" x2="15" y2="6"/><path d="M8 6V4h4v2"/><path d="M6.5 6l.7 10h5.6l.7-10"/><line x1="9" y1="9" x2="9" y2="13"/><line x1="11" y1="9" x2="11" y2="13"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">File</div>
+          </section>
+
+          <!-- Draw <-> Simulate: one big toggle showing the mode it switches *to* (like the
+               theme button); the caption under it names the mode you are in. -->
+          <section class="tb-sec" id="sec-mode" data-sec="mode">
+            <div class="tb-grid">
+              <button id="mode-toggle" class="mode-btn icon-btn tb-tall tb-big" data-mode="sim" data-help="modes"
+                title="Simulate mode — drag to drive the mechanism" aria-label="Switch to simulate mode">
+                <svg class="icon-draw" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 17l1-4L14 3l3 3L7 16l-4 1z"/><path d="M12 5l3 3"/></svg>
+                <svg class="icon-sim" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l11 6-11 6z" fill="currentColor" stroke="none"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap" id="mode-cap">Draw</div>
+          </section>
+
+          <!-- Sim mode only: the animation controls. -->
+          <section class="tb-sec sim-only hidden" id="sec-anim" data-sec="anim">
+            <div class="tb-grid">
+              <button id="run-btn" class="icon-btn" title="Run / pause actuator animation (Space)" aria-label="Run animation">
+                <svg class="icon-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l11 6-11 6z" fill="currentColor" stroke="none"/></svg>
+                <svg class="icon-pause" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="4" width="4" height="12" fill="currentColor" stroke="none"/><rect x="11" y="4" width="4" height="12" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button id="autopause-btn" class="icon-btn" title="Auto-pause the animation when the assembly is impossible" aria-label="Auto-pause on impossible assembly" aria-pressed="false">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 L17 16 L3 16 Z"/><line x1="10" y1="8" x2="10" y2="12.5"/><circle cx="10" cy="14.5" r="0.9" fill="currentColor" stroke="none"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Animation</div>
+          </section>
+
+          <!-- Shape role: what every shape tool's finished shape becomes. Sticky; 1 / 2 / 3;
+               Ctrl on a shape's first click flips Body <-> Cut for that one shape. -->
+          <section class="tb-sec draw-only" id="sec-role" data-sec="role">
+            <div class="tb-grid">
+              <div class="role-toggle tb-tall" id="role-group" role="group" aria-label="Shape role">
+                <button type="button" class="role-btn active" data-role="body" title="Body role — every shape you draw becomes a rigid body (1)" aria-label="Body role">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="5" width="13" height="10" rx="1.5" fill="currentColor" fill-opacity="0.3"/></svg>
+                </button>
+                <button type="button" class="role-btn" data-role="cut" title="Cut role — every shape is subtracted from the body under it: a hole when it lies inside, a notch when it crosses the outline. Select the body first to choose the target (2)" aria-label="Cut role">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5h13v10h-13z M10 7.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 1 0 0-5.6z" fill="currentColor" fill-opacity="0.3" fill-rule="evenodd"/></svg>
+                </button>
+                <button type="button" class="role-btn" data-role="reference" title="Reference role — every shape becomes construction geometry: dash-dot, snappable, measurable, never simulated or exported (3)" aria-label="Reference role">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3.5" y1="15.5" x2="16.5" y2="4.5" stroke-dasharray="4 1.5 1 1.5"/></svg>
+                </button>
+              </div>
+            </div>
+            <div class="tb-cap">Role</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-shapes" data-sec="shapes">
+            <div class="tb-grid">
+              <button data-tool="line" class="tool-btn icon-btn" title="Line — a reference segment: click two points, or press and drag; points land on joints / corners / edges (Shift+L)" aria-label="Line tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="15.5" x2="16" y2="4.5" stroke-dasharray="4 1.5 1 1.5"/><circle cx="4" cy="15.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16" cy="4.5" r="1.3" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="polyline" class="tool-btn icon-btn" title="Polyline — click the corners of a free shape; click the first corner again, double-click or press Enter to close. In the Body role, start on joints to build a body around them (B = body, U = cut)" aria-label="Polyline tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 15.5L7 5l4.5 6.5L16.5 4.5"/><circle cx="3.5" cy="15.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="7" cy="5" r="1.3" fill="currentColor" stroke="none"/><circle cx="11.5" cy="11.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.5" cy="4.5" r="1.3" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="rect" class="tool-btn icon-btn" title="Rectangle — click two opposite corners, or press and drag; Shift for a square, Alt to draw from the centre (Shift+B)" aria-label="Rectangle tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="5" width="13" height="10" rx="1" fill="currentColor" fill-opacity="0.18"/></svg>
+              </button>
+              <button data-tool="circle" class="tool-btn icon-btn" title="Circle — click the centre, then a point on the rim; or press and drag the radius out (Shift+C)" aria-label="Circle tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="0.9" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="polygon" class="tool-btn icon-btn" title="Regular polygon — click the centre, then one corner; or press and drag. The side count shows beside the cursor: ↑ / ↓ change it (Shift+P)" aria-label="Regular polygon tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5l5.6 3.25v6.5L10 16.5l-5.6-3.25v-6.5z" fill="currentColor" fill-opacity="0.18"/></svg>
+              </button>
+              <button data-tool="slot" class="tool-btn icon-btn" title="Slot — click where it starts and where it ends (or press and drag), then move out to set the width and click (Shift+S)" aria-label="Slot tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="14" height="6" rx="3" fill="currentColor" fill-opacity="0.18"/><circle cx="6" cy="10" r="0.9" fill="currentColor" stroke="none"/><circle cx="14" cy="10" r="0.9" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="arc" class="tool-btn icon-btn" title="Arc — a reference arc: click its start and end points, then a point it passes through (Shift+A)" aria-label="Arc tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 14.5A7.5 7.5 0 0 1 16 14.5" stroke-dasharray="4 1.5 1 1.5"/><circle cx="4" cy="14.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16" cy="14.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="10" cy="6.9" r="1.3" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="text" class="tool-btn icon-btn" title="Text — a label: click where it goes (on a body it rides with that body), type, Enter. Double-click a label to edit it (Shift+T)" aria-label="Text tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5.5V4h10v1.5"/><path d="M10 4v12"/><path d="M7.5 16h5"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Shapes</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-color" data-sec="color">
+            <div class="tb-grid">
+              <input id="body-color" class="tb-tall" type="color" value="#4f9dff"
+                title="Body colour — with a body selected, recolours it; otherwise sets the colour for new bodies"
+                aria-label="Body colour" />
+            </div>
+            <div class="tb-cap">Colour</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-pattern" data-sec="pattern">
+            <div class="tb-grid">
+              <button data-tool="patternLinear" class="tool-btn icon-btn" title="Linear pattern — repeat a hole or a joint along one or two directions: click the hole / joint, then where the next instance goes; a second click adds a second direction (a grid). Count and spacing are edited on the canvas labels (I)" aria-label="Linear pattern tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="5" r="2.2" fill="currentColor" fill-opacity="0.35"/><circle cx="11" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="17" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="11" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="17" r="2.2" stroke-dasharray="2 1.6"/></svg>
+              </button>
+              <button data-tool="patternCircular" class="tool-btn icon-btn" title="Circular pattern — repeat a hole or a joint around a centre: click the hole / joint, then the centre of rotation. Count, angle and rotation are edited on the canvas labels (Q)" aria-label="Circular pattern tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="4" r="2" fill="currentColor" fill-opacity="0.35"/><circle cx="15.2" cy="13" r="2" stroke-dasharray="2 1.6"/><circle cx="4.8" cy="13" r="2" stroke-dasharray="2 1.6"/><path d="M6.2 5.9a6 6 0 0 0-1.6 3.6" stroke-dasharray="1.5 1.5"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Pattern</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-boolean" data-sec="boolean">
+            <div class="tb-grid">
+              <button data-tool="split" class="tool-btn icon-btn" title="Split a body — click a point on its outline, route the cut inside, click the outline again to cut it in two (X)" aria-label="Split tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" fill="currentColor" fill-opacity="0.18"/><path d="M8 3.5l3 4-2.5 3.5 3 4" stroke-dasharray="2.2 1.6"/></svg>
+              </button>
+              <button id="combine-btn" class="icon-btn" title="Combine the selected bodies into one — they must overlap or share an edge; the first selected keeps its colour (N)" aria-label="Combine selected bodies">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="9" height="9" rx="1.5" fill="currentColor" fill-opacity="0.18"/><rect x="8" y="8" width="9" height="9" rx="1.5" fill="currentColor" fill-opacity="0.18"/><path d="M8 12V8h4" fill="none"/></svg>
+              </button>
+              <button id="subtract-btn" class="icon-btn todo-btn" data-todo="Subtract — cutting one selected body out of another" title="Subtract one body from another (not implemented yet)" aria-label="Subtract bodies">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h9v5H8v4H3z" fill="currentColor" fill-opacity="0.18"/><rect x="8" y="8" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/></svg>
+              </button>
+              <button id="intersect-btn" class="icon-btn todo-btn" data-todo="Intersect — keeping only the overlap of the selected bodies" title="Keep the overlap of two bodies (not implemented yet)" aria-label="Intersect bodies">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/><rect x="8" y="8" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/><rect x="8" y="8" width="4" height="4" fill="currentColor" fill-opacity="0.4"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Boolean</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-mating" data-sec="mating">
+            <div class="tb-grid">
+              <button data-tool="joint" class="tool-btn icon-btn" title="Add a joint point to a body (J)" aria-label="Joint tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4.5"/><circle cx="10" cy="10" r="1.3" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="weld" class="tool-btn icon-btn" title="Weld — click where bodies overlap to lock them rigidly together at that point (no relative rotation); click a pinned joint to toggle weld ↔ pin (W)" aria-label="Weld tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4.5"/><rect x="8.4" y="8.4" width="3.2" height="3.2" fill="currentColor" stroke="none"/><rect x="3.5" y="3.5" width="13" height="13" rx="1.5" fill="none" stroke-dasharray="3 2"/></svg>
+              </button>
+              <button data-tool="connect" class="tool-btn icon-btn" title="Pin two joints together (C)" aria-label="Connect tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="15" r="2.5"/><circle cx="15" cy="5" r="2.5"/><line x1="6.8" y1="13.2" x2="13.2" y2="6.8"/></svg>
+              </button>
+              <button data-tool="ground" class="tool-btn icon-btn" title="Ground a joint (fixed position, free rotation) or a body / group (fixed entirely); click again to unground (G)" aria-label="Ground tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="4" r="1.6"/><line x1="10" y1="5.6" x2="10" y2="10"/><line x1="4" y1="10" x2="16" y2="10"/><line x1="6" y1="10" x2="4" y2="14"/><line x1="9" y1="10" x2="7" y2="14"/><line x1="12" y1="10" x2="10" y2="14"/><line x1="15" y1="10" x2="13" y2="14"/></svg>
+              </button>
+              <button data-tool="rail" class="tool-btn icon-btn" title="Draw a rail — click two joints on the same body (a moving rail) or two free joints (a fixed track); joints placed on it ride along as pin-in-slots (K)" aria-label="Rail tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="slider" class="tool-btn icon-btn" title="Slider — click a body where the travel starts (that body moves), then click where it ends: the body slides along the arrow without rotating. Over another body the track rides that body, else it is fixed in the world. Click an existing rail to add a slider there, or a rider to toggle its rotation lock (S)" aria-label="Slider tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><rect x="6.5" y="6.5" width="7" height="7" rx="1.2" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="1.3" fill="currentColor" stroke="none"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Mating</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-actuator" data-sec="actuator">
+            <div class="tb-grid">
+              <button data-tool="linearActuator" class="tool-btn icon-btn" title="Linear actuator — click a slider or rail to make it self-driving: its carriage travels back and forth in animation (A)" aria-label="Linear actuator tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="2.3" fill="currentColor" stroke="none"/><path d="M6 10l-2-1.6M6 10l-2 1.6" /><path d="M14 10l2-1.6M14 10l2 1.6" /></svg>
+              </button>
+              <button data-tool="motor" class="tool-btn icon-btn" title="Create a motor on a body — pick pivot then crank pin; spins in animation (M)" aria-label="Motor tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none"/><line x1="10" y1="10" x2="15" y2="6.5"/><circle cx="15" cy="6.5" r="1.6" fill="currentColor" stroke="none"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Actuators</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-transform" data-sec="transform">
+            <div class="tb-grid">
+              <button id="mirror-h-btn" class="icon-btn" title="Mirror the selection left↔right" aria-label="Mirror horizontally">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="3" x2="10" y2="17" stroke-dasharray="2 2"/><path d="M8 6L4 10l4 4z" fill="currentColor" fill-opacity="0.18"/><path d="M12 6l4 4-4 4z" fill="currentColor" fill-opacity="0.18"/></svg>
+              </button>
+              <button id="mirror-v-btn" class="icon-btn" title="Mirror the selection top↔bottom" aria-label="Mirror vertically">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10" stroke-dasharray="2 2"/><path d="M6 8l4-4 4 4z" fill="currentColor" fill-opacity="0.18"/><path d="M6 12l4 4 4-4z" fill="currentColor" fill-opacity="0.18"/></svg>
+              </button>
+              <button id="send-back-btn" class="icon-btn" title="Send the selected body / selection behind everything else (PageDown)" aria-label="Send to back">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><path d="M15.5 4.5v11M13.3 13.3l2.2 2.2 2.2-2.2"/></svg>
+              </button>
+              <button id="bring-front-btn" class="icon-btn" title="Bring the selected body / selection in front of everything else (PageUp)" aria-label="Bring to front">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1"/><path d="M15.5 15.5v-11M13.3 6.7l2.2-2.2 2.2 2.2"/></svg>
+              </button>
+              <button data-tool="rotate" class="tool-btn icon-btn" title="Rotate a body about its centroid, or a node (drag); snaps to 45° (R)" aria-label="Rotate tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15 7a6 6 0 1 0 1.3 4.2"/><path d="M15.4 3.6v3.6h-3.6"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Transform</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-component" data-sec="component">
+            <div class="tb-grid">
+              <button id="make-comp-btn" class="icon-btn" title="Create a component from the selection — packs it into a reusable definition and replaces it with an instance. With a component instance selected: fork it into a new independent component. With nothing selected: create an empty component and open it for editing" aria-label="Create component from selection">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="6" width="10" height="10" rx="2" fill="currentColor" fill-opacity="0.18"/><line x1="15.5" y1="2.5" x2="15.5" y2="7.5"/><line x1="13" y1="5" x2="18" y2="5"/></svg>
+              </button>
+              <button id="comp-panel-btn" class="icon-btn" title="Component browser — insert, edit, rename or delete component definitions" aria-label="Toggle component browser">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="6" height="6" rx="1.4" fill="currentColor" fill-opacity="0.18"/><rect x="11" y="3" width="6" height="6" rx="1.4"/><rect x="3" y="11" width="6" height="6" rx="1.4"/><rect x="11" y="11" width="6" height="6" rx="1.4" fill="currentColor" fill-opacity="0.18"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Components</div>
+          </section>
+
+          <section class="tb-sec draw-only" id="sec-constraints" data-sec="constraints">
+            <div class="tb-grid">
+              <button data-tool="coincident" class="tool-btn icon-btn" title="Coincident — click two points to make them share a position, or a point and a line to hold the point on it (O)" aria-label="Coincident constraint tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5.5"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="equal" class="tool-btn icon-btn" title="Equal length — click two lines (edges or rails) (E)" aria-label="Equal constraint tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="8" x2="15" y2="8"/><line x1="5" y1="12" x2="15" y2="12"/></svg>
+              </button>
+              <button data-tool="horizontal" class="tool-btn icon-btn" title="Horizontal — click an edge or rail, or two points (H)" aria-label="Horizontal constraint tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="10" x2="16" y2="10"/><circle cx="4" cy="10" r="1.6" fill="currentColor" stroke="none"/><circle cx="16" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="vertical" class="tool-btn icon-btn" title="Vertical — click an edge or rail, or two points (V)" aria-label="Vertical constraint tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="4" x2="10" y2="16"/><circle cx="10" cy="4" r="1.6" fill="currentColor" stroke="none"/><circle cx="10" cy="16" r="1.6" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button data-tool="parallel" class="tool-btn icon-btn" title="Parallel — click two lines (edges or rails) (P)" aria-label="Parallel constraint tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="6" y1="16" x2="11" y2="4"/><line x1="10.5" y1="16" x2="15.5" y2="4"/></svg>
+              </button>
+              <button data-tool="perpendicular" class="tool-btn icon-btn" title="Perpendicular — click two lines (edges or rails) (T)" aria-label="Perpendicular constraint tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="15" x2="16" y2="15"/><line x1="10" y1="15" x2="10" y2="4"/></svg>
+              </button>
+              <button id="tangent-btn" class="icon-btn todo-btn" data-todo="Tangential — holding a line tangent to a circle or an arc" title="Tangential constraint (not implemented yet)" aria-label="Tangential constraint">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="9.5" cy="11.5" r="5"/><line x1="2.5" y1="6.5" x2="17.5" y2="6.5"/><circle cx="9.5" cy="6.5" r="1.2" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button id="symmetric-btn" class="icon-btn todo-btn" data-todo="Symmetrical — mirroring two points about a line" title="Symmetrical constraint (not implemented yet)" aria-label="Symmetrical constraint">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="3" x2="10" y2="17" stroke-dasharray="2 2"/><circle cx="4.2" cy="10" r="1.6" fill="currentColor" stroke="none"/><circle cx="15.8" cy="10" r="1.6" fill="currentColor" stroke="none"/><path d="M6.4 10h1.8M11.8 10h1.8"/></svg>
+              </button>
+              <button id="fixed-btn" class="icon-btn todo-btn" data-todo="Fixed — pinning a point or an edge where it is" title="Fixed constraint (not implemented yet)" aria-label="Fixed constraint">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4.5" y="9" width="11" height="7.5" rx="1.5" fill="currentColor" fill-opacity="0.18"/><path d="M7.2 9V6.9a2.8 2.8 0 0 1 5.6 0V9"/><circle cx="10" cy="12.6" r="1" fill="currentColor" stroke="none"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Constraints
+              <button id="sketch-vis-btn" class="cap-eye active" title="Show or hide all constraint badges (toggle)" aria-label="Toggle constraint badge visibility">
+                <svg class="icon-eye" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.2"/></svg>
+                <svg class="icon-eye-off" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z" stroke-opacity="0.45"/><circle cx="10" cy="10" r="2.2" stroke-opacity="0.45"/><line x1="4" y1="16" x2="16" y2="4"/></svg>
+              </button>
+            </div>
+          </section>
+
+          <section class="tb-sec" id="sec-grid" data-sec="grid">
+            <div class="tb-grid">
+              <div class="combo" id="grid-size-combo">
+                <button id="grid-size-btn" class="combo-btn" title="Grid spacing in working units (1–200) — pick a preset or add your own" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid size">
+                  <span id="grid-size-value">40</span>
+                  <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
+                </button>
+                <div id="grid-size-menu" class="combo-menu hidden" role="listbox" aria-label="Grid size presets">
+                  <div id="grid-size-list" class="combo-list"></div>
+                  <form id="grid-size-add" class="combo-add" autocomplete="off">
+                    <input id="grid-size-new" type="number" min="1" max="200" step="any" placeholder="Custom…" aria-label="Add a custom grid size" />
+                    <button type="submit" class="combo-add-btn" title="Add this value to the list and use it" aria-label="Add grid size">+</button>
+                  </form>
+                </div>
+              </div>
+              <label class="select-label" id="unit-label" title="Working units — what one world unit means; measurements display it and DXF import converts into it (saved with the file)">
+                <select id="unit-select" aria-label="Working units">
+                  <option value="mm">mm</option>
+                  <option value="cm">cm</option>
+                  <option value="m">m</option>
+                  <option value="in">in</option>
+                </select>
+              </label>
+            </div>
+            <div class="tb-cap">Grid
+              <button id="grid-btn" class="cap-eye active" title="Show or hide the grid (toggle)" aria-label="Toggle grid">
+                <svg class="icon-eye" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.2"/></svg>
+                <svg class="icon-eye-off" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z" stroke-opacity="0.45"/><circle cx="10" cy="10" r="2.2" stroke-opacity="0.45"/><line x1="4" y1="16" x2="16" y2="4"/></svg>
+              </button>
+            </div>
+          </section>
+
+          <section class="tb-sec" id="sec-measure" data-sec="measure">
+            <div class="tb-grid">
+              <button data-tool="measure" class="tool-btn icon-btn tb-mid" title="Measure — click a line for its own length, or two references (points or lines), then place the value (D)" aria-label="Measure tool">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="7.5" width="15" height="5.5" rx="1"/><line x1="6" y1="7.5" x2="6" y2="10.2"/><line x1="9.5" y1="7.5" x2="9.5" y2="10.2"/><line x1="13" y1="7.5" x2="13" y2="10.2"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Measure
+              <button id="measure-vis-btn" class="cap-eye active" title="Show or hide all measurements (toggle)" aria-label="Toggle measurement visibility">
+                <svg class="icon-eye" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.2"/></svg>
+                <svg class="icon-eye-off" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z" stroke-opacity="0.45"/><circle cx="10" cy="10" r="2.2" stroke-opacity="0.45"/><line x1="4" y1="16" x2="16" y2="4"/></svg>
+              </button>
+            </div>
+          </section>
+
+          <section class="tb-sec" id="sec-snap" data-sec="snap">
+            <div class="tb-grid">
+              <button id="snap-btn" class="icon-btn" title="Snap placement and dragging to the grid (toggle)" aria-label="Toggle snap to grid">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="7" y1="3" x2="7" y2="17" stroke-opacity="0.45"/><line x1="13" y1="3" x2="13" y2="17" stroke-opacity="0.45"/><line x1="3" y1="7" x2="17" y2="7" stroke-opacity="0.45"/><line x1="3" y1="13" x2="17" y2="13" stroke-opacity="0.45"/><circle cx="13" cy="7" r="2.6" fill="currentColor" stroke="none"/></svg>
+              </button>
+              <button id="osnap-btn" class="icon-btn" title="Object snap (toggle): drag a body by the corner, edge midpoint, edge or centre nearest the grab (highlighted) and it snaps onto the same features of other objects, rails and reference geometry" aria-label="Toggle object snap">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="8" height="10"/><line x1="11" y1="3" x2="11" y2="11"/><line x1="11" y1="7" x2="17" y2="7"/><circle cx="11" cy="7" r="2.2"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">Snapping</div>
+          </section>
+
+          <section class="tb-sec" id="sec-view" data-sec="view">
+            <div class="tb-grid">
+              <button id="rotate-view-btn" class="icon-btn" title="Rotate the view — drag the ring or a crosshair arm to turn the whole picture (snaps to 5°, Shift for any angle); type an exact angle under the centre; double-click the centre for 0° (Shift+R)" aria-label="Rotate the view">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><g transform="rotate(-30 10 10)"><line x1="10" y1="2" x2="10" y2="18"/><line x1="2" y1="10" x2="18" y2="10"/></g></svg>
+              </button>
+              <button id="fit-btn" class="icon-btn" title="Fit the mechanism to the screen (F)" aria-label="Fit to screen">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7"/><path d="M13 3h2.5A1.5 1.5 0 0 1 17 4.5V7"/><path d="M17 13v2.5a1.5 1.5 0 0 1-1.5 1.5H13"/><path d="M7 17H4.5A1.5 1.5 0 0 1 3 15.5V13"/><rect x="7" y="8" width="6" height="4" rx="1" fill="currentColor" fill-opacity="0.18"/></svg>
+              </button>
+              <button id="theme-btn" class="icon-btn" title="Toggle light / dark theme" aria-label="Toggle light or dark theme">
+                <svg class="icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.3" y1="4.3" x2="5.7" y2="5.7"/><line x1="14.3" y1="14.3" x2="15.7" y2="15.7"/><line x1="4.3" y1="15.7" x2="5.7" y2="14.3"/><line x1="14.3" y1="5.7" x2="15.7" y2="4.3"/></svg>
+                <svg class="icon-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16 11.6A6.6 6.6 0 0 1 8.4 4 6.6 6.6 0 1 0 16 11.6z" fill="currentColor" stroke="none"/></svg>
+              </button>
+            </div>
+            <div class="tb-cap">View</div>
+          </section>
+        </div>
+
+        <!-- Context-sensitive fields: they sit beside the rack, never inside it, so a
+             selection appearing or clearing can never reshuffle the sections. -->
+        <div id="tb-props">
+          <div class="group hidden" id="shape-props">
+            <label class="select-label hidden" id="text-size-label" title="Text height, in working units">
+              <span class="prop-tag">T</span>
+              <input id="text-size" type="number" min="0.1" step="any" value="10" />
+            </label>
+          </div>
+          <div class="group hidden" id="actuator-props">
+            <label class="select-label" id="actuator-speed-label" title="Cycles per second (one back-and-forth per cycle)">
+              <span class="prop-tag">▶◀</span>
+              <input id="actuator-speed" type="number" min="0" step="0.05" value="0.5" />
+              <span class="prop-unit">Hz</span>
+            </label>
+            <div class="profile-toggle" id="actuator-profile" role="group" aria-label="Linear actuator motion profile">
+              <button type="button" data-profile="triangle" title="Triangle wave — constant speed end to end">/\</button>
+              <button type="button" data-profile="sine" title="Sine wave — smooth ease in/out at the endstops">~</button>
+            </div>
+          </div>
+          <div class="group hidden" id="motor-props">
+            <label class="select-label" title="Revolutions per second">
+              <span class="prop-tag">↻</span>
+              <input id="motor-speed" type="number" min="0" step="0.05" value="0.25" />
+              <span class="prop-unit">Hz</span>
+            </label>
+          </div>
+          <!-- Solver tuning (sim mode): values are seeded from solverConfig / animIterations
+               in main.ts at startup, so no defaults live here. -->
           <label id="anim-iter-ctrl" class="iter-ctrl hidden" title="Max Phase-A sweeps per animation frame (higher = better convergence, slower; loop early-exits when satisfied)">
             <span class="prop-tag">it</span>
             <input id="anim-iter" type="range" min="10" max="300" step="10" />
@@ -43,233 +382,13 @@
             <input id="break-tol" type="number" step="any" min="0" />
           </label>
         </div>
-        <div class="group" id="tool-group">
-          <!-- Shape role: what every shape tool's finished shape becomes. Sticky; 1 / 2 / 3;
-               Ctrl on a shape's first click flips Body ↔ Cut for that one shape. -->
-          <div class="role-toggle" id="role-group" role="group" aria-label="Shape role">
-            <button type="button" class="role-btn active" data-role="body" title="Body role — every shape you draw becomes a rigid body (1)">Body</button>
-            <button type="button" class="role-btn" data-role="cut" title="Cut role — every shape is subtracted from the body under it: a hole when it lies inside, a notch when it crosses the outline. Select the body first to choose the target (2)">Cut</button>
-            <button type="button" class="role-btn" data-role="reference" title="Reference role — every shape becomes construction geometry: dash-dot, snappable, measurable, never simulated or exported (3)">Ref</button>
-          </div>
-          <button data-tool="polyline" class="tool-btn icon-btn" title="Polyline — click the corners of a free shape; click the first corner again, double-click or press Enter to close. In the Body role, start on joints to build a body around them (B = body, U = cut)" aria-label="Polyline tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 15.5L7 5l4.5 6.5L16.5 4.5"/><circle cx="3.5" cy="15.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="7" cy="5" r="1.3" fill="currentColor" stroke="none"/><circle cx="11.5" cy="11.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.5" cy="4.5" r="1.3" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="rect" class="tool-btn icon-btn" title="Rectangle — click two opposite corners, or press and drag; Shift for a square, Alt to draw from the centre (Shift+B)" aria-label="Rectangle tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="5" width="13" height="10" rx="1" fill="currentColor" fill-opacity="0.18"/></svg>
-          </button>
-          <button data-tool="circle" class="tool-btn icon-btn" title="Circle — click the centre, then a point on the rim; or press and drag the radius out (Shift+C)" aria-label="Circle tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="0.9" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="polygon" class="tool-btn icon-btn" title="Regular polygon — click the centre, then one corner; or press and drag. Sides in the toolbar field, or ↑ / ↓ (Shift+P)" aria-label="Regular polygon tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5l5.6 3.25v6.5L10 16.5l-5.6-3.25v-6.5z" fill="currentColor" fill-opacity="0.18"/></svg>
-          </button>
-          <button data-tool="slot" class="tool-btn icon-btn" title="Slot — click where it starts and where it ends (or press and drag), then move out to set the width and click (Shift+S)" aria-label="Slot tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="14" height="6" rx="3" fill="currentColor" fill-opacity="0.18"/><circle cx="6" cy="10" r="0.9" fill="currentColor" stroke="none"/><circle cx="14" cy="10" r="0.9" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="patternLinear" class="tool-btn icon-btn" title="Linear pattern — repeat a hole or a joint along one or two directions: click the hole / joint, then where the next instance goes; a second click adds a second direction (a grid). Count and spacing are edited on the canvas labels (I)" aria-label="Linear pattern tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="5" r="2.2" fill="currentColor" fill-opacity="0.35"/><circle cx="11" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="17" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="11" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="17" r="2.2" stroke-dasharray="2 1.6"/></svg>
-          </button>
-          <button data-tool="patternCircular" class="tool-btn icon-btn" title="Circular pattern — repeat a hole or a joint around a centre: click the hole / joint, then the centre of rotation. Count, angle and rotation are edited on the canvas labels (Q)" aria-label="Circular pattern tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="4" r="2" fill="currentColor" fill-opacity="0.35"/><circle cx="15.2" cy="13" r="2" stroke-dasharray="2 1.6"/><circle cx="4.8" cy="13" r="2" stroke-dasharray="2 1.6"/><path d="M6.2 5.9a6 6 0 0 0-1.6 3.6" stroke-dasharray="1.5 1.5"/></svg>
-          </button>
-          <button data-tool="split" class="tool-btn icon-btn" title="Split a body — click a point on its outline, route the cut inside, click the outline again to cut it in two (X)" aria-label="Split tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" fill="currentColor" fill-opacity="0.18"/><path d="M8 3.5l3 4-2.5 3.5 3 4" stroke-dasharray="2.2 1.6"/></svg>
-          </button>
-          <button id="combine-btn" class="icon-btn" title="Combine the selected bodies into one — they must overlap or share an edge; the first selected keeps its colour (N)" aria-label="Combine selected bodies">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="9" height="9" rx="1.5" fill="currentColor" fill-opacity="0.18"/><rect x="8" y="8" width="9" height="9" rx="1.5" fill="currentColor" fill-opacity="0.18"/><path d="M8 12V8h4" fill="none"/></svg>
-          </button>
-          <button data-tool="joint" class="tool-btn icon-btn" title="Add a joint point to a body (J)" aria-label="Joint tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4.5"/><circle cx="10" cy="10" r="1.3" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="weld" class="tool-btn icon-btn" title="Weld — click where bodies overlap to lock them rigidly together at that point (no relative rotation); click a pinned joint to toggle weld ↔ pin (W)" aria-label="Weld tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4.5"/><rect x="8.4" y="8.4" width="3.2" height="3.2" fill="currentColor" stroke="none"/><rect x="3.5" y="3.5" width="13" height="13" rx="1.5" fill="none" stroke-dasharray="3 2"/></svg>
-          </button>
-          <button data-tool="connect" class="tool-btn icon-btn" title="Pin two joints together (C)" aria-label="Connect tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="15" r="2.5"/><circle cx="15" cy="5" r="2.5"/><line x1="6.8" y1="13.2" x2="13.2" y2="6.8"/></svg>
-          </button>
-          <button data-tool="ground" class="tool-btn icon-btn" title="Ground a joint (fixed position, free rotation) or a body / group (fixed entirely); click again to unground (G)" aria-label="Ground tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="4" r="1.6"/><line x1="10" y1="5.6" x2="10" y2="10"/><line x1="4" y1="10" x2="16" y2="10"/><line x1="6" y1="10" x2="4" y2="14"/><line x1="9" y1="10" x2="7" y2="14"/><line x1="12" y1="10" x2="10" y2="14"/><line x1="15" y1="10" x2="13" y2="14"/></svg>
-          </button>
-          <button data-tool="rail" class="tool-btn icon-btn" title="Draw a rail — click two joints on the same body (a moving rail) or two free joints (a fixed track); joints placed on it ride along as pin-in-slots (K)" aria-label="Rail tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="slider" class="tool-btn icon-btn" title="Slider — click a body where the travel starts (that body moves), then click where it ends: the body slides along the arrow without rotating. Over another body the track rides that body, else it is fixed in the world. Click an existing rail to add a slider there, or a rider to toggle its rotation lock (S)" aria-label="Slider tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><rect x="6.5" y="6.5" width="7" height="7" rx="1.2" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="1.3" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="line" class="tool-btn icon-btn" title="Line — a reference segment: click two points, or press and drag; points land on joints / corners / edges (Shift+L)" aria-label="Line tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="15.5" x2="16" y2="4.5" stroke-dasharray="4 1.5 1 1.5"/><circle cx="4" cy="15.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16" cy="4.5" r="1.3" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="arc" class="tool-btn icon-btn" title="Arc — a reference arc: click its start and end points, then a point it passes through (Shift+A)" aria-label="Arc tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 14.5A7.5 7.5 0 0 1 16 14.5" stroke-dasharray="4 1.5 1 1.5"/><circle cx="4" cy="14.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16" cy="14.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="10" cy="6.9" r="1.3" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="text" class="tool-btn icon-btn" title="Text — a label: click where it goes (on a body it rides with that body), type, Enter. Double-click a label to edit it (Shift+T)" aria-label="Text tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5.5V4h10v1.5"/><path d="M10 4v12"/><path d="M7.5 16h5"/></svg>
-          </button>
-        </div>
-        <div class="group hidden" id="shape-props">
-          <label class="select-label hidden" id="text-size-label" title="Text height, in working units">
-            <span class="prop-tag">T</span>
-            <input id="text-size" type="number" min="0.1" step="any" value="10" />
-          </label>
-        </div>
-        <div class="group" id="edit-group">
-          <button data-tool="rotate" class="tool-btn icon-btn" title="Rotate a body about its centroid, or a node (drag); snaps to 45° (R)" aria-label="Rotate tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15 7a6 6 0 1 0 1.3 4.2"/><path d="M15.4 3.6v3.6h-3.6"/></svg>
-          </button>
-          <button id="mirror-h-btn" class="icon-btn" title="Mirror the selection left↔right" aria-label="Mirror horizontally">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="3" x2="10" y2="17" stroke-dasharray="2 2"/><path d="M8 6L4 10l4 4z" fill="currentColor" fill-opacity="0.18"/><path d="M12 6l4 4-4 4z" fill="currentColor" fill-opacity="0.18"/></svg>
-          </button>
-          <button id="mirror-v-btn" class="icon-btn" title="Mirror the selection top↔bottom" aria-label="Mirror vertically">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10" stroke-dasharray="2 2"/><path d="M6 8l4-4 4 4z" fill="currentColor" fill-opacity="0.18"/><path d="M6 12l4 4 4-4z" fill="currentColor" fill-opacity="0.18"/></svg>
-          </button>
-          <button id="send-back-btn" class="icon-btn" title="Send the selected body / selection behind everything else (PageDown)" aria-label="Send to back">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><path d="M15.5 4.5v11M13.3 13.3l2.2 2.2 2.2-2.2"/></svg>
-          </button>
-          <button id="bring-front-btn" class="icon-btn" title="Bring the selected body / selection in front of everything else (PageUp)" aria-label="Bring to front">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1"/><path d="M15.5 15.5v-11M13.3 6.7l2.2-2.2 2.2 2.2"/></svg>
-          </button>
-        </div>
-        <div class="group" id="component-group">
-          <button id="make-comp-btn" class="icon-btn" title="Create a component from the selection — packs it into a reusable definition and replaces it with an instance. With a component instance selected: fork it into a new independent component. With nothing selected: create an empty component and open it for editing" aria-label="Create component from selection">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="6" width="10" height="10" rx="2" fill="currentColor" fill-opacity="0.18"/><line x1="15.5" y1="2.5" x2="15.5" y2="7.5"/><line x1="13" y1="5" x2="18" y2="5"/></svg>
-          </button>
-          <button id="comp-panel-btn" class="icon-btn" title="Component browser — insert, edit, rename or delete component definitions" aria-label="Toggle component browser">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="6" height="6" rx="1.4" fill="currentColor" fill-opacity="0.18"/><rect x="11" y="3" width="6" height="6" rx="1.4"/><rect x="3" y="11" width="6" height="6" rx="1.4"/><rect x="11" y="11" width="6" height="6" rx="1.4" fill="currentColor" fill-opacity="0.18"/></svg>
-          </button>
-        </div>
-        <div class="group" id="actuator-group">
-          <button data-tool="linearActuator" class="tool-btn icon-btn" title="Linear actuator — click a slider or rail to make it self-driving: its carriage travels back and forth in animation (A)" aria-label="Linear actuator tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="2.3" fill="currentColor" stroke="none"/><path d="M6 10l-2-1.6M6 10l-2 1.6" /><path d="M14 10l2-1.6M14 10l2 1.6" /></svg>
-          </button>
-          <button data-tool="motor" class="tool-btn icon-btn" title="Create a motor on a body — pick pivot then crank pin; spins in animation (M)" aria-label="Motor tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none"/><line x1="10" y1="10" x2="15" y2="6.5"/><circle cx="15" cy="6.5" r="1.6" fill="currentColor" stroke="none"/></svg>
-          </button>
-        </div>
-        <div class="group" id="sketch-group">
-          <button data-tool="coincident" class="tool-btn icon-btn" title="Coincident — click two points to make them share a position, or a point and a line to hold the point on it (O)" aria-label="Coincident constraint tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5.5"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="horizontal" class="tool-btn icon-btn" title="Horizontal — click an edge or rail, or two points (H)" aria-label="Horizontal constraint tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="10" x2="16" y2="10"/><circle cx="4" cy="10" r="1.6" fill="currentColor" stroke="none"/><circle cx="16" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="vertical" class="tool-btn icon-btn" title="Vertical — click an edge or rail, or two points (V)" aria-label="Vertical constraint tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="4" x2="10" y2="16"/><circle cx="10" cy="4" r="1.6" fill="currentColor" stroke="none"/><circle cx="10" cy="16" r="1.6" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button data-tool="parallel" class="tool-btn icon-btn" title="Parallel — click two lines (edges or rails) (P)" aria-label="Parallel constraint tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="6" y1="16" x2="11" y2="4"/><line x1="10.5" y1="16" x2="15.5" y2="4"/></svg>
-          </button>
-          <button data-tool="perpendicular" class="tool-btn icon-btn" title="Perpendicular — click two lines (edges or rails) (T)" aria-label="Perpendicular constraint tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="15" x2="16" y2="15"/><line x1="10" y1="15" x2="10" y2="4"/></svg>
-          </button>
-          <button data-tool="equal" class="tool-btn icon-btn" title="Equal length — click two lines (edges or rails) (E)" aria-label="Equal constraint tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="8" x2="15" y2="8"/><line x1="5" y1="12" x2="15" y2="12"/></svg>
-          </button>
-          <button id="sketch-vis-btn" class="active icon-btn" title="Show or hide all constraint badges (toggle)" aria-label="Toggle constraint badge visibility">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="13" rx="3"/><line x1="6.5" y1="13" x2="13.5" y2="13"/><line x1="10" y1="13" x2="10" y2="7"/></svg>
-          </button>
-        </div>
-        <div class="group hidden" id="actuator-props">
-          <label class="select-label" id="actuator-speed-label" title="Cycles per second (one back-and-forth per cycle)">
-            <span class="prop-tag">▶◀</span>
-            <input id="actuator-speed" type="number" min="0" step="0.05" value="0.5" />
-            <span class="prop-unit">Hz</span>
-          </label>
-          <div class="profile-toggle" id="actuator-profile" role="group" aria-label="Linear actuator motion profile">
-            <button type="button" data-profile="triangle" title="Triangle wave — constant speed end to end">/\</button>
-            <button type="button" data-profile="sine" title="Sine wave — smooth ease in/out at the endstops">~</button>
-          </div>
-        </div>
-        <div class="group hidden" id="motor-props">
-          <label class="select-label" title="Revolutions per second">
-            <span class="prop-tag">↻</span>
-            <input id="motor-speed" type="number" min="0" step="0.05" value="0.25" />
-            <span class="prop-unit">Hz</span>
-          </label>
-        </div>
-        <div class="group" id="color-group">
-          <input id="body-color" type="color" value="#4f9dff"
-            title="Body colour — with a body selected, recolours it; otherwise sets the colour for new bodies"
-            aria-label="Body colour" />
-        </div>
-        <div class="group" id="grid-group">
-          <button id="grid-btn" class="active icon-btn" title="Show or hide the grid (toggle)" aria-label="Toggle grid">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="7" y1="3" x2="7" y2="17"/><line x1="13" y1="3" x2="13" y2="17"/><line x1="3" y1="7" x2="17" y2="7"/><line x1="3" y1="13" x2="17" y2="13"/></svg>
-          </button>
-          <button id="snap-btn" class="icon-btn" title="Snap placement and dragging to the grid (toggle)" aria-label="Toggle snap to grid">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="7" y1="3" x2="7" y2="17" stroke-opacity="0.45"/><line x1="13" y1="3" x2="13" y2="17" stroke-opacity="0.45"/><line x1="3" y1="7" x2="17" y2="7" stroke-opacity="0.45"/><line x1="3" y1="13" x2="17" y2="13" stroke-opacity="0.45"/><circle cx="13" cy="7" r="2.6" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <button id="osnap-btn" class="icon-btn" title="Object snap (toggle): drag a body by the corner, edge midpoint, edge or centre nearest the grab (highlighted) and it snaps onto the same features of other objects, rails and reference geometry" aria-label="Toggle object snap">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="8" height="10"/><line x1="11" y1="3" x2="11" y2="11"/><line x1="11" y1="7" x2="17" y2="7"/><circle cx="11" cy="7" r="2.2"/></svg>
-          </button>
-          <div class="combo" id="grid-size-combo">
-            <button id="grid-size-btn" class="combo-btn" title="Grid spacing in working units (1–200) — pick a preset or add your own" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid size">
-              <span id="grid-size-value">40</span>
-              <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
-            </button>
-            <div id="grid-size-menu" class="combo-menu hidden" role="listbox" aria-label="Grid size presets">
-              <div id="grid-size-list" class="combo-list"></div>
-              <form id="grid-size-add" class="combo-add" autocomplete="off">
-                <input id="grid-size-new" type="number" min="1" max="200" step="any" placeholder="Custom…" aria-label="Add a custom grid size" />
-                <button type="submit" class="combo-add-btn" title="Add this value to the list and use it" aria-label="Add grid size">+</button>
-              </form>
-            </div>
-          </div>
-          <label class="select-label" title="Working units — what one world unit means; measurements display it and DXF import converts into it (saved with the file)">
-            <select id="unit-select" aria-label="Working units">
-              <option value="mm">mm</option>
-              <option value="cm">cm</option>
-              <option value="m">m</option>
-              <option value="in">in</option>
-            </select>
-          </label>
-        </div>
-        <div class="group" id="measure-group">
-          <button data-tool="measure" class="tool-btn icon-btn" title="Measure — click two references (points or lines), then place the value (D)" aria-label="Measure tool">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="7.5" width="15" height="5.5" rx="1"/><line x1="6" y1="7.5" x2="6" y2="10.2"/><line x1="9.5" y1="7.5" x2="9.5" y2="10.2"/><line x1="13" y1="7.5" x2="13" y2="10.2"/></svg>
-          </button>
-          <button id="measure-vis-btn" class="active icon-btn" title="Show or hide all measurements (toggle)" aria-label="Toggle measurement visibility">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="5" x2="3" y2="15"/><line x1="17" y1="5" x2="17" y2="15"/><line x1="3" y1="10" x2="17" y2="10"/><path d="M6.5 8L3 10l3.5 2"/><path d="M13.5 8L17 10l-3.5 2"/></svg>
-          </button>
-        </div>
-        <div class="group" id="view-group">
-          <button id="fit-btn" class="icon-btn" title="Fit the mechanism to the screen (F)" aria-label="Fit to screen">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7"/><path d="M13 3h2.5A1.5 1.5 0 0 1 17 4.5V7"/><path d="M17 13v2.5a1.5 1.5 0 0 1-1.5 1.5H13"/><path d="M7 17H4.5A1.5 1.5 0 0 1 3 15.5V13"/><rect x="7" y="8" width="6" height="4" rx="1" fill="currentColor" fill-opacity="0.18"/></svg>
-          </button>
-          <button id="rotate-view-btn" class="icon-btn" title="Rotate the view — drag the ring or a crosshair arm to turn the whole picture (snaps to 5°, Shift for any angle); type an exact angle under the centre; double-click the centre for 0° (Shift+R)" aria-label="Rotate the view">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><g transform="rotate(-30 10 10)"><line x1="10" y1="2" x2="10" y2="18"/><line x1="2" y1="10" x2="18" y2="10"/></g></svg>
-          </button>
-        </div>
-        <div class="group">
-          <button id="save-btn" class="icon-btn" title="Save mechanism to a file (Ctrl+S) — Shift-click or Ctrl+Shift+S to save as a new file" aria-label="Save">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h9l3 3v9H4z"/><path d="M7 4v4h6V5"/><rect x="7" y="11" width="6" height="5"/></svg>
-          </button>
-          <button id="export-btn" class="icon-btn" title="Export a cut file (DXF / SVG) of the selected bodies — or all bodies when nothing is selected" aria-label="Export cut file">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9"/><path d="M6.5 8.5 10 12l3.5-3.5"/><path d="M4 13v2.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V13"/></svg>
-          </button>
-          <button id="backup-btn" class="icon-btn" title="Auto-backup: periodically write timestamped copies of the mechanism to a folder" aria-label="Auto-backup settings">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6"/><path d="M3.2 3.6v3.2h3.2"/><path d="M10 6.5V10l2.6 1.6"/></svg>
-          </button>
-          <button id="load-btn" class="icon-btn" title="Load mechanism from a file (Ctrl+O)" aria-label="Load">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7a1 1 0 0 1 1-1h3l2 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>
-          </button>
-          <button id="clear-btn" class="icon-btn icon-btn-danger" title="Delete everything" aria-label="Clear all">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="6" x2="15" y2="6"/><path d="M8 6V4h4v2"/><path d="M6.5 6l.7 10h5.6l.7-10"/><line x1="9" y1="9" x2="9" y2="13"/><line x1="11" y1="9" x2="11" y2="13"/></svg>
-          </button>
-        </div>
+
+        <!-- Help (src/help.ts): opens the manual beside the canvas; while it is open,
+             clicking any control shows its topic. ? toggles it too; F1 opens the contents. -->
+        <button id="help-btn" class="icon-btn" title="Help — open the manual; while it is open, click any control to read about it (?)" aria-label="Help">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .9-1 1.6v.4"/><circle cx="10" cy="14.6" r="0.9" fill="currentColor" stroke="none"/></svg>
+        </button>
         <input id="file-input" type="file" accept=".json,application/json" hidden />
-        <div class="group">
-          <button id="theme-btn" class="icon-btn" title="Toggle light / dark theme" aria-label="Toggle light or dark theme">
-            <svg class="icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.3" y1="4.3" x2="5.7" y2="5.7"/><line x1="14.3" y1="14.3" x2="15.7" y2="15.7"/><line x1="4.3" y1="15.7" x2="5.7" y2="14.3"/><line x1="14.3" y1="5.7" x2="15.7" y2="4.3"/></svg>
-            <svg class="icon-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16 11.6A6.6 6.6 0 0 1 8.4 4 6.6 6.6 0 1 0 16 11.6z" fill="currentColor" stroke="none"/></svg>
-          </button>
-          <!-- Help (src/help.ts): opens the manual beside the canvas; while it is open,
-               clicking any control shows its topic. ? toggles it too; F1 opens the contents. -->
-          <button id="help-btn" class="icon-btn" title="Help — open the manual; while it is open, click any control to read about it (?)" aria-label="Help">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .9-1 1.6v.4"/><circle cx="10" cy="14.6" r="0.9" fill="currentColor" stroke="none"/></svg>
-          </button>
-        </div>
-        <div class="spacer"></div>
-        <div id="hint" class="hint"></div>
       </header>
       <div id="canvas-wrap">
         <canvas id="scene"></canvas>
@@ -378,6 +497,8 @@
         <input id="view-angle-edit" class="hidden" type="text" inputmode="decimal" autocomplete="off"
           aria-label="View rotation angle (degrees)" />
       </div>
+      <!-- Status bar: the hint line for the armed tool / current selection. -->
+      <footer id="statusbar"><div id="hint" class="hint"></div></footer>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
