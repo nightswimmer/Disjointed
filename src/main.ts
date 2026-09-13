@@ -42,6 +42,7 @@ import {
   refHost,
   sketchRefs,
   isMidpointHost,
+  isCircleRef,
   CONSTRAINT_NAME,
   measureInfoFor,
   measureAxisForPlacement,
@@ -87,7 +88,7 @@ type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "gui
 
 /** The tools that place a sketch constraint (tool name = constraint kind). */
 const CONSTRAINT_TOOLS = new Set<Tool>([
-  "coincident", "horizontal", "vertical", "parallel", "perpendicular", "equal", "fixed", "symmetric",
+  "coincident", "horizontal", "vertical", "parallel", "perpendicular", "equal", "fixed", "symmetric", "tangent",
 ]);
 
 /** Pick / close thresholds in screen (CSS) pixels — converted to world units via the view. */
@@ -1535,6 +1536,7 @@ function refInScope(r: MeasureRef): boolean {
     case "edge":
     case "bodyPoint":
     case "centre":
+    case "disk":
       return bodyInScope(r.bodyId);
     case "rail": {
       const c = scene.constraints.find((cc) => cc.id === r.sliderId);
@@ -2138,7 +2140,16 @@ const HINTS: Record<Mode | Tool | "select" | "viewRotate", string> = {
   equal: "Click two lines (body edges or rails) to make their lengths equal.",
   fixed: "Click a point (joint, body corner, polygon centre or reference point) to lock it where it is — or a line (body edge, rail or reference segment) to lock the line itself: its ends can still slide along it and stretch it, but the line can never turn or shift.",
   symmetric: "Click two points (joints, body corners, polygon centres or reference points) — or two lines (body edges, rails or reference segments) — then the mirror line: the two become mirror images across it.", // live stage hint: symmetricHint()
+  tangent: "Click a circle or arc (a disk body's rim, a round hole, a reference circle or arc) and a line (body edge, rail or reference segment), in either order: the line becomes tangent to the circle.", // live stage hint: tangentHint()
 };
+
+/** Stage hint for the Tangential tool: what the second click is for. */
+function tangentHint(): string {
+  if (constraintPicks.length === 0) return HINTS.tangent;
+  return isCircleRef(constraintPicks[0])
+    ? "Tangential: now click the line (a body edge, rail or reference segment) to hold tangent to that circle."
+    : "Tangential: now click the circle or arc (a disk body's rim, a round hole, a reference circle or arc) the line should touch.";
+}
 
 /** Stage hint for the Symmetrical tool: what the next click is for. */
 function symmetricHint(): string {
@@ -2205,6 +2216,7 @@ function updateHint(): void {
     : isPatternTool(tool) ? patternHint()
     : isShapeTool(tool) ? shapeHint()
     : tool === "symmetric" ? symmetricHint()
+    : tool === "tangent" ? tangentHint()
     : HINTS[tool];
   setHint(containmentWarning() + groupScopeNote() + base);
 }
@@ -4486,6 +4498,7 @@ function handleDrawClick(p: Vec2): void {
     case "equal":
     case "fixed":
     case "symmetric":
+    case "tangent":
       handleConstraintClick(p);
       return; // manages its own dirty-marking and disarm
   }
@@ -4621,11 +4634,34 @@ function guidePlacementAt(p: Vec2): { at: Vec2; pick: MeasureRef | null } {
   return { at: snap(p), pick: null };
 }
 
+/**
+ * The circle reference a constraint click would pick: the rim of a disk body or a
+ * circular hole (topmost body first — the measure tool's diameter pick), then a
+ * reference circle or arc under the cursor.
+ */
+function constraintCircleRefAt(p: Vec2): MeasureRef | null {
+  const rim = diskRimAt(p);
+  if (rim && rim.ref.kind === "vertex") {
+    return rim.ref.hole === undefined
+      ? { kind: "disk", bodyId: rim.ref.bodyId }
+      : { kind: "disk", bodyId: rim.ref.bodyId, hole: rim.ref.hole };
+  }
+  const g = scene.guideCircleAt(p, pickRadius());
+  return g ? { kind: "guideCircle", guideId: g.id } : null;
+}
+
 /** The reference the armed constraint tool would pick at `p` (for hover + clicks). */
 function constraintRefAt(p: Vec2): MeasureRef | null {
   const kind = tool as SketchConstraintKind;
   if (kind === "parallel" || kind === "perpendicular" || kind === "equal") {
     return constraintLineRefAt(p);
+  }
+  if (kind === "tangent") {
+    // A circle and a line in either order: the first pick prefers a circle (a rim is
+    // the more specific target where it crosses an edge) but takes a line; the second
+    // must be the other kind.
+    if (constraintPicks.length === 0) return constraintCircleRefAt(p) ?? constraintLineRefAt(p);
+    return isCircleRef(constraintPicks[0]) ? constraintLineRefAt(p) : constraintCircleRefAt(p);
   }
   // Fixed takes one reference of either shape and commits on that first click.
   if (kind === "fixed") return constraintPointRefAt(p) ?? constraintLineRefAt(p);
@@ -4663,6 +4699,24 @@ function constraintRefAt(p: Vec2): MeasureRef | null {
  */
 function reportUnusablePick(kind: SketchConstraintKind, p: Vec2): void {
   const name = CONSTRAINT_NAME[kind];
+  if (kind === "tangent") {
+    // Tangential wants a circle and a line; say which one is still missing here.
+    const wantLine = constraintPicks.length === 1 && isCircleRef(constraintPicks[0]);
+    const wantCircle = constraintPicks.length === 1 && !wantLine;
+    if (constraintCircleRefAt(p)) notifyThrottled(`${name} already has its circle — click the line here: a body edge, a rail or a reference segment.`);
+    else if (constraintLineRefAt(p)) notifyThrottled(`${name} already has its line — click the circle or arc here: a disk body's rim, a round hole, a reference circle or arc.`);
+    else if (constraintPointRefAt(p))
+      notifyThrottled(
+        wantLine
+          ? `${name} needs a line here — a body edge, a rail or a reference segment — not a point.`
+          : wantCircle
+            ? `${name} needs a circle or arc here — a disk body's rim, a round hole, a reference circle or arc — not a point.`
+            : `${name} relates a line to a circle or arc — click a rim or an edge, not a point.`
+      );
+    else if (scene.bodyAt(p))
+      notifyThrottled(`${name} attaches to elements, not to material — click a disk's rim, a round hole, an edge or a rail (a body's inside isn't one).`);
+    return;
+  }
   // `constraintRefAt` already said no, so whichever shape the tool wants isn't here:
   // whatever the *other* picker finds is what the click actually landed on.
   if (constraintPointRefAt(p)) {
@@ -7849,6 +7903,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   e: "equal",
   l: "fixed", // Lock in place — F was already "fit the view"
   y: "symmetric", // sYmmetrical — S is the slider
+  z: "tangent", // the last free letter (T is perpendicular) — see the planned remap
 };
 /** Shift + letter: the point-defined shape tools (the plain letters were all taken). */
 const SHIFT_TOOL_KEYS: Record<string, Tool> = {
@@ -8602,8 +8657,18 @@ function sketchRefKey(ref: MeasureRef): string {
     case "guideLine": return `gl:${ref.guideId}:${ref.edge}`;
     case "patternAxis": return `px:${ref.patternId}:${ref.axis}`;
     case "midpoint": return `m:${sketchRefKey(ref.of)}`;
+    case "disk": return `d:${ref.bodyId}${ref.hole !== undefined ? `:${ref.hole}` : ""}`;
+    case "guideCircle": return `gc:${ref.guideId}`;
     default: return "?";
   }
+}
+
+/**
+ * How a constraint reference is highlighted: a circle reference as its rim / arc (the
+ * measure tool's diameter-pick picture), anything else as its resolved point or line.
+ */
+function highlightOfRef(ref: MeasureRef): MeasureHighlight | null {
+  return isCircleRef(ref) ? scene.circleHighlightOfRef(ref) : scene.resolveMeasureRef(ref);
 }
 
 /**
@@ -8616,12 +8681,15 @@ function refHovered(ref: MeasureRef, p: Vec2): boolean {
   const r = pickRadius();
   const res = scene.resolveMeasureRef(ref);
   if (!res) return false;
+  // A circle: its rim (a circle resolves to its centre, which is not where you point).
+  const circ = isCircleRef(ref) ? scene.circleOfRef(ref) : null;
+  if (circ && Math.abs(dist(p, circ.c) - circ.r) <= r) return true;
   if (res.kind === "point" && dist(res.p, p) <= r) return true;
   if (res.kind === "line" && distToSegment(p, res.a, res.b) <= r) return true;
   if (ref.kind === "midpoint") return refHovered(ref.of, p); // its line's hover reveals it
-  if (ref.kind === "vertex" || ref.kind === "edge") return scene.bodyAt(p)?.id === ref.bodyId;
+  if (ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "disk") return scene.bodyAt(p)?.id === ref.bodyId;
   // Hovering anywhere on a reference element (or one of its points) reveals its constraints.
-  if (ref.kind === "guideLine" || ref.kind === "guidePoint") {
+  if (ref.kind === "guideLine" || ref.kind === "guidePoint" || ref.kind === "guideCircle") {
     const g = scene.getGuide(ref.guideId);
     if (!g) return false;
     return scene.guideAt(p, r)?.id === g.id || scene.guidePointAt(p, r)?.guide.id === g.id;
@@ -8650,8 +8718,22 @@ function sketchGlyphsView(): SketchGlyphView[] {
   let hoveredBadge = -1; // index in `out` of the topmost constraint whose badge is under the cursor
   for (const c of scene.sketch) {
     const allRefs = sketchRefs(c); // a symmetry badges its mirror line too
-    const badgeRefs = c.kind === "coincident" ? [c.refA] : allRefs;
+    // A tangent gets one badge at the contact point, just off the line on the side away
+    // from the circle — the one place that names both elements at once.
+    const badgeRefs = c.kind === "coincident" || c.kind === "tangent" ? [] : allRefs;
     const badges: Vec2[] = [];
+    if (c.kind === "coincident") badgeRefs.push(c.refA);
+    if (c.kind === "tangent" && c.refB) {
+      const circ = scene.circleOfRef(c.refA);
+      const ln = scene.resolveMeasureRef(c.refB);
+      if (circ && ln?.kind === "line" && dist(ln.a, ln.b) > 1e-9) {
+        const d = normalize(sub(ln.b, ln.a));
+        const n = vec(-d.y, d.x);
+        const s = dot(sub(circ.c, ln.a), n); // the centre's signed offset off the line
+        const foot = sub(circ.c, scale(n, s)); // the contact point (the centre's foot)
+        badges.push(add(foot, scale(n, s >= 0 ? -px(14) : px(14))));
+      }
+    }
     for (const ref of badgeRefs) {
       const r = scene.resolveMeasureRef(ref);
       if (!r) continue;
@@ -8693,10 +8775,13 @@ function sketchGlyphsView(): SketchGlyphView[] {
   if (hoveredBadge >= 0) {
     const c = scene.sketch.find((k) => k.id === out[hoveredBadge].id)!;
     const refs = sketchRefs(c)
-      .map((ref) => scene.resolveMeasureRef(ref))
-      .filter((r): r is ResolvedMeasureRef => r !== null);
-    // The link joins the two related elements (a symmetry's pair — its mirror is the third).
-    const link = refs.length >= 2 ? sketchLink(refs[0], refs[1]) : null;
+      .map(highlightOfRef)
+      .filter((r): r is MeasureHighlight => r !== null);
+    // The link joins the two related elements (a symmetry's pair — its mirror is the
+    // third; a tangent's circle and line touch by definition, so none).
+    const [a, b] = refs;
+    const linkable = (r: MeasureHighlight | undefined): r is ResolvedMeasureRef => !!r && (r.kind === "point" || r.kind === "line");
+    const link = linkable(a) && linkable(b) ? sketchLink(a, b) : null;
     out[hoveredBadge].hover = { refs, link };
   }
   sketchGlyphCache = out;
@@ -8751,15 +8836,13 @@ function sketchLink(a: ResolvedMeasureRef, b: ResolvedMeasureRef): [Vec2, Vec2] 
 }
 
 /** Constraint-tool overlay: the picked reference(s) and the one under the cursor. */
-function sketchDraftView(): { refs: ResolvedMeasureRef[]; hover: ResolvedMeasureRef | null } | null {
+function sketchDraftView(): { refs: MeasureHighlight[]; hover: MeasureHighlight | null } | null {
   if (tool === null || !CONSTRAINT_TOOLS.has(tool)) return null;
-  const refs = constraintPicks
-    .map((r) => scene.resolveMeasureRef(r))
-    .filter((r): r is ResolvedMeasureRef => r !== null);
-  let hover: ResolvedMeasureRef | null = null;
+  const refs = constraintPicks.map(highlightOfRef).filter((r): r is MeasureHighlight => r !== null);
+  let hover: MeasureHighlight | null = null;
   if (cursor) {
     const h = constraintRefAt(cursor);
-    hover = h ? scene.resolveMeasureRef(h) : null;
+    hover = h ? highlightOfRef(h) : null;
   }
   return { refs, hover };
 }

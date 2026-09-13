@@ -1,6 +1,6 @@
 /**
  * Sketch solver: CAD-style draw-mode constraints (coincident / horizontal / vertical /
- * parallel / perpendicular / equal / fixed / symmetric) plus driving dimensions. Iterative projection
+ * parallel / perpendicular / equal / fixed / symmetric / tangent) plus driving dimensions. Iterative projection
  * (Gauss-Seidel, the same philosophy as solver.ts) — but where the mechanism solver
  * moves rigid poses, this one moves *shape*: the variables are the world positions of
  * body control vertices and joints. After a converged solve the new positions are
@@ -14,13 +14,15 @@ import {
   sameMeasureRef,
   refHost,
   sketchRefs,
+  isCircleRef,
+  isPointRef,
   Scene,
   SketchConstraint,
   Measurement,
   MeasureRef,
   VERTEX_LINK_EPS,
 } from "./model";
-import { Vec2, vec, add, sub, scale, dist, len, dot, perp, rotate, fitRegularPolygon, fitRegularPolygonRigid } from "./geometry";
+import { Vec2, vec, add, sub, scale, dist, len, dot, perp, rotate, arcThrough, fitRegularPolygon, fitRegularPolygonRigid } from "./geometry";
 
 /** An unsatisfied sketch item after a failed solve: a constraint or a driving dimension. */
 export interface SketchBreak {
@@ -36,6 +38,11 @@ export const sketchConfig = {
   tol: 1e-3,
   /** Gauss-Seidel sweep budget per solve. */
   maxSweeps: 400,
+  /**
+   * Instrumentation: called after every sweep with the sweep index and the worst
+   * residual (undefined = off). Use it before guessing at a convergence problem.
+   */
+  trace: undefined as ((sweep: number, maxErr: number) => void) | undefined,
 };
 
 // --- variables --------------------------------------------------------------
@@ -87,6 +94,15 @@ interface System {
   multiTied: ReadonlySet<number>;
   /** Variable keys of points held by a `fixed` constraint (rank-immovable, see rank). */
   fixedPts: ReadonlySet<string>;
+  /**
+   * Variable keys of every point some item **names** — a coincident, an H/V pair, a
+   * point-on-line, a `fixed` lock, a driving dimension's end (a midpoint names both ends
+   * of its line). A tangent on a reference arc leaves such points where they are and
+   * reshapes the arc through the rest: the items naming them put them back anyway, and a
+   * tangent that translated the whole arc while a coincident pulled one end back chased
+   * itself into ever bigger circles (the line-blends-into-arc idiom never settled).
+   */
+  named: ReadonlySet<string>;
 }
 
 /**
@@ -189,6 +205,27 @@ function fixedPointVars(scene: Scene): Set<string> {
     if (c.kind !== "fixed" || !c.at || c.angle !== undefined) continue;
     const k = pointVarKey(scene, c.refA);
     if (k) out.add(k);
+  }
+  return out;
+}
+
+/** Variable keys of every point a sketch item names (see System.named). */
+function namedPointVars(scene: Scene): Set<string> {
+  const out = new Set<string>();
+  const add = (ref: MeasureRef): void => {
+    if (!isPointRef(ref)) return;
+    if (ref.kind === "midpoint") {
+      for (const k of lineVarKeys(scene, ref.of) ?? []) out.add(k);
+      return;
+    }
+    const k = pointVarKey(scene, ref);
+    if (k) out.add(k);
+  };
+  for (const c of scene.sketch) sketchRefs(c).forEach(add);
+  for (const m of scene.measurements) {
+    if (m.mode !== "draw" || !m.driving || m.target === undefined) continue;
+    add(m.refA);
+    add(m.refB);
   }
   return out;
 }
@@ -374,6 +411,248 @@ function lineVarKeys(scene: Scene, ref: MeasureRef): [string, string] | null {
       : null;
   }
   return null;
+}
+
+/**
+ * A circle a constraint item reads and pushes: its centre and radius this sweep, and a
+ * way to shift it. A disk's centre is its one control vertex and its radius a parameter
+ * of the outline (set by size dimensions and the rim handle, never by the solver); a
+ * reference circle's centre is its `c` point; a reference arc has no centre variable at
+ * all — the circle through its three points is re-derived every sweep (null while they
+ * are collinear) and a shift moves the points **as a rigid piece**, so the arc keeps its
+ * radius. Its `rank` is that of its most mobile point (like a line's). A correction moves
+ * the points at that rank that no other item names (see System.named); when that leaves
+ * some points behind — one held by the drag, one a coincident glues to a line's end — the
+ * rest take a **Newton step** along the normal, sized from the residual's measured
+ * response, so the arc reshapes through them (a line blending into an arc: the shared
+ * end stays, the arc's bulge and far end adapt) instead of dragging the held points off
+ * whatever holds them.
+ */
+interface CircleHandle {
+  at(pos: Vec2[]): { c: Vec2; r: number } | null;
+  /**
+   * Move the circle along the unit normal `n` so that `residual` — the item's signed
+   * tangency residual, which a pure translation by t·n changes by exactly t — grows by
+   * `t`. A centre variable simply translates; an arc translates when every point of it
+   * may move, else it reshapes through its free points (see above).
+   */
+  correct(pos: Vec2[], n: Vec2, t: number, residual: (pos: Vec2[]) => number | null): void;
+  rank: number;
+  /** A reference arc's three variables `a`, `m`, `b` (undefined for a plain circle). */
+  points?: number[];
+  /**
+   * A reference arc only: turn its free points (never `pivot` itself) about the point
+   * variable `pivot` by the Newton step that grows `residual` by `t` — the move for a
+   * tangent pinned to an arc end (see the tangent item).
+   */
+  turnAbout?(pos: Vec2[], pivot: number, t: number, residual: (pos: Vec2[]) => number | null): void;
+}
+
+/**
+ * Newton on one angle: turn `movers` about `pivot` so that `rho` grows by `t`, sizing the
+ * step from the residual's response to a small probe turn. The response is floored at
+ * `floor` per radian (so a near-flat response can't fling anything) and the turn is
+ * capped at `MAX_TURN`; the next sweep re-measures from the new shape.
+ */
+function newtonTurn(
+  pos: Vec2[],
+  movers: number[],
+  pivot: Vec2,
+  t: number,
+  rho: (pos: Vec2[]) => number | null,
+  floor: number
+): void {
+  if (!movers.length) return;
+  const r0 = rho(pos);
+  if (r0 === null) return;
+  const saved = movers.map((i) => pos[i]);
+  const turn = (theta: number) => {
+    movers.forEach((i, k) => (pos[i] = add(pivot, rotate(sub(saved[k], pivot), theta))));
+  };
+  const probe = 1e-3;
+  turn(probe);
+  const r1 = rho(pos);
+  turn(0);
+  if (r1 === null) return;
+  let g = (r1 - r0) / probe;
+  if (Math.abs(g) < floor) g = g < 0 ? -floor : floor;
+  turn(Math.max(-MAX_TURN, Math.min(MAX_TURN, t / g)));
+}
+
+/** A turn is capped per sweep (radians): a near-flat response would otherwise spin a line. */
+const MAX_TURN = 0.5;
+
+/** The circle a ref names, as a handle — null when it can't be a solver circle. */
+function acquireCircle(scene: Scene, sys: System, ref: MeasureRef, rank: (i: number) => number): CircleHandle | null {
+  const one = (key: string, r: number): CircleHandle | null => {
+    const i = acquire(scene, sys, key);
+    if (i === null) return null;
+    return {
+      at: (pos) => ({ c: pos[i], r }),
+      correct(pos, n, t) {
+        pos[i] = add(pos[i], scale(n, t));
+      },
+      rank: rank(i),
+    };
+  };
+  if (ref.kind === "disk") {
+    const circ = scene.circleOfRef(ref);
+    return circ ? one(vertexKey(ref.bodyId, 0, ref.hole ?? null), circ.r) : null;
+  }
+  if (ref.kind !== "guideCircle") return null;
+  const g = scene.getGuide(ref.guideId);
+  if (!g) return null;
+  if (g.kind === "circle") return one(`g:${g.id}:c`, g.r);
+  if (g.kind !== "arc") return null;
+  const pts: number[] = [];
+  for (const w of ["a", "m", "b"]) {
+    const i = acquire(scene, sys, `g:${g.id}:${w}`);
+    if (i === null) return null;
+    pts.push(i);
+  }
+  const low = Math.min(...pts.map(rank));
+  const free = pts.filter((i) => rank(i) === low);
+  // Points another item names stay where that item puts them — unless that leaves none.
+  const loose = free.filter((i) => !sys.named.has(sys.keys[i]));
+  const movers = loose.length ? loose : free;
+  const rigid = movers.length === pts.length; // the whole arc moves: a translation is exact
+  const at = (pos: Vec2[]) => {
+    const arc = arcThrough(pos[pts[0]], pos[pts[1]], pos[pts[2]]);
+    return arc ? { c: arc.c, r: arc.r } : null;
+  };
+  return {
+    at,
+    correct(pos, n, t, residual) {
+      const move = (tau: number) => {
+        for (const i of movers) pos[i] = add(pos[i], scale(n, tau));
+      };
+      if (rigid) {
+        move(t);
+        return;
+      }
+      // Newton along `n` on the moving points: measure how the residual responds to a
+      // small probe, then step to the size that should close `t`. A response under a
+      // tenth of a translation's is floored there, so the step stays bounded and the
+      // next sweep re-measures from the new shape.
+      const r0 = residual(pos);
+      const arc = at(pos);
+      if (r0 === null || !arc) return;
+      const saved = movers.map((i) => pos[i]);
+      const h = Math.max(1e-6, arc.r * 1e-4);
+      move(h);
+      const r1 = residual(pos);
+      movers.forEach((i, k) => (pos[i] = saved[k]));
+      if (r1 === null) {
+        move(t);
+        return;
+      }
+      let g = (r1 - r0) / h;
+      if (Math.abs(g) < 0.1) g = g < 0 ? -0.1 : 0.1;
+      move(t / g);
+    },
+    rank: low,
+    points: pts,
+    turnAbout(pos, pivot, t, residual) {
+      const arc = at(pos);
+      if (!arc) return;
+      // A turn moves the arc's points r per radian; floor the response at a tenth of that.
+      newtonTurn(pos, movers.filter((i) => i !== pivot), pos[pivot], t, residual, 0.1 * arc.r);
+    },
+  };
+}
+
+/**
+ * The arc end a tangent's touching point is pinned to, as a variable index — or null.
+ * Pinned means some coincident glues one end of the arc (`a` or `b`) onto the tangent's
+ * line: to one of the line's two ends, to its midpoint, or onto the line itself
+ * (point-on-line). Only reference arcs have ends; a disk never pins.
+ */
+function pinnedArcEnd(
+  scene: Scene,
+  sys: System,
+  self: SketchConstraint,
+  C: CircleHandle,
+  lineRef: MeasureRef,
+  line: [number, number]
+): number | null {
+  if (!C.points) return null;
+  const ends = [C.points[0], C.points[2]];
+  const lineKeys = new Set(line.map((i) => sys.keys[i]));
+  const keyOf = (r: MeasureRef): string | null => (isPointRef(r) && r.kind !== "midpoint" ? pointVarKey(scene, r) : null);
+  /** Whether a ref names a point of the line (an end, its midpoint) or the line itself. */
+  const onLine = (r: MeasureRef): boolean => {
+    if (r.kind === "midpoint") return sameMeasureRef(r.of, lineRef);
+    if (sameMeasureRef(r, lineRef)) return true;
+    const k = keyOf(r);
+    return k !== null && lineKeys.has(k);
+  };
+  for (const k of scene.sketch) {
+    if (k.kind !== "coincident" || !k.refB || k.id === self.id) continue;
+    for (const [p, q] of [[k.refA, k.refB], [k.refB, k.refA]] as [MeasureRef, MeasureRef][]) {
+      const kp = keyOf(p);
+      if (kp === null || !onLine(q)) continue;
+      const end = ends.find((i) => sys.keys[i] === kp);
+      if (end !== undefined) return end;
+    }
+  }
+  return null;
+}
+
+/**
+ * The line's share of a tangent correction: grow the residual `rho` by `t` — a plain
+ * shift of the line by −t·n does exactly that. Both ends free (or the line held to a world
+ * axis by an H/V constraint, which a turn would only fight): shift. Exactly one end held —
+ * by the drag, a lock, or another item naming it (System.named) — the line **turns about
+ * that end** instead, by the Newton step the residual's response to a probe turn asks for:
+ * a line blending into an arc swings about the shared end until it is tangent there, and a
+ * dragged end swings the line with it. Both held: nothing — the circle's share closes the
+ * rest over the following sweeps.
+ */
+function turnOrShiftLine(
+  pos: Vec2[],
+  l0: number,
+  l1: number,
+  n: Vec2,
+  t: number,
+  rho: (pos: Vec2[]) => number | null,
+  free0: boolean,
+  free1: boolean,
+  axisLocked: boolean
+): void {
+  if (!free0 && !free1) return;
+  if ((free0 && free1) || axisLocked) {
+    const shift = scale(n, t);
+    pos[l0] = sub(pos[l0], shift);
+    pos[l1] = sub(pos[l1], shift);
+    return;
+  }
+  const h = free0 ? l1 : l0; // the pivot
+  const f = free0 ? l0 : l1; // the end that swings
+  // A turn moves the far end L per radian; floor the response at a tenth of that.
+  newtonTurn(pos, [f], pos[h], t, rho, 0.1 * dist(pos[f], pos[h]));
+}
+
+/**
+ * The line's share of a tangent **pinned to an arc end** (see the tangent item): turn
+ * the line so that `rho` grows by `t` — about its held end when exactly one is held,
+ * about the pinned end's own position `at` when both ends are free (the end is glued to
+ * the line by a point-on-line, so nothing distinguishes the ends); nothing when both are
+ * held.
+ */
+function turnLineForPin(
+  pos: Vec2[],
+  l0: number,
+  l1: number,
+  at: Vec2,
+  t: number,
+  rho: (pos: Vec2[]) => number | null,
+  free0: boolean,
+  free1: boolean
+): void {
+  if (!free0 && !free1) return;
+  const L = dist(pos[l0], pos[l1]);
+  if (free0 && free1) newtonTurn(pos, [l0, l1], at, t, rho, 0.1 * L);
+  else newtonTurn(pos, [free0 ? l0 : l1], pos[free0 ? l1 : l0], t, rho, 0.1 * L);
 }
 
 /**
@@ -899,6 +1178,103 @@ function buildConstraintItem(
       },
     };
   }
+  if (kind === "tangent") {
+    // The circle's centre exactly one radius off the infinite line, on the side it is
+    // on now: a point–line distance whose target is the radius. The radius is a
+    // parameter of the outline / guide, never a variable (a disk is sized by its size
+    // dimension or rim handle; an arc moves as a rigid piece), so the correction shifts
+    // the centre and the line along the line's normal, shared by rank like every other
+    // pair. The side is the momentary one — nothing was drawn to hold, so a circle
+    // dragged through the line simply re-attaches on the far side.
+    if (!c.refB) return "invalid";
+    const circleRef = isCircleRef(c.refA) ? c.refA : c.refB;
+    const lineRef = circleRef === c.refA ? c.refB : c.refA;
+    const C = acquireCircle(scene, sys, circleRef, rank);
+    const kl = lineVarKeys(scene, lineRef);
+    if (!C || !kl) return "invalid";
+    const l0 = acquire(scene, sys, kl[0]);
+    const l1 = acquire(scene, sys, kl[1]);
+    if (l0 === null || l1 === null) return "invalid";
+    if (l0 === l1) return null; // a one-point line has no direction to touch along
+    // A line held whole by a `fixed` lock is immovable here (as for a symmetric's mirror):
+    // the lock would undo any shift, so the circle takes the whole correction.
+    const lineLow = Math.min(rank(l0), rank(l1));
+    const lineRank = lineLocked(scene, lineRef) ? IMMOVABLE_RANK : lineLow;
+    const wC = shareOf(C.rank, lineRank); // the circle's share
+    const axisN = axisNormalOf(scene, lineRef);
+    // A line end is free to the tangent when nothing else holds it: not out-ranked (the
+    // drag, a lock) and named by no other item (see turnOrShiftLine).
+    const endFree = (i: number) => rank(i) === lineLow && !sys.named.has(sys.keys[i]);
+    const free0 = endFree(l0);
+    const free1 = endFree(l1);
+    /** The line's normal at these positions, aligned like the item's. */
+    const normalAt = (p: Vec2[]): Vec2 | null => {
+      const d = sub(p[l1], p[l0]);
+      const l = len(d);
+      if (l < EPS) return null;
+      const nn = perp(scale(d, 1 / l));
+      return axisN ? alignedAxis(axisN, nn) : nn;
+    };
+    const pin = pinnedArcEnd(scene, sys, c, C, lineRef, [l0, l1]);
+    if (pin !== null) {
+      // The tangent point is this arc end: a coincident glues it onto the line (its end,
+      // its midpoint, or the line itself). "Centre one radius off the line" is then
+      // second-order in what is actually wrong — how far the touching point sits from
+      // that end along the line — and residual-sized steps crawl (the error fell like
+      // 1/n²). The first-order condition is that the **radius at the end is
+      // perpendicular to the line**: the residual is the centre's offset along the line
+      // from the end, and the corrections are turns — the arc about the end (its free
+      // points; the end stays where the coincident keeps it), the line about its held
+      // end — shared by rank. The coincident supplies "end on the line"; with the end on
+      // the circle by construction, the two together are tangency at that end.
+      const tau = (p: Vec2[]): number | null => {
+        const d = sub(p[l1], p[l0]);
+        const l = len(d);
+        const cc = C.at(p);
+        return l < EPS || !cc ? null : dot(sub(cc.c, p[pin]), scale(d, 1 / l));
+      };
+      // A line held to a world axis (H / V, a fixed angle) can't turn: the arc does it all.
+      const wArc = axisN ? 1 : wC;
+      return {
+        id: c.id,
+        kind: "constraint",
+        run(pos, apply) {
+          const t0 = tau(pos);
+          if (t0 === null) return 0; // a degenerate line / collinear arc this sweep
+          const err = Math.abs(t0);
+          if (apply && err > EPS) {
+            C.turnAbout?.(pos, pin, -t0 * wArc, tau);
+            if (wArc < 1) turnLineForPin(pos, l0, l1, pos[pin], -t0 * (1 - wArc), tau, free0, free1);
+          }
+          return err;
+        },
+      };
+    }
+    return {
+      id: c.id,
+      kind: "constraint",
+      run(pos, apply) {
+        const n = normalAt(pos);
+        const circ = C.at(pos);
+        if (!n || !circ) return 0; // a degenerate line / collinear arc this sweep: nothing to touch
+        const s = dot(sub(circ.c, pos[l0]), n); // signed distance of the centre off the line
+        const sg = s < 0 ? -1 : 1;
+        const err = sg * circ.r - s;
+        if (apply && Math.abs(err) > EPS) {
+          // The signed residual s − sg·r at any positions: a translation of the circle by
+          // t·n (or of the line by −t·n) grows it by exactly t.
+          const rho = (p: Vec2[]): number | null => {
+            const nn = normalAt(p);
+            const cc = C.at(p);
+            return nn && cc ? dot(sub(cc.c, p[l0]), nn) - sg * cc.r : null;
+          };
+          C.correct(pos, n, err * wC, rho);
+          turnOrShiftLine(pos, l0, l1, n, err * (1 - wC), rho, free0, free1, axisN !== null);
+        }
+        return Math.abs(err);
+      },
+    };
+  }
   // parallel / perpendicular / equal: two lines
   const ka = lineVarKeys(scene, c.refA);
   const kb = c.refB ? lineVarKeys(scene, c.refB) : null;
@@ -1098,6 +1474,7 @@ function buildSystem(
     tied: guidesAsReference ? { has: () => true } : tiedGuideVars(scene),
     multiTied: multiTiedGuides(scene),
     fixedPts: fixedPointVars(scene),
+    named: namedPointVars(scene),
   };
   const items: SolveItem[] = [];
   const invalid: SketchBreak[] = [];
@@ -1285,6 +1662,7 @@ function iterate(sys: System, items: SolveItem[]): boolean {
   for (let sweep = 0; sweep < sketchConfig.maxSweeps; sweep++) {
     let maxErr = 0;
     for (const item of items) maxErr = Math.max(maxErr, item.run(sys.pos, true));
+    sketchConfig.trace?.(sweep, maxErr);
     if (maxErr < sketchConfig.tol) return true;
   }
   return items.every((item) => item.run(sys.pos, false) < sketchConfig.tol);
@@ -1697,11 +2075,19 @@ export function applyDrivingDimension(
   const info = scene.measureInfo(m);
   if (!info || info.kind !== "distance") return reject; // angle dimensions can't drive (v1)
   if (m.axis === "diameter") {
-    // A disk's diameter is its own parameter: set the radius directly. No vertex or
-    // joint moves, so nothing else in the sketch can be disturbed.
+    // A disk's diameter is its own parameter: set the radius directly, then re-solve
+    // whatever else the sketch says about that circle — a tangent line follows the new
+    // rim (nothing moves when nothing names it). Rejected like any other edit if the
+    // sketch can't follow.
     const disk = scene.diskOfRef(m.refA);
     if (!disk) return reject;
+    const snap = snapshot(scene);
     scene.setDiskRadius(disk.bodyId, target / 2, disk.hole);
+    const breaks = solveAndApply(scene);
+    if (breaks.length) {
+      restore(scene, snap);
+      return breaks;
+    }
     scene.setMeasurementDriving(m.id, target);
     return [];
   }
@@ -1761,6 +2147,7 @@ function refOwnerBody(scene: Scene, ref: MeasureRef): number | null {
     case "edge":
     case "bodyPoint":
     case "centre":
+    case "disk":
       return scene.getBody(ref.bodyId) ? ref.bodyId : null;
     case "joint": {
       const j = scene.getJoint(ref.jointId);
@@ -1777,6 +2164,7 @@ function refOwnerBody(scene: Scene, ref: MeasureRef): number | null {
       return scene.getPattern(ref.patternId)?.bodyId ?? null;
     case "guidePoint":
     case "guideLine":
+    case "guideCircle":
       return null; // guides are world construction — no body owns them
     case "midpoint":
       return refOwnerBody(scene, ref.of);

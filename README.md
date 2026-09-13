@@ -102,8 +102,8 @@ The **mode button** is the big one: it shows the mode it switches *to* (▶ whil
 you simulate), and the caption under it names the mode you are in. A group whose drawing can be
 hidden carries a small **eye** on its caption — **Grid**, **Constraints** (the badges) and
 **Measure** (the dimensions); a struck-through eye means that group's drawing is hidden, never
-that it stopped working. Buttons for tools that are not built yet (Subtract, Intersect,
-Tangential) are dimmed placeholders and say so when clicked.
+that it stopped working. Buttons for tools that are not built yet (Subtract, Intersect) are
+dimmed placeholders and say so when clicked.
 
 Fields that belong to a selection or an armed tool — text height, actuator / motor speed, the
 solver-tuning knobs — appear in a strip to the **right of the groups**, so nothing shifts when a
@@ -144,6 +144,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails or reference edges) to constrain their directions — or, for Equal, their lengths. |
 | **Fixed** | `L` | **One click, one element.** Click a **point** (joint, body corner, regular polygon centre, reference point) to lock it exactly where it is — nothing moves it again: no other constraint, no dimension, not even dragging it. Click a **line** (body edge, rail, reference edge) to lock **the line itself** — angle *and* position: its two ends stay free, but only to slide **along** that line and stretch it; the line can never turn or shift. Anything constrained to a locked element yields to it. |
 | **Symmetrical** | `Y` | **Three clicks.** Click **two points** (joints, body corners, regular polygon centres, reference points) — or **two lines** (body edges, rails, reference edges) — then the **mirror line** (a body edge, rail or reference edge). Two points become true mirror images: the same perpendicular distance from the mirror, on opposite sides, on one perpendicular to it. Two lines mirror as whole lines — angle and offset — while their endpoints stay free, so they need not be the same length. The more mobile side gives way: a free reference line used as the mirror is itself re-placed onto the pair's bisector by its first symmetry; carrying two symmetries, snapped to geometry, or locked with Fixed, it stays and the pairs come to it. |
+| **Tangential** | `Z` | **Two clicks, either order.** Click a **circle or arc** — a disk body's rim, a round hole, a reference circle or a reference arc — and a **line** (a body edge, rail or reference edge): the line becomes tangent to the circle, i.e. the circle's centre sits exactly one radius off the line, on the side it already is. The radius never changes for it — a disk is sized by its diameter dimension or rim handle, a reference arc moves as a rigid piece — so the centre and the line share the move by the usual rule: a free reference circle comes to a body edge, a disk comes to a Fixed edge, a Fixed disk pushes the edge, two free bodies meet halfway. Dragging the disk slides it along the line; driving a tangent disk's diameter re-solves, so the line follows the new rim. To **blend a line smoothly into an arc**, add the tangent and then a Coincident between the arc's end and the line's end: the arc touches the line exactly at the shared end, and dragging that end swings the line with it. One badge, at the contact point. |
 
 **Select mode** (no tool active, the default): click a body, joint, or rail to select it.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
@@ -320,9 +321,9 @@ remove it — all of this works in both modes. Measurements are saved with the m
 
 **Sketch constraints & driving dimensions** (draw mode). Draw mode works like a CAD sketch:
 
-- The eight **constraint tools** (table above) relate points and lines — or, for **Fixed**,
+- The nine **constraint tools** (table above) relate points and lines — or, for **Fixed**,
   nail a single element down where it is; **Symmetrical** relates a pair *and* the mirror line
-  between them. The geometry moves to
+  between them; **Tangential** relates a line to a circle. The geometry moves to
   satisfy a constraint the moment you place it, and a constraint that *can't* be satisfied is
   rejected — nothing moves, **a toast says why**, and the items it collided with **flash red for
   a few seconds** so you can find them: *"Coincident can't be applied: it conflicts with the
@@ -330,7 +331,8 @@ remove it — all of this works in both modes. Measurements are saved with the m
   explained the same way instead of being ignored (*"Parallel needs two lines…"*, *"That element
   is already fixed."*), as is a dimension value the sketch can't reach. Each constraint shows a small
   violet **badge** (◎ H V ∥ ⊥ =, a padlock for Fixed, a dashed mirror with a dot each side for
-  Symmetrical — on both elements and on the mirror line) beside its element — faded until you **hover the element**
+  Symmetrical — on both elements and on the mirror line — and a circle touching a line for
+  Tangential, one badge at the contact point) beside its element — faded until you **hover the element**
   (or the badge — hovering a badge also **highlights the elements it constrains**, with a
   dotted line between them when they're apart): click to select, **Delete** to remove. The **eye** on the **Constraints** group's caption
   **shows/hides all badges** (constraints keep working while hidden), and the eye on the
@@ -808,13 +810,27 @@ against each other, each moving toward the other's image (reflection is affine, 
 lands on exact mirror images). Lines move as rigid pieces (a turn about the midpoint, then a
 shift), so their lengths survive. An immovable participant is never written: two instance
 points about a locked line simply reject.
+**Tangential** is a point–line distance whose target is the circle's radius: the point is the
+circle's centre — a disk's one control vertex, a reference circle's centre point, or, for a
+reference arc, the centre of the circle through its three points, re-derived every sweep — the
+radius is a parameter the solver never touches, and the correction runs along the line's normal,
+shared by rank like any pair (a Fixed line counts as immovable, so the circle takes it all; an
+arc shifts its points as a rigid piece, leaving a point held by the drag — or named by another
+constraint — where it is and reshaping through the rest; a line with one held end turns about
+it instead of shifting). The side
+is the momentary one: a circle dragged through its line re-attaches on the far side. Driving a
+disk's diameter re-solves the sketch, so a tangent line follows the new rim. When a coincident
+glues an arc's end onto the tangent line (the line-blends-into-arc idiom), the tangent becomes
+an angle condition at that end — the radius there perpendicular to the line — solved by turning
+the arc about the shared end and the line about its held end, so the blend settles in a few
+sweeps instead of crawling.
 **Pattern members** are derived geometry: each member variable is coupled to its seed by a
 rigid offset, so a constraint or dimension on a member moves the whole array — seed, members
 and their body together — instead of pinning it in place.
 **Pose dimensions and pose constraints** (`pose.ts`) handle dimensions and sketch
 constraints whose every end lives on component instances — not shape material at all:
 between two instances the correction is a closed-form **rigid move** of one of them — a
-translation for distances, coincident and H/V point pairs, a rotation about the constrained
+translation for distances, coincident, tangent and H/V point pairs, a rotation about the constrained
 edge's midpoint for line H/V, parallel and perpendicular — for a Fixed lock on an
 instance, a translation back onto the locked point or a turn then a shift back onto the
 locked line — and, for a Symmetrical pair on instances, a translation onto the partner's

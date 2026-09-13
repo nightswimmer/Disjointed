@@ -112,8 +112,9 @@ export interface RenderInput {
   } | null;
   /** Sketch-constraint badges to draw (draw mode only; positions resolved by main). */
   sketchGlyphs: SketchGlyphView[];
-  /** Constraint-tool state: references picked so far and the one under the cursor. */
-  sketchDraft: { refs: ResolvedMeasureRef[]; hover: ResolvedMeasureRef | null } | null;
+  /** Constraint-tool state: references picked so far and the one under the cursor
+   *  (a circle reference highlights as its rim / arc, like a diameter pick). */
+  sketchDraft: { refs: MeasureHighlight[]; hover: MeasureHighlight | null } | null;
   /**
    * Object-snap highlight (draw mode): the dragged object's snapping reference (solid)
    * and, while snapped, the target feature it landed on (dashed; a line target is
@@ -254,7 +255,7 @@ export interface SketchGlyphView {
    * (highlighted in the sketch violet) and, when those elements don't touch, the shortest
    * segment between them (drawn dotted) — computed by main.
    */
-  hover?: { refs: ResolvedMeasureRef[]; link: [Vec2, Vec2] | null };
+  hover?: { refs: MeasureHighlight[]; link: [Vec2, Vec2] | null };
 }
 
 /** On-screen joint radius in CSS pixels (kept constant regardless of zoom). */
@@ -1559,7 +1560,30 @@ const SKETCH_SYMBOL: Record<SketchConstraintKind, string | null> = {
   equal: "=",
   fixed: null, // a padlock, drawn — see drawLockGlyph
   symmetric: null, // a dashed mirror line with a dot each side, drawn — see drawMirrorGlyph
+  tangent: null, // a circle touching a line, drawn — see drawTangentGlyph
 };
+
+/**
+ * The Tangential badge, centred on the pill: a small circle with a line resting on
+ * its top and a dot at the contact point — its toolbar icon. Drawn for the same reason
+ * as the other two: no character says "touching" at 11 px.
+ */
+function drawTangentGlyph(ctx: CanvasRenderingContext2D, cx: number, cy: number, color: string, bold: boolean): void {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = bold ? 1.4 : 1;
+  const ly = cy - 2.2; // the line, above centre; the circle hangs below it
+  ctx.beginPath();
+  ctx.moveTo(cx - 5.6, ly);
+  ctx.lineTo(cx + 5.6, ly);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, ly + 3.4, 3.4, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, ly, 1.3, 0, Math.PI * 2);
+  ctx.fill();
+}
 
 /**
  * The Symmetrical badge, centred on the pill: a dashed mirror line with a dot on each
@@ -1662,6 +1686,7 @@ function drawSketchBadge(
   const sym = SKETCH_SYMBOL[kind];
   if (sym === null) {
     if (kind === "symmetric") drawMirrorGlyph(ctx, sx, sy, color, bold);
+    else if (kind === "tangent") drawTangentGlyph(ctx, sx, sy, color, bold);
     else drawLockGlyph(ctx, sx, sy, color, bold);
   } else {
     ctx.fillStyle = color;

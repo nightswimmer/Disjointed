@@ -30,7 +30,8 @@ motion; actuators / motors animate.
 - The interactive canvas is not covered by tests: confirm UI changes by eye (or with a throwaway
   Playwright script against `npm run dev` with `?automation`, which exposes `window.__disjointed`).
 - Field-repro scenes in the repo root: `FrontPanelHinge.json`, `gate hinge tests.json` (the
-  "Door Assembly 6" pattern/dimension case).
+  "Door Assembly 6" pattern/dimension case), `tangential.json` (two reference lines + a
+  reference arc: the tangent / line-blends-into-arc case).
 
 ## Module map (`src/`)
 | Module | Role |
@@ -88,6 +89,16 @@ motion; actuators / motors animate.
   references: `refA` / `refB` (both points or both lines) plus `mirror` (a line). Every site
   that remaps, prunes, clones or ownership-tests a constraint's refs iterates
   **`sketchRefs(c)`**, never `[refA, refB]` — keep that invariant when adding a site.
+  Two ref kinds name a **circle** rather than a point or line: `disk` (a disk body or a
+  circular hole: `bodyId` + optional `hole`) and `guideCircle` (a reference circle, or the
+  circle a reference arc lies on). `isCircleRef` tells them apart; **they resolve to their
+  centre point** through `resolveMeasureRef`, so label anchors, badges, hover, pruning and
+  every remap treat them like a point, and `circleOfRef` hands the radius to the few places
+  that need the circle itself (the `tangent` items, the rim highlight
+  `circleHighlightOfRef`). Only `tangent` accepts one (stored as `refA`, the line as `refB`).
+  A `disk` ref rides every remap site `vertex` / `edge` / `centre` ride on holes, and
+  `shiftMeasureIndices` also drops it when a node added to the outline stops it being a disk
+  (an outer disk cut, split or combined is a polygon afterwards: its refs go stale).
 - The `bodies` array **is** the z-order (drawn first→last, picked last→first).
 
 ## Design decisions and invariants (with reasons)
@@ -182,6 +193,37 @@ motion; actuators / motors animate.
   *reflected* shift (moving it moves the mirror, which moves the image it chases) with the
   turn's sign flipped. Instance points about a non-instance mirror are a *sketch* case: the
   mirror moves (free) or the edit rejects (locked).
+- **`tangent` is a point–line distance whose target is the radius** (`acquireCircle` + the
+  tangent item in sketch.ts): the circle's centre — a disk's vertex 0, a reference circle's
+  `c`; a reference arc has no centre variable, so the circle through its `a` / `m` / `b`
+  variables is re-derived every sweep — is pushed along the line's normal together with the
+  line, shared by rank like any pair. A `fixed` line reads as rank 3, as a symmetric's mirror
+  does (splitting with it and letting the lock push the ends back left a sub-tolerance
+  wobble on the plate). **The radius is never a variable**: disks are sized by size
+  dimensions / the rim handle, and an arc shifts its three points as a rigid piece (points
+  above the arc's lowest rank — one held by the drag — stay put, the arc reshapes a little
+  and the next sweep corrects the rest). **No stored side**: the momentary sign decides, so
+  a circle dragged through its line re-attaches on the far side (nothing was *drawn* to
+  hold, unlike a driving dimension). Consequence: `applyDrivingDimension`'s diameter branch
+  now runs `solveAndApply` after `setDiskRadius` (snapshot / restore), so a tangent line
+  follows the new rim — before, a diameter edit never solved anything. On the pose route a
+  tangent is a translation of one side along the line's normal (pose.ts).
+  **Who moves within an arc / a line** (`System.named`): a point some other item names (a
+  coincident, H/V pair, point-on-line, lock, driving-dimension end) is left where that
+  item puts it; an arc reshapes through its remaining free points by a **Newton step**
+  along the normal (`CircleHandle.correct`), and a line with one held end **turns about
+  it** instead of shifting (`turnOrShiftLine`; both held → nothing; an H/V-held line only
+  shifts). Rationale: a tangent translating the whole arc while a coincident pulled one
+  end back chased itself into ever bigger circles (field repro `tangential.json`).
+  **A tangent pinned to an arc end is an angle condition** (`pinnedArcEnd`): when a
+  coincident glues an arc end onto the tangent's line (its end, its midpoint, or
+  point-on-line), the residual becomes the centre's offset *along the line* from that
+  end and the corrections are turns — the arc about the end, the line about its held end
+  (`newtonTurn`; an axis-held line leaves the whole turn to the arc). The distance form
+  is second-order in that offset there, and Gauss-Seidel on it converged like 1/n² (400
+  sweeps left 0.002 on 6000-unit geometry); the angle form settles in ~6 sweeps. That is
+  the "line blends smoothly into an arc" CAD idiom. `sketchConfig.trace` is the per-sweep
+  residual hook that found it — use it before guessing.
 - **Regular polygons are an invariant, not constraints**: rigid weighted fit per solve (a similarity
   fit let pinching corrections shrink it sweep after sweep); H/V/parallel/perpendicular on an edge
   turn it in one step; **a dimension never turns a regular polygon** (that solver item could stall
@@ -257,10 +299,16 @@ motion; actuators / motors animate.
 ### UI conventions
 - **Sketch badges** are 11 px pills carrying one glyph; `SKETCH_SYMBOL` maps a kind to a
   character, or to `null` when the glyph is vector art (`fixed`'s padlock, `drawLockGlyph`,
-  and `symmetric`'s dashed mirror with a dot each side, `drawMirrorGlyph` — each matches its
+  `symmetric`'s dashed mirror with a dot each side, `drawMirrorGlyph`, and `tangent`'s circle
+  touching a line, `drawTangentGlyph` — each matches its
   toolbar icon, and no character reads right at that size: everything meaning "locked" is an
   emoji or a shape-in-a-shape like the coincident ◎, and ⇔ / ⋈ read as equivalence / join).
-  `SvgRecorder` replays drawn glyphs fine. A symmetry badges all three of its elements.
+  `SvgRecorder` replays drawn glyphs fine. A symmetry badges all three of its elements; a
+  tangent has **one** badge at the contact point (the centre's foot on the line, offset away
+  from the circle — the one spot that names both elements), computed in `sketchGlyphsView`
+  rather than per ref. Hovering a badge highlights a circle ref as its rim / arc
+  (`highlightOfRef` in main.ts, `MeasureHighlight` in the renderer's `sketchDraft` and badge
+  hover) and draws no link for a tangent (they touch by definition).
 - **A dimension's direction is fixed at placement.** The h / v / direct choice of a point–point
   dimension is read from the label position only when it is created (`measureAxisForPlacement`);
   `setMeasurementLabel` and the context dimensions' `setTempDimLabel` move the label and nothing
@@ -327,7 +375,8 @@ motion; actuators / motors animate.
   the flashing items after reading the toast that named them.
 - Two-click slider start pair: a press grabs the **rail joint** in draw mode, the **rider** in sim.
 - Text shortcuts: plain letters in `TOOL_KEYS`, Shift+letter shape tools in `SHIFT_TOOL_KEYS`
-  (main.ts); plain `L` arms Fixed and `Y` Symmetrical; the whole shortcut map is due for a remap.
+  (main.ts); plain `L` arms Fixed, `Y` Symmetrical and `Z` Tangential (the last free letter);
+  the whole shortcut map is due for a remap.
 - View rotation is purely visual (world axes for constraints, grid and snapping).
 
 ## Serialization history (`load` accepts everything ≤ 21)
@@ -336,7 +385,8 @@ v9 groups · v10 grounded bodies · v11 guides · v12 units · v13 holes (baked)
 group joints · v15 per-corner radii · v16 editable holes · v17 locked riders · v18 welds ·
 v19 patterns · v20 guide union + `startRiders` · v21 regular polygons, infinite guideline dropped.
 Optional fields added without a bump: `Measurement.side`, `mirrored`, `rigid`, the `fixed`
-sketch-constraint kind with its `at` / `angle`, the `symmetric` kind with its `mirror` ref. Load sanitizes
+sketch-constraint kind with its `at` / `angle`, the `symmetric` kind with its `mirror` ref, the
+`tangent` kind and the `disk` / `guideCircle` ref kinds. Load sanitizes
 every list invariant (locked ⊆ riders, pattern members exist, mismatched regular counts dropped).
 
 ## Tests (`scripts/`, one line each)
@@ -347,7 +397,12 @@ sketch (constraints, dims, ranks, rigid carry, drift, refusal reasons ↔ refusa
 fixed-constraint (point / line locks,
 conflict rejects, mirror re-capture) · symmetric-constraint (validation, point / line forms,
 who moves — free / twice-demanded / tied / locked mirror, drag follow — rejects, remaps,
-load, copy/paste, pose route incl. a mirror riding with the moved side) · midpoint (midpoint refs: resolve, validate, solve, who
+load, copy/paste, pose route incl. a mirror riding with the moved side) · tangent-constraint
+(validation incl. problem ↔ refusal in step; who moves — locked edge / free reference circle /
+rigid arc / locked disk / equal ranks; drag follow; a diameter edit re-solving the tangent;
+conflict reject; remaps: node added to the hole, hole removal, cascades, copy/paste, load;
+sketch vs pose route; the line-blends-into-arc idiom on the `tangential.json` geometry incl.
+sweep count, an H-held line, point-on-line pinning and a drag of the shared end) · midpoint (midpoint refs: resolve, validate, solve, who
 moves, follow-the-line remaps, load) · groups · group-joints · grounded-bodies ·
 freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression with solver stats) ·
 components · pose-dims · pose-constraints · split-combine · shapes (cut, references, v21 load) ·
@@ -385,14 +440,19 @@ it for the exact cases.
   point-on-point implicit constraints with their new toolbar switch, the Fixed constraint,
   line midpoints as snap / implicit-constraint / placement targets, the fixed dimension
   direction with its pill glyph / glyph button / off-line leader, the Symmetrical
-  constraint, group isolation (double-click into a group), recolouring a whole selection,
-  the spoken refusals / longer conflict flash, and stale what's-this strings. Manual
-  exceptions so far: **text-only**
-  `tool-fixed` and `tool-symmetric` topics had to be written, because `npm run manual`
-  hard-fails on a topic the app can ask for and every `data-tool` button implies one —
-  both still need the illustration pass like the rest.
-- Plain `L` arms the Fixed constraint (F was already fit-view) and `Y` the Symmetrical one
-  (S is the slider); a full shortcut remap is planned.
+  constraint, the Tangential constraint, group isolation (double-click into a group),
+  recolouring a whole selection, the spoken refusals / longer conflict flash, and stale
+  what's-this strings. Manual exceptions so far: **text-only**
+  `tool-fixed`, `tool-symmetric` and `tool-tangent` topics had to be written, because
+  `npm run manual` hard-fails on a topic the app can ask for and every `data-tool` button
+  implies one — all three still need the illustration pass like the rest.
+- Plain `L` arms the Fixed constraint (F was already fit-view), `Y` the Symmetrical one
+  (S is the slider) and `Z` the Tangential one (T is perpendicular); a full shortcut remap
+  is planned.
+- The **Tangential constraint shipped but needs another pass**: the user's field tests with
+  `tangential.json` found it still wanting. HANDOFF.md lists the known weak spots (three-point
+  arcs, the line swinging in a blend, no held side, coverage); ask what was seen before
+  changing anything.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.
 - The toolbar was regrouped into draggable groups for **draw mode**; sim mode inherits the rack
   but its own grouping (Animation + solver tuning) has not been designed yet — see HANDOFF.md.
@@ -424,8 +484,16 @@ it for the exact cases.
   lines only — there is no "lock this whole body" (two locks pin one rigidly, but a body click
   would be the obvious gesture); a locked element gets no styling of its own beyond its badge, so
   a body deforming around a lock under a drag is only explained by the badge.
-- **Tangential** is still a dimmed placeholder in the Constraints group (as are Subtract /
-  Intersect in Boolean). **Symmetrical** gaps: no symmetric between a point pair and a line
+- **Subtract / Intersect** are still dimmed placeholders in the Boolean group. **Tangential**
+  gaps: no circle–circle tangency; no tangent to a rounded corner's fillet arc (that arc is
+  derived from the corner radius and its two edges — a different beast); no point-on-circle
+  or concentric constraints (a circle ref *resolves* to its centre, but the constraint tools
+  never pick one as a point — coincident onto a disk's centre goes through its vertex / `c`
+  point as before); a reference arc is still three points, not centre / radius / angles —
+  a held point makes the rest take a Newton step along the normal, which is a heuristic
+  rather than a true arc parametrisation; a rail whose joint sits at the
+  disk's own centre can never be tangent to it and is refused by the solve, not structurally.
+  **Symmetrical** gaps: no symmetric between a point pair and a line
   pair at once, no "symmetric about a body's own axis" without a reference line, and the
   constraint tools still don't pick midpoints (so a midpoint can't be one of the pair).
 - **Group isolation**: no keyboard way in (double-click only), no way to *add* an outside body to

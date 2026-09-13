@@ -551,7 +551,9 @@ export type MeasureRef =
   | { kind: "midpoint"; of: MidpointHost } // point: the midpoint of a rail / edge / reference segment
   | MidpointHost
   | { kind: "guidePoint"; guideId: number; which: string } // point: a guide's defining point (see `Guide` for the names)
-  | { kind: "patternAxis"; patternId: number; axis: number }; // line: a linear pattern's direction (seed anchor → last instance)
+  | { kind: "patternAxis"; patternId: number; axis: number } // line: a linear pattern's direction (seed anchor → last instance)
+  | { kind: "disk"; bodyId: number; hole?: number } // circle: a disk outline — a disk body, or the circular hole `hole` (see `diskOfRef`)
+  | { kind: "guideCircle"; guideId: number }; // circle: a reference circle, or the circle a reference arc lies on
 
 /**
  * The element reference an index remap must act on: a midpoint's host line, any other
@@ -583,6 +585,16 @@ export function isPointRef(r: MeasureRef | null | undefined): boolean {
 /** Whether a reference names a line a sketch constraint can act on. */
 export function isLineRef(r: MeasureRef | null | undefined): boolean {
   return !!r && (r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis");
+}
+
+/**
+ * Whether a reference names a **circle** — a disk outline (disk body / circular hole)
+ * or a reference circle / arc. The only constraint that takes one is `tangent`; every
+ * generic path (`resolveMeasureRef`, badges, pruning) sees a circle as its centre point,
+ * and `Scene.circleOfRef` gives the radius to whoever needs the circle itself.
+ */
+export function isCircleRef(r: MeasureRef | null | undefined): boolean {
+  return !!r && (r.kind === "disk" || r.kind === "guideCircle");
 }
 
 /**
@@ -629,7 +641,9 @@ export interface Measurement {
  * `parallel`/`perpendicular` — two lines' directions; `equal` — two lines have equal
  * length; `fixed` — a single reference is nailed down where it is (a point keeps its
  * world position, a line keeps its angle); `symmetric` — two points, or two lines, are
- * mirror images of each other across a third reference, the `mirror` line.
+ * mirror images of each other across a third reference, the `mirror` line; `tangent` —
+ * a line touches a circle (a disk body, a circular hole, a reference circle or arc):
+ * the circle's centre sits exactly one radius off the infinite line.
  */
 export type SketchConstraintKind =
   | "coincident"
@@ -639,7 +653,8 @@ export type SketchConstraintKind =
   | "perpendicular"
   | "equal"
   | "fixed"
-  | "symmetric";
+  | "symmetric"
+  | "tangent";
 
 /**
  * A sketch constraint between one, two or three references (reusing the measurement
@@ -648,7 +663,8 @@ export type SketchConstraintKind =
  * null for horizontal/vertical applied to a single line reference, and always for
  * `fixed`; `mirror` exists only on `symmetric`. Solvable point refs are joints and body
  * control vertices (`bodyPoint` refs are measurement-only); line refs are slider rails
- * and body control edges. Enumerate a constraint's references through `sketchRefs`,
+ * and body control edges; `tangent` stores its circle as `refA` and its line as `refB`.
+ * Enumerate a constraint's references through `sketchRefs`,
  * never as `[refA, refB]`, so the third one is never left behind.
  */
 export interface SketchConstraint {
@@ -696,6 +712,7 @@ export const CONSTRAINT_NAME: Record<SketchConstraintKind, string> = {
   equal: "Equal",
   fixed: "Fixed",
   symmetric: "Symmetrical",
+  tangent: "Tangential",
 };
 
 export function sketchRefs(c: { refA: MeasureRef; refB: MeasureRef | null; mirror?: MeasureRef }): MeasureRef[] {
@@ -1633,7 +1650,7 @@ export class Scene {
   patternOfRef(r: MeasureRef): Pattern | undefined {
     const ref = refHost(r);
     if (ref.kind === "joint") return this.patternOfJoint(ref.jointId)?.pattern;
-    if ((ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre") && ref.hole !== undefined) {
+    if ((ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre" || ref.kind === "disk") && ref.hole !== undefined) {
       return this.patternOfHole(ref.bodyId, ref.hole)?.pattern;
     }
     return undefined;
@@ -1988,7 +2005,10 @@ export class Scene {
       delete body.holesLocal;
     }
     const onHole = (ref: MeasureRef | null): ref is MeasureRef & { hole: number } =>
-      !!ref && (ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre") && ref.bodyId === body.id && ref.hole !== undefined;
+      !!ref &&
+      (ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre" || ref.kind === "disk") &&
+      ref.bodyId === body.id &&
+      ref.hole !== undefined;
     const refGone = (r: MeasureRef | null): boolean => {
       const ref = r ? refHost(r) : null;
       return onHole(ref) && set.has(ref.hole);
@@ -2422,7 +2442,16 @@ export class Scene {
     holesB.forEach((hi, k) => holeMap.set(hi, { bodyId: bBody.id, hole: k }));
     const remap = (r: MeasureRef | null): boolean => {
       const ref = r ? refHost(r) : null;
-      if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) return true;
+      if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge" && ref.kind !== "disk") || ref.bodyId !== bodyId) return true;
+      if (ref.kind === "disk") {
+        // A circular hole goes to whichever side kept it. The split body itself was
+        // baked to a polygon first, so an outer disk ref names nothing any more.
+        const h = ref.hole === undefined ? undefined : holeMap.get(ref.hole);
+        if (!h) return false;
+        ref.bodyId = h.bodyId;
+        ref.hole = h.hole;
+        return true;
+      }
       if (ref.hole !== undefined) {
         const h = holeMap.get(ref.hole);
         if (!h) return false;
@@ -2722,18 +2751,18 @@ export class Scene {
       }
     }
     // Vertex/edge refs: remember world geometry of the referenced corners to match after.
-    type RefRec = { ref: MeasureRef & { kind: "vertex" | "edge" }; a: Vec2; b: Vec2 | null; origin: HoleOrigin | null };
+    type RefRec = { ref: MeasureRef & { kind: "vertex" | "edge" | "disk" }; a: Vec2; b: Vec2 | null; origin: HoleOrigin | null };
     const refRecs: RefRec[] = [];
     const record = (r: MeasureRef | null): void => {
       const ref = r ? refHost(r) : null;
-      if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || !inputIds.has(ref.bodyId)) return;
+      if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge" && ref.kind !== "disk") || !inputIds.has(ref.bodyId)) return;
       const b = this.getBody(ref.bodyId)!;
       const ctrl = this.controlListOf(b, ref.hole ?? null);
-      if (!ctrl || ref.index >= ctrl.length) return;
+      if (!ctrl || (ref.kind !== "disk" && ref.index >= ctrl.length)) return;
       const w = (i: number) => add(b.pos, rotate(ctrl[i % ctrl.length], b.angle));
       refRecs.push({
         ref,
-        a: w(ref.index),
+        a: w(ref.kind === "disk" ? 0 : ref.index), // a disk's one control point is its centre
         b: ref.kind === "edge" ? w(ref.index + 1) : null,
         origin: ref.hole !== undefined ? { bodyId: ref.bodyId, hole: ref.hole } : null,
       });
@@ -2787,6 +2816,9 @@ export class Scene {
         ok.add(ref);
         continue;
       }
+      // A disk that wasn't carried over whole is no circle any more (the result is a
+      // fillet polygon, an outer disk included): nothing left to name.
+      if (ref.kind === "disk") continue;
       const va = findVertex(rec.a);
       if (!va) continue;
       if (ref.kind === "edge") {
@@ -3449,7 +3481,56 @@ export class Scene {
         const ln = this.resolveMeasureRef(ref.of);
         return ln?.kind === "line" ? { kind: "point", p: scale(add(ln.a, ln.b), 0.5) } : null;
       }
+      case "disk":
+      case "guideCircle": {
+        // A circle stands for its centre wherever a point or a line is expected (label
+        // anchors, badges, hover, pruning); `circleOfRef` has the radius. Gone when the
+        // outline stopped being a disk, or the guide is gone / went collinear.
+        const c = this.circleOfRef(ref);
+        return c ? { kind: "point", p: c.c } : null;
+      }
     }
+  }
+
+  /**
+   * The circle a **circle reference** names — centre and radius — or null: for a `disk`
+   * ref the disk outline (a one-point offset-mode outer outline or hole, see
+   * `diskOfRef`; null once a node was added to it), for a `guideCircle` ref the
+   * reference circle, or the circle a reference arc lies on (null while its three
+   * points are collinear). Null for every other reference kind.
+   */
+  circleOfRef(ref: MeasureRef): { c: Vec2; r: number } | null {
+    if (ref.kind === "disk") {
+      const d = this.diskOfRef(
+        ref.hole === undefined
+          ? { kind: "vertex", bodyId: ref.bodyId, index: 0 }
+          : { kind: "vertex", bodyId: ref.bodyId, index: 0, hole: ref.hole }
+      );
+      return d ? { c: d.c, r: d.r } : null;
+    }
+    if (ref.kind === "guideCircle") {
+      const g = this.getGuide(ref.guideId);
+      if (!g) return null;
+      if (g.kind === "circle") return { c: clone(g.c), r: g.r };
+      const arc = this.guideArc(g);
+      return arc ? { c: arc.c, r: arc.r } : null;
+    }
+    return null;
+  }
+
+  /**
+   * A **highlight** for a circle reference: the whole rim of a disk / reference circle,
+   * just the drawn arc of a reference arc (null when it doesn't resolve). The measure
+   * tool's diameter / radius picks draw the same shapes.
+   */
+  circleHighlightOfRef(ref: MeasureRef): MeasureHighlight | null {
+    if (ref.kind === "guideCircle") {
+      const g = this.getGuide(ref.guideId);
+      const arc = g ? this.guideArc(g) : null;
+      if (arc) return { kind: "arc", c: arc.c, r: arc.r, a0: arc.a0, sweep: arc.sweep };
+    }
+    const c = this.circleOfRef(ref);
+    return c ? { kind: "circle", c: c.c, r: c.r } : null;
   }
 
   /**
@@ -3628,6 +3709,14 @@ export class Scene {
       }
     }
     if (cGone.size) this.sketch = this.sketch.filter((c) => !cGone.has(c.id));
+    // A node added to a disk outline makes it a polygon: it is no circle any more, so
+    // whatever named the circle (a tangent) has lost its subject and goes with it.
+    const diskGone = (r: MeasureRef | null): boolean => {
+      const ref = r ? refHost(r) : null;
+      return !!ref && ref.kind === "disk" && ref.bodyId === bodyId && (ref.hole ?? null) === hole && !this.circleOfRef(ref);
+    };
+    this.measurements = this.measurements.filter((m) => !diskGone(m.refA) && !diskGone(m.refB));
+    this.sketch = this.sketch.filter((c) => !sketchRefs(c).some(diskGone));
   }
 
   // --- sketch constraints ---------------------------------------------------
@@ -3673,6 +3762,14 @@ export class Scene {
       if (b) return "Fixed locks one element — a single point or a single line.";
       if (!(isPointRef(refA) || isLineRef(refA)))
         return "Fixed takes a point (joint, body corner, polygon centre, reference point) or a line.";
+    } else if (kind === "tangent") {
+      if (!b) return "Tangential needs two references: a circle or arc, and a line.";
+      if (isLineRef(refA) && isCircleRef(b)) [refA, b] = [b, refA];
+      if (!isCircleRef(refA) || !isLineRef(b)) {
+        if (isCircleRef(refA) && isCircleRef(b)) return "Tangential relates a line to a circle or arc — two circles can't be made tangent yet.";
+        if (isLineRef(refA) && isLineRef(b)) return "Tangential relates a line to a circle or arc — not two lines.";
+        return "Tangential takes a circle or arc (a disk, a circular hole, a reference circle or arc) and a line (a body edge, rail or reference segment).";
+      }
     } else if (!b || !isLineRef(refA) || !isLineRef(b)) {
       return `${name} needs two lines (body edges, rails or reference segments).`;
     }
@@ -3716,11 +3813,13 @@ export class Scene {
    * `horizontal`/`vertical` take one line ref (refB
    * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs;
    * `symmetric` takes two point refs or two line refs plus the `mirror` line they
-   * reflect across.
+   * reflect across; `tangent` takes a circle ref and a line ref (either order —
+   * normalized so the circle is stored as `refA`).
    * Point refs are joints, body control vertices, regular-polygon centres, line
    * midpoints, or reference-geometry points (`bodyPoint` refs are measurement-only —
    * the sketch solver can't move them independently); line refs are slider rails,
-   * body control edges, or reference polyline edges.
+   * body control edges, or reference polyline edges; circle refs are disk outlines
+   * (disk bodies, circular holes) and reference circles / arcs.
    * Returns null on a kind mismatch, an unresolvable ref, or two refs naming the
    * same element (for point-on-line: a point that *is* an endpoint — or the midpoint —
    * of the line, which would be trivially satisfied forever) — exactly the cases
@@ -3736,6 +3835,8 @@ export class Scene {
     let b = refB ?? null;
     // Normalize point-on-line order: the point is stored as refA (the badge anchors there).
     if (kind === "coincident" && b && isLineRef(refA) && isPointRef(b)) [refA, b] = [b, refA];
+    // Likewise a tangent's circle is refA and its line refB.
+    if (kind === "tangent" && b && isLineRef(refA) && isCircleRef(b)) [refA, b] = [b, refA];
     const resA = this.resolveMeasureRef(refA);
     if (!resA) return null;
     const c: SketchConstraint = {
@@ -4745,6 +4846,19 @@ export class Scene {
     return best;
   }
 
+  /**
+   * Topmost reference **circle or arc** whose rim (the drawn arc, for an arc) passes
+   * within `radius` of `p`, or null — the pick a `guideCircle` reference is made from.
+   */
+  guideCircleAt(p: Vec2, radius: number): Guide | null {
+    for (let i = this.guides.length - 1; i >= 0; i--) {
+      const g = this.guides[i];
+      if (g.kind !== "circle" && g.kind !== "arc") continue;
+      if (this.guideDistance(g, p) <= radius) return g;
+    }
+    return null;
+  }
+
   /** Nearest guide **line** (a reference polyline edge) within `radius` of `p`. */
   guideLineAt(p: Vec2, radius: number): { guide: Guide; edge: number } | null {
     let best: { guide: Guide; edge: number } | null = null;
@@ -4887,6 +5001,7 @@ export class Scene {
         case "edge":
         case "bodyPoint":
         case "centre":
+        case "disk":
           return bodyIdSet.has(r.bodyId);
         case "rail":
           return clippedSliders.has(r.sliderId);
@@ -4896,6 +5011,7 @@ export class Scene {
         }
         case "guidePoint":
         case "guideLine":
+        case "guideCircle":
           return false; // guides don't travel with a selection clip
         case "midpoint":
           return internal(r.of);
@@ -5104,11 +5220,13 @@ export class Scene {
         case "vertex":
         case "edge":
         case "bodyPoint":
-        case "centre": {
+        case "centre":
+        case "disk": {
           const bid = bodyIdMap.get(r.bodyId);
           if (bid === undefined) return null;
           if (r.kind === "bodyPoint") return { kind: "bodyPoint", bodyId: bid, local: clone(r.local) };
           if (r.kind === "centre") return r.hole === undefined ? { kind: "centre", bodyId: bid } : { kind: "centre", bodyId: bid, hole: r.hole };
+          if (r.kind === "disk") return r.hole === undefined ? { kind: "disk", bodyId: bid } : { kind: "disk", bodyId: bid, hole: r.hole };
           return r.hole === undefined
             ? { kind: r.kind, bodyId: bid, index: r.index }
             : { kind: r.kind, bodyId: bid, index: r.index, hole: r.hole }; // hole refs keep their hole
@@ -5123,6 +5241,7 @@ export class Scene {
         }
         case "guidePoint":
         case "guideLine":
+        case "guideCircle":
           return null; // guides never travel with a clip (extractSelection drops these refs)
         case "midpoint": {
           const of = remapRef(r.of);
@@ -5240,6 +5359,7 @@ export class Scene {
         case "vertex":
         case "edge":
         case "centre":
+        case "disk":
           return r.bodyId === bodyId && r.hole !== undefined && holeSet.has(r.hole);
         case "rail":
           return clippedSliders.has(r.sliderId);
@@ -5248,6 +5368,7 @@ export class Scene {
         case "bodyPoint":
         case "guidePoint":
         case "guideLine":
+        case "guideCircle":
           return false;
         case "midpoint":
           return internal(r.of);
@@ -5399,6 +5520,10 @@ export class Scene {
           const hi = r.hole === undefined ? undefined : holeMap.get(r.hole);
           return hi === undefined ? null : { kind: "centre", bodyId, hole: hi };
         }
+        case "disk": {
+          const hi = r.hole === undefined ? undefined : holeMap.get(r.hole);
+          return hi === undefined ? null : { kind: "disk", bodyId, hole: hi };
+        }
         case "rail": {
           const id = sliderMap.get(r.sliderId);
           return id === undefined ? null : { kind: "rail", sliderId: id };
@@ -5410,6 +5535,7 @@ export class Scene {
         case "bodyPoint":
         case "guidePoint":
         case "guideLine":
+        case "guideCircle":
           return null;
         case "midpoint": {
           const of = remapRef(r.of);
@@ -5582,6 +5708,7 @@ export class Scene {
       case "edge":
       case "bodyPoint":
       case "centre":
+      case "disk":
         return this.instanceOfBody(ref.bodyId);
       case "rail":
         return this.instanceOfConstraint(ref.sliderId);
@@ -5617,6 +5744,7 @@ export class Scene {
       case "edge":
       case "bodyPoint":
       case "centre":
+      case "disk":
         return bodyKey(ref.bodyId);
       case "joint": {
         const j = this.getJoint(ref.jointId);
@@ -6961,6 +7089,10 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
       return a.guideId === (b as { guideId: number }).guideId && a.edge === (b as { edge: number }).edge;
     case "patternAxis":
       return a.patternId === (b as { patternId: number }).patternId && a.axis === (b as { axis: number }).axis;
+    case "disk":
+      return a.bodyId === (b as { bodyId: number }).bodyId && (a.hole ?? null) === ((b as { hole?: number }).hole ?? null);
+    case "guideCircle":
+      return a.guideId === (b as { guideId: number }).guideId;
     default:
       return false;
   }

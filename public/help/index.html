@@ -435,6 +435,32 @@
         </p>
       </section>
 
+      <section class="topic" id="tool-tangent">
+        <h2>Tangential <span class="keys"><kbd>Z</kbd></span></h2>
+        <p>
+          <strong>What it does:</strong> holds a line tangent to a circle or an arc &mdash; the circle&rsquo;s centre sits
+          exactly one radius off the line, on the side it already is, so the line just touches the rim. The circle can be
+          a <em>disk body</em>, a <em>round hole</em>, a <em>reference circle</em> or a <em>reference arc</em>; the line a
+          body edge, a rail or a reference segment.
+        </p>
+        <p>
+          <strong>To add one:</strong> click the circle (its rim) and the line, in either order. Its badge &mdash; a small
+          <strong>circle touching a line</strong>, the same picture as the toolbar button &mdash; sits at the contact point.
+        </p>
+        <p>
+          The radius never changes for a tangent: a disk is sized by its <a href="#dimensions">diameter dimension</a> or
+          its rim handle, and a reference arc moves as a rigid piece. Who moves follows the usual rule &mdash; the more
+          mobile side gives way: a free reference circle comes to a body edge, a disk comes to an edge locked with
+          <a href="#tool-fixed">Fixed</a>, a locked disk pushes the edge, and two free bodies meet halfway. Dragging the
+          disk slides it along the line; driving its diameter moves the line out to the new rim.
+        </p>
+        <p>
+          To <strong>blend a line smoothly into an arc</strong>, add the tangent and then a
+          <a href="#tool-coincident">Coincident</a> between the arc&rsquo;s end and the line&rsquo;s end: the line then
+          touches the arc exactly at the shared end, and dragging that end swings the line with it.
+        </p>
+      </section>
+
       <section class="topic" id="tool-measure">
         <h2>Measure <span class="keys"><kbd>D</kbd></span></h2>
         <p>
@@ -893,7 +919,7 @@
           <li>Roles: <kbd>1</kbd> body &middot; <kbd>2</kbd> cut &middot; <kbd>3</kbd> reference &middot; <kbd>Ctrl</kbd>+click flips Body / Cut for one shape</li>
           <li>Shapes: <kbd>B</kbd> polyline (body) &middot; <kbd>U</kbd> polyline (cut) &middot; <kbd>Shift</kbd>+<kbd>B</kbd> rectangle &middot; <kbd>Shift</kbd>+<kbd>C</kbd> circle &middot; <kbd>Shift</kbd>+<kbd>P</kbd> regular polygon &middot; <kbd>Shift</kbd>+<kbd>S</kbd> slot &middot; <kbd>Shift</kbd>+<kbd>L</kbd> line &middot; <kbd>Shift</kbd>+<kbd>A</kbd> arc &middot; <kbd>Shift</kbd>+<kbd>T</kbd> text</li>
           <li>Tools: <kbd>X</kbd> split &middot; <kbd>N</kbd> combine &middot; <kbd>J</kbd> joint &middot; <kbd>W</kbd> weld &middot; <kbd>C</kbd> connect &middot; <kbd>G</kbd> ground &middot; <kbd>K</kbd> rail &middot; <kbd>S</kbd> slider &middot; <kbd>L</kbd> guideline &middot; <kbd>R</kbd> rotate &middot; <kbd>I</kbd> linear pattern &middot; <kbd>Q</kbd> circular pattern &middot; <kbd>A</kbd> actuator &middot; <kbd>M</kbd> motor &middot; <kbd>D</kbd> measure</li>
-          <li>Constraints: <kbd>O</kbd> coincident &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>E</kbd> equal &middot; <kbd>L</kbd> fixed &middot; <kbd>Y</kbd> symmetrical</li>
+          <li>Constraints: <kbd>O</kbd> coincident &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>E</kbd> equal &middot; <kbd>L</kbd> fixed &middot; <kbd>Y</kbd> symmetrical &middot; <kbd>Z</kbd> tangential</li>
           <li>Editing: <kbd>Delete</kbd> &middot; <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd> undo, redo &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>V</kbd> copy, paste &middot; <kbd>Ctrl</kbd>+<kbd>G</kbd> group &middot; <kbd>[</kbd> / <kbd>]</kbd> corner radius &middot; <kbd>PageUp</kbd> / <kbd>PageDown</kbd> stacking</li>
           <li>Files: <kbd>Ctrl</kbd>+<kbd>S</kbd> save &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save as &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open</li>
           <li>Help: <kbd>?</kbd> open / close the manual &middot; <kbd>F1</kbd> table of contents</li>

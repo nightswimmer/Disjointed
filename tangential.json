@@ -1,0 +1,88 @@
+{
+  "version": 21,
+  "unit": "mm",
+  "bodies": [],
+  "joints": [],
+  "constraints": [],
+  "measurements": [],
+  "sketch": [
+    {
+      "kind": "tangent",
+      "id": 4,
+      "refA": {
+        "kind": "guideCircle",
+        "guideId": 3
+      },
+      "refB": {
+        "kind": "guideLine",
+        "guideId": 1,
+        "edge": 0
+      }
+    },
+    {
+      "kind": "tangent",
+      "id": 5,
+      "refA": {
+        "kind": "guideCircle",
+        "guideId": 3
+      },
+      "refB": {
+        "kind": "guideLine",
+        "guideId": 2,
+        "edge": 0
+      }
+    }
+  ],
+  "groups": [],
+  "guides": [
+    {
+      "id": 1,
+      "kind": "poly",
+      "pts": [
+        {
+          "x": -691.48518089921,
+          "y": -89.1887633043779
+        },
+        {
+          "x": 5746.426989565288,
+          "y": -213.91480147361816
+        }
+      ],
+      "closed": false
+    },
+    {
+      "id": 2,
+      "kind": "poly",
+      "pts": [
+        {
+          "x": -790.5360364397807,
+          "y": 3133.0646556153533
+        },
+        {
+          "x": 5933.505369839645,
+          "y": 2926.171073883678
+        }
+      ],
+      "closed": false
+    },
+    {
+      "id": 3,
+      "kind": "arc",
+      "a": {
+        "x": 6438.994248578267,
+        "y": 2.369651603099316
+      },
+      "m": {
+        "x": 7196.869462296778,
+        "y": 1628.6207470525942
+      },
+      "b": {
+        "x": 5519.553638972131,
+        "y": 2929.0946893659575
+      }
+    }
+  ],
+  "instances": [],
+  "patterns": [],
+  "components": []
+}

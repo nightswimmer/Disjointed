@@ -61,14 +61,48 @@ pick the next phase up without re-doing the brainstorm.
 - **Text**: no angle of its own (free labels are horizontal; anchored ones follow the body),
   a fixed font, no alignment options, width estimated (`0.58 × size × chars`) for hit tests.
   Labels don't travel with copy/paste or into component definitions (guides never did).
-- **Reference geometry as constraint targets**: point-on-circle / tangent constraints,
-  concentric; an arc's centre as a reference point (it's derived today, so not a solver var).
+- **Reference geometry as constraint targets**: tangent shipped (2026-09-13 — the
+  `guideCircle` ref covers reference circles and arcs, `disk` covers disk bodies and round
+  holes). Still missing: point-on-circle, concentric, circle–circle tangency, and an arc's
+  centre as a reference *point* (derived, not a solver var — a `guideCircle` ref resolves to
+  it, but nothing can be made coincident with it).
 - **Shortcuts** for the new tools are Shift+letter picks (Shift+B rectangle, Shift+C circle,
   Shift+P polygon, Shift+S slot, Shift+L line, Shift+A arc, Shift+T text) — easy to change
   in `SHIFT_TOOL_KEYS` (src/main.ts) and the manual's shortcut list.
 - Manual: the new tool topics are text-only; gesture illustrations (before / mid / after)
   for the shape tools would fit the existing `scripts/manual/shots.ts` pipeline (the
   role-styled preview is exposed through `RenderInput.shapeDraft`).
+
+## Tangential constraint — needs another pass (2026-09-13)
+
+Shipped in the "Tangential constraint" commit (design in PROJECT_INSTRUCTIONS.md, tests in
+`scripts/tangent-constraint.ts`), but the user's field tests with `tangential.json` (two long
+reference lines + a reference arc: the rounded end of a slot) found it still wanting. The
+session closed before the specifics were written down — **ask what was seen first**, then
+start from these known weak spots:
+
+- **The arc is three points** (`a` / `m` / `b`), not centre / radius / angles. When a point is
+  held, the others take a Newton step along the line's normal and the radius and sweep change
+  as a side effect rather than being parameters the user controls. The structural fix is a
+  real arc parametrisation in the sketch solver — either new variable kinds (centre, radius,
+  start / end angle) or the regular-polygon route: keep the three points and add a coupling
+  item that holds radius / sweep unless a size dimension says otherwise.
+- **Who moves in a blend.** With everything free, a coincident that glues an arc end to a
+  line end makes the *line* swing about the shared end (its far end moves) as much as the arc
+  adapts — a 50/50 split by rank. CAD users expect the arc to absorb it. Options: a lower
+  mobility preference for reference arcs, or the arc taking the whole turn whenever both are
+  free guides (Fixed / H / V on the line already forces that).
+- **No held side.** A circle dragged through its line re-attaches on the far side; a stored
+  side (as a driving dimension keeps) would make it stick.
+- **Coverage.** Circles are disks, round holes, reference circles and arcs only: no tangency
+  to a body's rounded corner (the fillet arc), no circle–circle or arc–arc (G1 between two
+  arcs), no point-on-circle / concentric.
+- **Pinned-end detection** (`pinnedArcEnd`) recognises a coincident between an arc end and
+  the line's end, its midpoint, or the line itself — not an arc end coincident with a joint
+  that merely sits on the line.
+- **Tuning.** Convergence rests on Newton probes with hand-set floors (0.1 · r for the arc,
+  0.1 · L for the line) and a 0.5 rad cap per sweep. `sketchConfig.trace` prints the worst
+  residual per sweep — run it on the field file before touching a number.
 
 ## Toolbar — next step: sim mode
 
@@ -193,8 +227,9 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   its tooltip); the text-size, actuator/motor and solver-tuning fields live in a fixed
   properties strip right of the rack. Placeholder buttons (dimmed, "not implemented yet"
   toast) now hold places for **Subtract**, **Intersect** and **Tangential** — the manual
-  should not describe them as working tools. (**Fixed** and **Symmetrical** were
-  placeholders here too and are now real tools — see the entries below.) `GROUP_TOPICS` in
+  should not describe them as working tools. (**Fixed**, **Symmetrical** and **Tangential**
+  were placeholders here too and are now real tools — see the entries below; only Subtract
+  and Intersect remain dimmed.) `GROUP_TOPICS` in
   `src/helpmap.ts` now keys on the `sec-*` ids; the manual generator reads section membership
   through `.tb-sec[id], .group[id]` (`scripts/manual/shoot.ts`), so `glyphs.js` /
   `DISJOINTED_GROUPS` will change shape on the next `npm run manual`.
@@ -301,3 +336,28 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   with a dot each side** (`drawMirrorGlyph`, the toolbar icon) on both elements *and* on
   the mirror line; hovering a badge links the pair. The *Constraints* overview now counts
   **eight** tools. README.md is already updated.
+- **Tangential constraint implemented (2026-09-13).** The dimmed `#tangent-btn` placeholder
+  became a real tool (`data-tool="tangent"`, key `Z` — the last free plain letter, T being
+  perpendicular; fold into the planned shortcut remap). A **text-only** `tool-tangent` topic
+  was written (same reason as Fixed / Symmetrical: `npm run manual` hard-fails on a missing
+  topic) plus the `Z` entry on the Constraints line of the shortcut list; it needs the
+  illustration pass, and the Constraints group's toolbar shot needs reshooting anyway.
+  Behaviour to document: **two clicks, either order** — a **circle or arc** (a disk body's
+  rim, a round hole, a reference circle, a reference arc) and a **line** (body edge, rail,
+  reference segment); the status bar says which one is still missing, and a wrong pick is
+  explained ("Tangential already has its circle — click the line here…"). The line becomes
+  tangent to the circle: the centre sits one radius off the line, on the side it already is.
+  The radius never changes (a disk is sized by its diameter dimension / rim handle, an arc
+  moves as a rigid piece); who moves is the usual rank rule — a free reference circle comes to
+  a body edge, a disk comes to a Fixed edge, a Fixed disk pushes the edge, two free bodies meet
+  halfway; dragging the disk slides it along the line; driving a tangent disk's diameter
+  re-solves so the line follows the new rim; a circle dragged through its line re-attaches on
+  the far side. The badge is a drawn **circle touching a line** (`drawTangentGlyph`, the
+  toolbar icon) — **one** badge, at the contact point, offset away from the circle; hovering
+  it highlights the rim / arc and the line (no link line). While the tool is armed, a circle
+  under the cursor highlights as its whole rim (an arc as its arc), like the Measure tool's
+  diameter pick. Also worth a sentence (and an illustration: two lines + arc, before /
+  after): **blending a line into an arc** — tangent, then a Coincident between the arc's
+  end and the line's end — makes the line touch the arc exactly at the shared end, and
+  dragging that end swings the line. The *Constraints* overview now counts **nine** tools
+  and its badge list gains the tangent glyph. README.md is already updated.

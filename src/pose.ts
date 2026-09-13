@@ -7,7 +7,7 @@
  * constraining work as if everything were flat.
  *
  * Every pose item reduces to a closed-form rigid correction (`PoseMove`):
- * - distances, coincident, point-on-line and point-pair H/V → a **translation**;
+ * - distances, coincident, point-on-line, point-pair H/V and tangent → a **translation**;
  * - line H/V, parallel, perpendicular → a **rotation** about the constrained line's
  *   midpoint (which keeps the line in place while aligning it — translations and
  *   rotations then alternate in the same Gauss-Seidel rounds; each is exact, so a
@@ -46,6 +46,7 @@ import {
   DIM_VIOLATION_TOL,
   sameMeasureRef,
   sketchRefs,
+  isCircleRef,
 } from "./model";
 import { solve, Driver, SolveFreeze, resetPoseBaselines } from "./solver";
 import {
@@ -399,6 +400,21 @@ function constraintItem(scene: Scene, c: SketchConstraint): PoseItem {
     case "equal":
       // Both lengths are locked to their definitions — never satisfiable as a pose.
       return { id: c.id, kind: "constraint", refA: c.refA, refB: c.refB, error: () => Infinity, correction: () => null };
+    case "tangent":
+      // The circle's centre one radius off the infinite line, on its current side: the
+      // line side shifts along the line's normal (the circle side the opposite way).
+      return translateItem(c, () => {
+        const circleRef = isCircleRef(c.refA) ? c.refA : c.refB;
+        const lineRef = circleRef === c.refA ? c.refB : c.refA;
+        if (!circleRef || !lineRef) return null;
+        const circ = scene.circleOfRef(circleRef);
+        const ln = scene.resolveMeasureRef(lineRef);
+        if (!circ || !ln || ln.kind !== "line" || lineLen(ln) < 1e-9) return null;
+        const n = perp(scale(sub(ln.b, ln.a), 1 / lineLen(ln)));
+        const s = dot(sub(circ.c, ln.a), n);
+        const deltaCircle = scale(n, (s < 0 ? -circ.r : circ.r) - s); // moves the circle side
+        return circleRef === c.refA ? scale(deltaCircle, -1) : deltaCircle; // stated for the refB side
+      });
     case "symmetric": {
       // Two points: B translates onto A's image across the mirror (or A onto B's). Two
       // lines: turn to the mirrored angle first, then shift onto the other's image, as
@@ -688,6 +704,7 @@ function refUnitMembers(
     case "edge":
     case "bodyPoint":
     case "centre":
+    case "disk":
       return addBody(ref.bodyId) ? out : null;
     case "joint": {
       const j = scene.getJoint(ref.jointId);
@@ -724,7 +741,8 @@ function driverAt(scene: Scene, ref: MeasureRef, p: Vec2): Driver | null {
     case "vertex":
     case "bodyPoint":
     case "edge":
-    case "centre": {
+    case "centre":
+    case "disk": {
       const b = scene.getBody(ref.bodyId);
       if (!b) return null;
       return { bodyId: b.id, local: rotate(sub(p, b.pos), -b.angle), target: p };
