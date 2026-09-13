@@ -115,7 +115,7 @@
 
           <section class="tb-sec draw-only" id="sec-color" data-sec="color">
             <div class="tb-grid">
-              <input id="body-color" class="tb-tall" type="color" value="#4f9dff"
+              <input id="body-color" class="tb-tall color-chip" type="color" value="#4f9dff"
                 title="Body colour — recolours the selected body, or every body of a selected group / multi-selection; with nothing selected it sets the colour for new bodies"
                 aria-label="Body colour" />
             </div>
@@ -265,27 +265,67 @@
 
           <section class="tb-sec" id="sec-grid" data-sec="grid">
             <div class="tb-grid">
-              <div class="combo" id="grid-size-combo">
-                <button id="grid-size-btn" class="combo-btn" title="Grid spacing in working units (1–200) — pick a preset or add your own" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid size">
-                  <span id="grid-size-value">40</span>
-                  <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
-                </button>
-                <div id="grid-size-menu" class="combo-menu hidden" role="listbox" aria-label="Grid size presets">
-                  <div id="grid-size-list" class="combo-list"></div>
-                  <form id="grid-size-add" class="combo-add" autocomplete="off">
-                    <input id="grid-size-new" type="number" min="1" max="200" step="any" placeholder="Custom…" aria-label="Add a custom grid size" />
-                    <button type="submit" class="combo-add-btn" title="Add this value to the list and use it" aria-label="Add grid size">+</button>
-                  </form>
+              <!-- Two independent rows (not a 2-column grid): the spacing keeps its own
+                   compact width up top, and below it the line-style sample takes whatever
+                   the square colour chip leaves, so both rows fill the same width. -->
+              <div class="tb-row">
+                <div class="combo" id="grid-size-combo">
+                  <button id="grid-size-btn" class="combo-btn" title="Grid spacing in working units (1–200) — pick a preset or add your own" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid size">
+                    <span id="grid-size-value">40</span>
+                    <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
+                  </button>
+                  <div id="grid-size-menu" class="combo-menu hidden" role="listbox" aria-label="Grid size presets">
+                    <div id="grid-size-list" class="combo-list"></div>
+                    <form id="grid-size-add" class="combo-add" autocomplete="off">
+                      <input id="grid-size-new" type="number" min="1" max="200" step="any" placeholder="Custom…" aria-label="Add a custom grid size" />
+                      <button type="submit" class="combo-add-btn" title="Add this value to the list and use it" aria-label="Add grid size">+</button>
+                    </form>
+                  </div>
                 </div>
+                <label class="select-label" id="unit-label" title="Working units — what one world unit means; measurements display it and DXF import converts into it (saved with the file)">
+                  <select id="unit-select" aria-label="Working units">
+                    <option value="mm">mm</option>
+                    <option value="cm">cm</option>
+                    <option value="m">m</option>
+                    <option value="in">in</option>
+                  </select>
+                </label>
               </div>
-              <label class="select-label" id="unit-label" title="Working units — what one world unit means; measurements display it and DXF import converts into it (saved with the file)">
-                <select id="unit-select" aria-label="Working units">
-                  <option value="mm">mm</option>
-                  <option value="cm">cm</option>
-                  <option value="m">m</option>
-                  <option value="in">in</option>
-                </select>
-              </label>
+              <div class="tb-row">
+                <div class="combo" id="grid-style-combo">
+                  <button id="grid-style-btn" class="combo-btn gs-solid" title="Grid line style — solid, dashed or dotted lines, or a dot at each intersection" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid line style">
+                    <span class="gs-preview" aria-hidden="true"></span>
+                    <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
+                  </button>
+                  <div id="grid-style-menu" class="combo-menu hidden" role="listbox" aria-label="Grid line style">
+                    <div class="combo-list" id="grid-style-list">
+                    <div class="combo-item gs-solid" role="option" aria-selected="true">
+                      <button type="button" class="combo-pick gs-opt" data-style="solid" title="Solid" aria-label="Solid">
+                        <span class="gs-preview" aria-hidden="true"></span>
+                      </button>
+                    </div>
+                    <div class="combo-item gs-dashed" role="option" aria-selected="false">
+                      <button type="button" class="combo-pick gs-opt" data-style="dashed" title="Dashed" aria-label="Dashed">
+                        <span class="gs-preview" aria-hidden="true"></span>
+                      </button>
+                    </div>
+                    <div class="combo-item gs-dotted" role="option" aria-selected="false">
+                      <button type="button" class="combo-pick gs-opt" data-style="dotted" title="Dotted" aria-label="Dotted">
+                        <span class="gs-preview" aria-hidden="true"></span>
+                      </button>
+                    </div>
+                    <div class="combo-item gs-points" role="option" aria-selected="false">
+                      <button type="button" class="combo-pick gs-opt" data-style="points" title="Points — a dot at each intersection" aria-label="Points">
+                        <span class="gs-preview" aria-hidden="true"></span>
+                      </button>
+                    </div>
+                    </div>
+                  </div>
+                </div>
+                <input id="grid-color" class="color-chip" type="color"
+                  title="Grid colour — kept per theme (light and dark each have their own); right-click the swatch to go back to the default"
+                  aria-label="Grid colour" />
+              </div>
             </div>
             <div class="tb-cap">Grid
               <button id="grid-btn" class="cap-eye active" title="Show or hide the grid (toggle)" aria-label="Toggle grid">

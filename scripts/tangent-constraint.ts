@@ -193,7 +193,7 @@ function touch(s: Scene, arcRef: MeasureRef, lineRef: MeasureRef) {
   return { c: A.c, r: A.r, foot: { x: L.a.x + L.u.x * t, y: L.a.y + L.u.y * t }, end: L.b };
 }
 {
-  // Field repro (tangential.json): two long, nearly parallel reference lines and a
+  // Field repro (a user scene, not kept in the repo): two long, nearly parallel reference lines and a
   // ~154° arc — the rounded end of a slot — on 6000-unit geometry. The tangents alone
   // were fine; the coincident that should blend a line into the arc used to be refused:
   // the tangent (translating the whole arc) and the coincident (pulling one end back)

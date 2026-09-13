@@ -159,6 +159,10 @@ export interface RenderInput {
   gridStep: number;
   /** Whether to draw the world-locked grid. */
   gridVisible: boolean;
+  /** How the grid is drawn (see `GridStyle`). */
+  gridStyle: GridStyle;
+  /** The user's grid colour for this theme; absent = the theme's own `grid` tone. */
+  gridColor?: string;
   /** Unsatisfiable constraints (impossible assembly): red dotted lines between points that can't meet. */
   breaks: ConstraintBreak[];
   /**
@@ -176,6 +180,15 @@ export interface RenderInput {
  * the semantic accents (pin blue, slider/rail green, ground/rotate yellow, error red) and
  * per-body colours read fine on either background and stay hardcoded below.
  */
+/**
+ * How the world-locked grid is drawn: continuous lines, dashed or dotted lines, or just
+ * a dot at each intersection (`points`). A user setting, kept in localStorage by main.
+ */
+export type GridStyle = "solid" | "dashed" | "dotted" | "points";
+
+/** Every grid style, in the order the toolbar offers them. */
+export const GRID_STYLES: readonly GridStyle[] = ["solid", "dashed", "dotted", "points"];
+
 export interface Theme {
   /** High-contrast "ink": selection highlights, draft outlines, edit-handle fill. */
   ink: string;
@@ -334,7 +347,9 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
 
   // (With a group open the grid is drawn after the isolation veil instead — it is the
   // paper, not part of the drawing, so it never fades with the surroundings.)
-  if (input.gridVisible && !input.isolate) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
+  if (input.gridVisible && !input.isolate) {
+    drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, input.gridColor ?? theme.grid, input.gridStyle);
+  }
 
   // Reference geometry (draw mode only): polylines / circles / arcs and text labels,
   // dash-dot under the geometry, with crosshair handles on their defining points (drag
@@ -809,7 +824,9 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.restore();
     // The grid belongs to the canvas, not to the drawing: it is drawn here, over the
     // veil, at its normal strength (and under the group's own material, as always).
-    if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
+    if (input.gridVisible) {
+      drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, input.gridColor ?? theme.grid, input.gridStyle);
+    }
     for (const body of scene.bodies) if (isoBodies.has(body.id)) drawBodyShape(body);
     for (const j of scene.joints) {
       if (isoJoints.has(j.id) || (j.bodyId !== null && isoBodies.has(j.bodyId))) drawJoint(j);
@@ -1985,29 +2002,71 @@ function drawGuideLine(
   ctx.setLineDash([]);
 }
 
+/**
+ * The world-locked grid, in the style the user picked. `unit` is one screen pixel in
+ * world units, so line width, dash lengths and dot size stay constant at any zoom.
+ * `points` marks the intersections instead of drawing lines — the least obtrusive grid,
+ * and the reason this takes a style at all.
+ */
 function drawGrid(
   ctx: CanvasRenderingContext2D,
   left: number,
   top: number,
   right: number,
   bottom: number,
-  lineWidth: number,
+  unit: number,
   step: number,
-  color: string
+  color: string,
+  style: GridStyle
 ): void {
+  const x0 = Math.floor(left / step) * step;
+  const y0 = Math.floor(top / step) * step;
+  ctx.save();
+  if (style === "points") {
+    // Every dot is a sub-path of ONE path filled once: a fill per dot costs far more,
+    // and the count is quadratic in the zoom. Denser than GRID_POINT_MAX the dots would
+    // merge into a flat wash anyway, so the grid simply isn't drawn (as any line grid
+    // at that density is unreadable too).
+    const nx = Math.floor((right - x0) / step) + 1;
+    const ny = Math.floor((bottom - y0) / step) + 1;
+    if (nx * ny <= GRID_POINT_MAX) {
+      const r = unit * 0.9;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      for (let x = x0; x <= right; x += step) {
+        for (let y = y0; y <= bottom; y += step) {
+          ctx.moveTo(x + r, y); // the arc's own start: no chord from the previous dot
+          ctx.arc(x, y, r, 0, Math.PI * 2);
+        }
+      }
+      ctx.fill();
+    }
+    ctx.restore();
+    return;
+  }
   ctx.strokeStyle = color;
-  ctx.lineWidth = lineWidth;
+  ctx.lineWidth = unit;
+  if (style === "dashed") ctx.setLineDash([unit * 4, unit * 4]);
+  else if (style === "dotted") {
+    // A zero-length dash under a round cap is a round dot (the CAD dotted line).
+    ctx.setLineDash([0, unit * 3]);
+    ctx.lineCap = "round";
+  }
   ctx.beginPath();
-  for (let x = Math.floor(left / step) * step; x <= right; x += step) {
+  for (let x = x0; x <= right; x += step) {
     ctx.moveTo(x, top);
     ctx.lineTo(x, bottom);
   }
-  for (let y = Math.floor(top / step) * step; y <= bottom; y += step) {
+  for (let y = y0; y <= bottom; y += step) {
     ctx.moveTo(left, y);
     ctx.lineTo(right, y);
   }
   ctx.stroke();
+  ctx.restore();
 }
+
+/** Above this many visible intersections the dotted-point grid is skipped (see drawGrid). */
+const GRID_POINT_MAX = 20000;
 
 /**
  * Construction-point marker for reference-geometry points: a thin "+" with a small open ring

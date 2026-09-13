@@ -76,7 +76,7 @@ pick the next phase up without re-doing the brainstorm.
 ## Tangential constraint — needs another pass (2026-09-13)
 
 Shipped in the "Tangential constraint" commit (design in PROJECT_INSTRUCTIONS.md, tests in
-`scripts/tangent-constraint.ts`), but the user's field tests with `tangential.json` (two long
+`scripts/tangent-constraint.ts`), but the user's field tests with a scene of their own (two long
 reference lines + a reference arc: the rounded end of a slot) found it still wanting. The
 session closed before the specifics were written down — **ask what was seen first**, then
 start from these known weak spots:
@@ -209,6 +209,24 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   group's toolbar illustration needs reshooting. README.md is already updated (the manual is
   the only doc still stale).
 
+- **Grid colour and line style (2026-09-13).** Manual (*Grid & snapping*, and the Grid
+  group's toolbar entry / illustration): the Grid group gained a **style picker**
+  (`#grid-style-btn`, under the size combo) and a **colour swatch** (`#grid-color`, under
+  the units) — the group's four controls now sit in two flex rows (spacing + units on top,
+  style + colour below) rather than the usual column-major grid, so its toolbar shot needs
+  reshooting. Behaviour to document: the style picker is
+  a combo like the grid size's, but its button and its four rows are **pictures, not
+  words** — a sample of the line itself, with the name on the tooltip; *points* shows as a
+  few widely spaced dots, which is what tells it from *dotted* at that size. Styles are
+  *Solid*, *Dashed*, *Dotted* and *Points* (a dot at each
+  intersection); both settings persist in localStorage (`disjointed:gridLook`); the colour
+  is kept **per theme** (the swatch edits the theme you are in, switching themes brings that
+  theme's grid back); **right-click the swatch** resets that theme to its default tone (a
+  double-click can't work — the first click opens the browser's colour dialog); line weight,
+  dash lengths and dot size are constant on screen at any zoom, and the Points grid stops
+  drawing above ~20 000 visible intersections, where the dots would merge into a wash. Both
+  new ids point at the existing `grid` topic in `ID_TOPICS`, so no new topic is needed.
+  README.md is already updated.
 - **Toolbar regrouped into draggable sections (2026-09-13).** The flat toolbar became a rack
   of named sections (`#tb-sections > .tb-sec`), each a two-row grid filled column by column
   under a caption that is also its drag handle (`src/toolbar.ts`; order in localStorage

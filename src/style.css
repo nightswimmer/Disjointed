@@ -213,6 +213,25 @@ body.tb-dragging-on * {
   padding: 0 5px 0 8px;
 }
 
+/* This group's controls are laid out as two independent rows rather than one 2-column
+   grid: a grid would tie the spacing button's width to the line-style sample's, and the
+   sample only wants to be wide. Each row stretches to the group's width and shares it
+   out itself. */
+#sec-grid .tb-grid {
+  justify-items: stretch;
+}
+
+.tb-row {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  gap: 2px;
+}
+
+.tb-row .color-chip {
+  flex: none;
+}
+
 #sec-grid select {
   padding: 5px 4px;
 }
@@ -784,7 +803,61 @@ input[type="number"]#motor-speed {
 }
 
 /* Body-colour swatch: a square chip that matches the icon-button footprint. */
-input[type="color"]#body-color {
+/* Grid line-style picker: the button and every row show a sample of the line itself
+   instead of a word. The sample is drawn in CSS — a border for the three line styles,
+   repeated dots for "points" — so it stretches to whatever width its row leaves it,
+   which an SVG of fixed geometry could not do without distorting its dots. The gs-*
+   class sits on the *container* (the button, or the menu row), so one sample element
+   serves every style. "Points" marks intersections rather than drawing lines, so its
+   sample is a few widely spaced dots: at this size that is what tells it from "dotted". */
+.gs-preview {
+  flex: 1;
+  min-width: 30px;
+  height: 0;
+  border-top: 2px solid currentColor;
+}
+
+.gs-dashed .gs-preview {
+  border-top-style: dashed;
+}
+
+.gs-dotted .gs-preview {
+  border-top-style: dotted;
+}
+
+.gs-points .gs-preview {
+  height: 4px;
+  border-top: none;
+  background-image: radial-gradient(circle at 2px 50%, currentColor 1.9px, transparent 2.1px);
+  background-size: 15px 4px;
+  background-repeat: repeat-x;
+}
+
+/* The style combo takes the width its row has left over (the colour chip is square), and
+   its menu lines up with it. The rows are pure pictures — no text to set a width. */
+#grid-style-combo {
+  flex: 1;
+  min-width: 0;
+}
+
+#grid-style-btn {
+  width: 100%;
+}
+
+#grid-style-menu {
+  min-width: 100%;
+}
+
+.gs-opt {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 9px 10px;
+}
+
+/* Colour swatches (the body colour, the grid colour): a chip that fills its cell — one
+   toolbar row, or the whole column when it also carries .tb-tall. */
+input[type="color"].color-chip {
   width: 32px;
   height: 100%;
   min-height: 32px;
@@ -795,11 +868,11 @@ input[type="color"]#body-color {
   cursor: pointer;
 }
 
-input[type="color"]#body-color::-webkit-color-swatch-wrapper {
+input[type="color"].color-chip::-webkit-color-swatch-wrapper {
   padding: 0;
 }
 
-input[type="color"]#body-color::-webkit-color-swatch {
+input[type="color"].color-chip::-webkit-color-swatch {
   border: none;
   border-radius: 3px;
 }

@@ -64,7 +64,7 @@ import {
   anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
 } from "./sketch";
 import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolated } from "./pose";
-import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView, dimensionLabelHit, dimensionLabelWidth, LabelHit } from "./renderer";
+import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView, GridStyle, GRID_STYLES, dimensionLabelHit, dimensionLabelWidth, LabelHit } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine, distToArc, regularPolygon, arcThrough, sampleArc } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt, rotateViewTo, rotateToScreen, rotateToWorld } from "./view";
 import { installHelp } from "./help";
@@ -115,6 +115,10 @@ const gridSizeMenu = document.getElementById("grid-size-menu") as HTMLDivElement
 const gridSizeList = document.getElementById("grid-size-list") as HTMLDivElement;
 const gridSizeAddForm = document.getElementById("grid-size-add") as HTMLFormElement;
 const gridSizeNew = document.getElementById("grid-size-new") as HTMLInputElement;
+const gridColorInput = document.getElementById("grid-color") as HTMLInputElement;
+const gridStyleBtn = document.getElementById("grid-style-btn") as HTMLButtonElement;
+const gridStyleMenu = document.getElementById("grid-style-menu") as HTMLDivElement;
+const gridStyleList = document.getElementById("grid-style-list") as HTMLDivElement;
 const themeBtn = document.getElementById("theme-btn") as HTMLButtonElement;
 const modeToggle = document.getElementById("mode-toggle") as HTMLButtonElement;
 const modeCap = document.getElementById("mode-cap")!;
@@ -227,6 +231,7 @@ function setTheme(next: "dark" | "light"): void {
   theme = next;
   localStorage.setItem(THEME_KEY, theme);
   applyTheme();
+  syncGridLook(); // the grid colour is per theme: show the one now in force
 }
 function toggleTheme(): void {
   setTheme(theme === "dark" ? "light" : "dark");
@@ -490,6 +495,121 @@ let animPhaseASum = 0;
 let animPhaseAMax = 0;
 let animResidualSum = 0;
 let animResidualMax = 0;
+
+// --- grid appearance -------------------------------------------------------
+// Colour and line style of the world grid. A display preference like the theme, so it
+// lives in localStorage rather than in the document — nothing about it belongs to the
+// mechanism. The colour is kept **per theme**: a tone that reads against the dark
+// background disappears against the light one, so the swatch always edits the theme you
+// are in and switching themes brings that theme's grid back.
+const GRID_LOOK_KEY = "disjointed:gridLook";
+interface GridLook {
+  /** Per-theme colour override; null = that theme's own grid tone. */
+  color: { dark: string | null; light: string | null };
+  style: GridStyle;
+}
+function loadGridLook(): GridLook {
+  const hex = (c: unknown): string | null =>
+    typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c : null;
+  try {
+    const raw = localStorage.getItem(GRID_LOOK_KEY);
+    const v = raw ? (JSON.parse(raw) as Partial<GridLook>) : null;
+    return {
+      color: { dark: hex(v?.color?.dark), light: hex(v?.color?.light) },
+      style: GRID_STYLES.includes(v?.style as GridStyle) ? (v!.style as GridStyle) : "solid",
+    };
+  } catch {
+    return { color: { dark: null, light: null }, style: "solid" };
+  }
+}
+let gridLook: GridLook = loadGridLook();
+function saveGridLook(): void {
+  try {
+    localStorage.setItem(GRID_LOOK_KEY, JSON.stringify(gridLook));
+  } catch {
+    /* storage unavailable (private mode): the setting just doesn't outlive the session */
+  }
+}
+/** The current theme's own grid tone — what the swatch shows while there is no override. */
+const themeGridColor = (): string => (theme === "light" ? LIGHT_THEME : DARK_THEME).grid;
+/** The grid colour in force, or undefined to leave it to the theme (see RenderInput). */
+const gridColorOverride = (): string | undefined => gridLook.color[theme] ?? undefined;
+/** Put the current theme's colour and the chosen style back into the two controls. */
+function syncGridLook(): void {
+  gridColorInput.value = gridLook.color[theme] ?? themeGridColor();
+  // The style picker is a picture, not a word: the gs-* class on the button draws the
+  // sample (see style.css), and the matching row is marked selected.
+  for (const s of GRID_STYLES) gridStyleBtn.classList.toggle(`gs-${s}`, s === gridLook.style);
+  for (const item of gridStyleList.querySelectorAll<HTMLElement>(".combo-item")) {
+    const on = item.querySelector<HTMLElement>(".gs-opt")?.dataset.style === gridLook.style;
+    item.classList.toggle("selected", on);
+    item.setAttribute("aria-selected", String(on));
+  }
+}
+gridColorInput.addEventListener("input", () => {
+  gridLook.color[theme] = gridColorInput.value;
+  saveGridLook();
+});
+// Right-click restores the theme default: a colour input can't express "no override" by
+// itself, and a double-click can't be used for it — the first click already opens the
+// browser's colour dialog.
+gridColorInput.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  if (gridLook.color[theme] === null) return;
+  gridLook.color[theme] = null;
+  saveGridLook();
+  syncGridLook();
+  notify("Grid colour back to the theme default.", "info");
+});
+// The style picker is a combo like the grid size's: a button showing the current sample,
+// dropping a list of the four samples (no text — the picture is the label, its name is on
+// the tooltip).
+function openGridStyleMenu(): void {
+  closeGridSizeMenu(); // the two combos sit side by side: only one is ever open
+  gridStyleMenu.classList.remove("hidden");
+  gridStyleBtn.setAttribute("aria-expanded", "true");
+  gridStyleBtn.classList.add("active");
+  // Focus the current style's row: Tab then walks the samples, and Escape (handled on the
+  // menu) reaches it — the size combo gets this for free from its Custom… field.
+  gridStyleList.querySelector<HTMLButtonElement>(".combo-item.selected .gs-opt")?.focus();
+}
+function closeGridStyleMenu(): void {
+  if (gridStyleMenu.classList.contains("hidden")) return;
+  gridStyleMenu.classList.add("hidden");
+  gridStyleBtn.setAttribute("aria-expanded", "false");
+  gridStyleBtn.classList.remove("active");
+}
+gridStyleBtn.addEventListener("click", () => {
+  if (gridStyleMenu.classList.contains("hidden")) openGridStyleMenu();
+  else closeGridStyleMenu();
+});
+for (const opt of gridStyleList.querySelectorAll<HTMLButtonElement>(".gs-opt")) {
+  opt.addEventListener("click", () => {
+    const v = opt.dataset.style as GridStyle;
+    if (GRID_STYLES.includes(v)) {
+      gridLook.style = v;
+      saveGridLook();
+      syncGridLook();
+    }
+    closeGridStyleMenu();
+    gridStyleBtn.focus();
+  });
+}
+gridStyleMenu.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    closeGridStyleMenu();
+    gridStyleBtn.focus();
+  }
+});
+// Click anywhere outside the combo dismisses it.
+document.addEventListener("pointerdown", (e) => {
+  if (gridStyleMenu.classList.contains("hidden")) return;
+  const t = e.target;
+  if (t instanceof Node && (gridStyleMenu.contains(t) || gridStyleBtn.contains(t))) return;
+  closeGridStyleMenu();
+});
+syncGridLook();
 
 // --- grid / snapping -------------------------------------------------------
 /** Grid spacing (and snap increment) in world units; mirrors the renderer's grid. */
@@ -2417,6 +2537,7 @@ function renderGridSizeList(): void {
   }
 }
 function openGridSizeMenu(): void {
+  closeGridStyleMenu(); // one open combo at a time (they are neighbours in the group)
   renderGridSizeList();
   gridSizeMenu.classList.remove("hidden");
   gridSizeBtn.setAttribute("aria-expanded", "true");
@@ -8963,6 +9084,8 @@ function renderInput(): RenderInput {
     rotatePivot: rotateDrag?.pivot ?? null,
     gridStep,
     gridVisible,
+    gridStyle: gridLook.style,
+    gridColor: gridColorOverride(),
     breaks: mode === "sim" ? solveBreaks : [],
     containmentErrors,
     measurements: measurementsView().concat(tempDimsView()),

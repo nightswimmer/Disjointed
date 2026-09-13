@@ -30,8 +30,8 @@ motion; actuators / motors animate.
 - The interactive canvas is not covered by tests: confirm UI changes by eye (or with a throwaway
   Playwright script against `npm run dev` with `?automation`, which exposes `window.__disjointed`).
 - Field-repro scenes in the repo root: `FrontPanelHinge.json`, `gate hinge tests.json` (the
-  "Door Assembly 6" pattern/dimension case), `tangential.json` (two reference lines + a
-  reference arc: the tangent / line-blends-into-arc case).
+  "Door Assembly 6" pattern/dimension case). The tangent / line-blends-into-arc repro is
+  **not** kept as a scene: its geometry is embedded in `scripts/tangent-constraint.ts`.
 
 ## Module map (`src/`)
 | Module | Role |
@@ -214,7 +214,8 @@ motion; actuators / motors animate.
   along the normal (`CircleHandle.correct`), and a line with one held end **turns about
   it** instead of shifting (`turnOrShiftLine`; both held → nothing; an H/V-held line only
   shifts). Rationale: a tangent translating the whole arc while a coincident pulled one
-  end back chased itself into ever bigger circles (field repro `tangential.json`).
+  end back chased itself into ever bigger circles (the field repro — its geometry is the
+  blend case in `scripts/tangent-constraint.ts`).
   **A tangent pinned to an arc end is an angle condition** (`pinnedArcEnd`): when a
   coincident glues an arc end onto the tangent's line (its end, its midpoint, or
   point-on-line), the residual becomes the centre's offset *along the line* from that
@@ -328,7 +329,10 @@ motion; actuators / motors animate.
 - **Toolbar = a rack of draggable groups** (`#tb-sections > .tb-sec`, `src/toolbar.ts`): each is a
   two-row grid filled *column-major* (`grid-auto-flow: column`, so markup order reads down-then-
   across; `.tb-tall` / `.tb-mid` span or centre a lone control) under a caption strip that is also
-  its drag handle. Dragging reorders the DOM live and FLIP-animates the others, deciding insertion
+  its drag handle. One group opts out: **Grid** puts its four controls in two `.tb-row` flex rows
+  (spacing + units, then line style + colour), because the column grid tied the spacing button's
+  width to the wide line-style sample; each row now shares out the group's width itself, the
+  sample taking whatever the square colour chip leaves. Dragging reorders the DOM live and FLIP-animates the others, deciding insertion
   on `offsetLeft`/`offsetTop` (layout values, immune to the drag transform and to a running
   slide); double-click a caption to reset. Per-mode visibility is the `draw-only` / `sim-only`
   classes, never a hard-coded group list. Selection- or tool-dependent fields live in `#tb-props`
@@ -344,7 +348,11 @@ motion; actuators / motors animate.
 - Every mutation goes through `markDirty` → snapshot history + autosave + component-context sync +
   pose-baseline reset. `canonicalData()` is the root document without sim poses.
 - Session-only state (grid, snap, osnap, visibility toggles, solver tuning) is not persisted;
-  theme, help-drawer width, grid presets, backup settings and the toolbar group order live in localStorage.
+  theme, help-drawer width, grid presets, the **grid's colour + line style**
+  (`disjointed:gridLook`), backup settings and the toolbar group order live in localStorage.
+  The grid colour is stored **per theme** (`{ dark, light }`, null = that theme's own tone):
+  one colour can't read on both backgrounds. The renderer takes it as `RenderInput.gridColor`
+  (absent = `theme.grid`) rather than through a mutated `Theme`, so the palettes stay constant.
 - Selection kinds: single `selection` vs `multiSel` (groups and instances are selection-atomic)
   vs `featureSel` (vertices + joints of one body). Ctrl+G is a group toggle; plain G is Ground.
 - **Group isolation** (`groupEdit`, main.ts): a double-click opens one group for editing from the
@@ -401,7 +409,8 @@ load, copy/paste, pose route incl. a mirror riding with the moved side) · tange
 (validation incl. problem ↔ refusal in step; who moves — locked edge / free reference circle /
 rigid arc / locked disk / equal ranks; drag follow; a diameter edit re-solving the tangent;
 conflict reject; remaps: node added to the hole, hole removal, cascades, copy/paste, load;
-sketch vs pose route; the line-blends-into-arc idiom on the `tangential.json` geometry incl.
+sketch vs pose route; the line-blends-into-arc idiom on the field-repro geometry — two long
+reference lines and a ~154° arc on 6000-unit coordinates — incl.
 sweep count, an H-held line, point-on-line pinning and a drag of the shared end) · midpoint (midpoint refs: resolve, validate, solve, who
 moves, follow-the-line remaps, load) · groups · group-joints · grounded-bodies ·
 freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression with solver stats) ·
@@ -450,7 +459,7 @@ it for the exact cases.
   (S is the slider) and `Z` the Tangential one (T is perpendicular); a full shortcut remap
   is planned.
 - The **Tangential constraint shipped but needs another pass**: the user's field tests with
-  `tangential.json` found it still wanting. HANDOFF.md lists the known weak spots (three-point
+  a two-line-and-an-arc scene of their own found it still wanting. HANDOFF.md lists the known weak spots (three-point
   arcs, the line swinging in a blend, no held side, coverage); ask what was seen before
   changing anything.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.

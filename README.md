@@ -573,7 +573,21 @@ selector** sets the spacing: click the value to open a
 list of presets (1 to 200), pick one, or type your own in the **Custom…** field at the bottom and
 press Enter / `+` — it applies straight away and joins the list (custom sizes are remembered in the
 browser; the `×` next to one removes it). Decimals are allowed. The **units** dropdown sits right
-after it. With Snap on, new joints and freehand vertices land on the grid,
+after it.
+
+The grid's **look** is yours to set, in the same group: a **style** picker under the size, and a
+**colour swatch** under the units. The style picker shows a **sample of the line itself** rather
+than a word — click it and the four choices drop down as samples too: **solid**, **dashed** or
+**dotted** lines, or **points**, which marks each intersection with a dot instead of drawing lines
+(its sample is a few widely spaced dots; it's the least obtrusive of the four). Each sample's name
+is on its tooltip. Both settings are remembered across sessions. The colour is kept **per theme**, since a tone
+that reads against the dark background disappears against the light one: the swatch always edits
+the theme you are in, and switching themes brings that theme's grid back. **Right-click the
+swatch** to return that theme to its default tone. Lines, dashes and dots keep the same on-screen
+weight at any zoom; the Points grid stops drawing when it gets so dense that the dots would merge
+into a flat wash.
+
+With Snap on, new joints and freehand vertices land on the grid,
 and dragging snaps too: a per-vertex reshape snaps the grabbed corner, while moving a whole body
 snaps whichever is nearest the grab point — the body's centroid or one of its corners. Visibility
 and snapping are independent (you can snap to a hidden grid).
