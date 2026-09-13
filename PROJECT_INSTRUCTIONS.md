@@ -75,8 +75,12 @@ motion; actuators / motors animate.
 - **Patterns**: seed hole/joint + layout; members are real holes/joints **re-derived** from the seed
   on every change.
 - **Measurements** and **sketch constraints** share `MeasureRef` (joint, vertex, edge, bodyPoint,
-  rail, guidePoint, guideLine, patternAxis, centre; vertex/edge refs carry an optional `hole`).
-  Refs always name **elements**, never coordinates. Dimensions may be `driving` (with `target` and
+  rail, guidePoint, guideLine, patternAxis, centre, midpoint; vertex/edge refs carry an optional `hole`).
+  Refs always name **elements**, never coordinates. A **`midpoint` nests its line's own ref**
+  (`of`: edge / rail / guideLine) instead of copying its fields, and every index remap
+  (node insert/remove, mirror, split, combine/cut, hole removal, copy/paste) works on
+  `refHost(ref)` — so a midpoint follows its line without any remap knowing about midpoints.
+  Keep that invariant: a new remap site must go through `refHost`. Dimensions may be `driving` (with `target` and
   a held `side`). The **one** exception to "never coordinates" is the `fixed` constraint: a lock
   in place *is* a coordinate and there is no element to name it with, so it carries `at` (the
   point, or a point on the locked line) and — line form only — `angle`. `angle !== undefined`
@@ -139,6 +143,14 @@ motion; actuators / motors animate.
   demotes conflicting driving size dims to driven.
 - **Pattern members ride with their seed** through rigid-offset couplings (an immovable rank
   deadlocked any solve that needed a patterned body to shift).
+- **Derived points are `PointHandle`s** (sketch.ts `acquirePoint`): the point items
+  (coincident / H / V pairs, point-on-line, the point form of `fixed`) read and push a point
+  through a handle, which is one variable or — for a `midpoint` — the mean of its line's two
+  end variables. A midpoint's rank is its most mobile end's; a push is spread over the ends by
+  rank (an end held by the drag or a lock stays put, the other swings twice as far), so a
+  midpoint never tugs the drag and never stalls on a locked end. `pointVarKey` stays null for
+  a midpoint: it is not a variable, so a `fixed` midpoint freezes neither end (dimensions
+  don't take midpoints — the Measure tool can't pick them).
 - **`fixed` is enforced unconditionally, not by rank**: its item writes the lock back every sweep
   whatever the ranks say, so a locked point resists even the drag and two locks that disagree
   never settle — the edit is then rejected, which is what an impossible lock should do (rank 3
@@ -154,7 +166,7 @@ motion; actuators / motors animate.
   and one stalled item fails every solve in the scene). Corner drags respect what the sketch leaves
   free (size driven → turn only; rotation locked → resize radially; both → move whole).
 - Auto-constraints **while drawing**: near-H/V edges (±5°) get H/V; a vertex placed on a
-  joint/corner/guide point gets a coincident. Always on (the switch below doesn't reach them).
+  joint/corner/guide point/line midpoint gets a coincident. Always on (the switch below doesn't reach them).
 - **Implicit constraints while dragging** (`DragAlign`, main.ts) arm after a 0.4 s hover and apply an
   exact alignment correction **before** placing the constraint — letting the solver close even a
   0.3 mm gap failed when the other side was dimension-pinned. Design points:
@@ -173,6 +185,12 @@ motion; actuators / motors animate.
   - Placement is per match, so one rejection doesn't lose the other.
   - `autoConstrain` (the Constraints group's switch) gates the whole thing at `newDragAlign` /
     `updateDragAlign`, so nothing is scanned when it's off.
+  - **Point targets beat line targets** in every pick (object snap, the alignment hover,
+    shape / reference-point placement): points are scanned first and a line only when no
+    point is in range. Line **midpoints** (edge / rail / reference segment) are point targets
+    with a real `midpoint` ref, so holding the middle of an edge arms the midpoint, not the
+    edge. The constraint tools and the Measure tool deliberately don't pick midpoints
+    (CAD convention: an inference, not a click target).
 
 ### Components
 - **The definition is the pose reference**: any def edit re-expands every instance (fixpoint through
@@ -264,7 +282,8 @@ solver-smoke (slider-crank + end-stops) · free-rail · ground-drag · impossibl
 persistence · build-body · shape-edit (fillet, containment, node↔joint link, radii, holes) ·
 edit-utils (rotate/mirror/copy/z-order) · actuators · measurements (incl. diameter/radius) ·
 sketch (constraints, dims, ranks, rigid carry, drift) · fixed-constraint (point / line locks,
-conflict rejects, mirror re-capture) · groups · group-joints · grounded-bodies ·
+conflict rejects, mirror re-capture) · midpoint (midpoint refs: resolve, validate, solve, who
+moves, follow-the-line remaps, load) · groups · group-joints · grounded-bodies ·
 freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression with solver stats) ·
 components · pose-dims · pose-constraints · split-combine · shapes (cut, references, v21 load) ·
 regular · guides · patterns · features · context-ghost · view · dxf · export.
@@ -298,8 +317,9 @@ it for the exact cases.
   every manual-relevant change is logged in HANDOFF.md ("pending manual updates") for one later pass.
   Currently pending there: guideline removal, parametric polygons and the "n sides" tag,
   projected corner-pair size dimensions, single-click line dimensions, the two-candidate /
-  point-on-point implicit constraints with their new toolbar switch, the Fixed constraint, and
-  stale what's-this strings. One manual exception so far: a **text-only** `tool-fixed` topic had
+  point-on-point implicit constraints with their new toolbar switch, the Fixed constraint,
+  line midpoints as snap / implicit-constraint / placement targets, and stale what's-this
+  strings. One manual exception so far: a **text-only** `tool-fixed` topic had
   to be written, because `npm run manual` hard-fails on a topic the app can ask for and every
   `data-tool` button implies one — it still needs the illustration pass like the rest.
 - Plain `L` arms the Fixed constraint (F was already fit-view); a full shortcut remap is planned.
@@ -327,7 +347,10 @@ it for the exact cases.
   carried by copy/paste; a refused pose constraint gives no feedback (nothing to flash).
 - **Sketch**: driving angle dimensions; radius dim on a sharp corner can't be picked. Implicit
   constraints have no keyboard shortcut for their switch, and no point-on-point coincident between
-  a dragged *line* and a candidate (lines only take point-on-line). **Fixed** takes points and
+  a dragged *line* and a candidate (lines only take point-on-line). Midpoints are drag / placement
+  inferences only: neither the constraint tools nor the Measure tool pick them (a Measure pick
+  would need the dimension items to go through `PointHandle` too), and midpoints are not drawn
+  until hovered / armed. **Fixed** takes points and
   lines only — there is no "lock this whole body" (two locks pin one rigidly, but a body click
   would be the obvious gesture); a locked element gets no styling of its own beyond its badge, so
   a body deforming around a lock under a drag is only explained by the badge.

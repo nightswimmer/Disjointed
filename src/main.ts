@@ -37,6 +37,8 @@ import {
   ResolvedMeasureRef,
   SketchConstraintKind,
   sameMeasureRef,
+  refHost,
+  isMidpointHost,
   measureInfoFor,
   measureAxisForPlacement,
   refCenter,
@@ -46,6 +48,7 @@ import {
   reexpandData,
   PatternSeed,
   Guide,
+  MidpointHost,
 } from "./model";
 import { buildContextGhost, GhostSource } from "./context";
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
@@ -460,7 +463,9 @@ let gridVisible = true;
  * Object snap (draw-mode drags): when true, a body / joint / multi-selection drag picks a
  * reference feature of what's grabbed — a control vertex, an edge midpoint, a control edge,
  * or (default) the object's centre — and that feature snaps onto the same features of the
- * other objects (plus guidelines and rails). Takes precedence over the grid/guide snap.
+ * other objects (plus rails and reference segments, with their midpoints). A point target
+ * always wins over a line it sits on (a midpoint over its own edge). Takes precedence over
+ * the grid/guide snap.
  */
 let objSnapEnabled = false;
 /** Screen-px capture range for object snapping (dragged reference onto a target feature). */
@@ -471,8 +476,9 @@ const OBJ_SNAP_PARALLEL_TOL = (2 * Math.PI) / 180;
 /**
  * Implicit constraints while dragging (draw mode; any body / joint / vertex / multi drag
  * whose reference feature can take a sketch constraint — a joint, a control vertex, a
- * guide point or a control edge): holding the dragged reference over another point /
- * line for `ALIGN_HOVER_MS` arms that element as an *alignment candidate*. Up to
+ * regular polygon's centre, an edge midpoint, a guide point or a control edge): holding
+ * the dragged reference over another point / line — a line's midpoint included — for
+ * `ALIGN_HOVER_MS` arms that element as an *alignment candidate*. Up to
  * `ALIGN_MAX_CANDS` stay armed at once — arming one more drops the oldest, Esc drops the
  * newest — so a single drag can pick up two alignments at different references (vertical
  * to one, horizontal to another). Releasing the drag with the reference H/V-aligned with
@@ -593,7 +599,7 @@ let pan: { lastScreen: Vec2 } | null = null;
  */
 /**
  * Object-snap state carried by a body / joint / multi drag: `ref` is the feature of the
- * dragged object that snaps (a control vertex, an edge midpoint or the centre as a
+ * dragged object that snaps (a control vertex, an edge `midpoint`, the centre as a
  * `bodyPoint`, a control edge, or a joint), re-resolved live each frame — the drag anchor
  * is its point (a line's midpoint). `hit` is what it last snapped onto (for the
  * highlight), drawn as an infinite line when `hitInfinite`.
@@ -781,10 +787,10 @@ function pickObjSnapRef(bodyIds: number[], jointIds: number[], grab: Vec2): ObjS
         if (n < 2) continue; // a 1-point loop (disk hole) has no edges
         const w = verts[(i + 1) % n];
         const m = scale(add(v, w), 0.5);
-        const mref: MeasureRef = { kind: "bodyPoint", bodyId: body.id, local: rotate(sub(m, body.pos), -body.angle) };
-        mid = better(mid, bodyRef(body, m, mref, dist(grab, m)));
-        const eref: MeasureRef =
+        const eref: MidpointHost =
           hole === null ? { kind: "edge", bodyId: body.id, index: i } : { kind: "edge", bodyId: body.id, index: i, hole };
+        // The midpoint is an element of its own (alignments can bind it), not a bodyPoint.
+        mid = better(mid, bodyRef(body, m, { kind: "midpoint", of: eref }, dist(grab, m)));
         edge = better(edge, bodyRef(body, m, eref, distToSegment(grab, v, w)));
       }
     }
@@ -874,15 +880,15 @@ function vertKey(hole: number | null, index: number): string {
 
 /** An object-snap target feature: its geometry, and the reference it stands for as a
  *  constraint / measurement element (null for features no sketch constraint can take —
- *  body centres and edge midpoints). */
+ *  the centre of a free-form body — and for the context ghost's features). */
 type SnapPoint = { p: Vec2; ref: MeasureRef | null };
 type SnapLine = { a: Vec2; b: Vec2; ref: MeasureRef | null };
 
 /**
  * Object-snap targets: the same features on everything that isn't being dragged —
  * other bodies' control vertices, edge midpoints, centroids and control edges (outer +
- * holes), joints (not on a dragged body), rails, and reference geometry (its points +
- * polyline edges).
+ * holes), joints (not on a dragged body), rails and reference polyline edges (each with
+ * its midpoint), and reference points.
  */
 function objSnapTargets(
   excludeBodies: Set<number>,
@@ -949,12 +955,10 @@ function objSnapTargetsOf(
         if (n < 2) continue;
         if (exAt(i) || exAt((i + 1) % n)) continue;
         const w = verts[(i + 1) % n];
-        points.push({ p: scale(add(v, w), 0.5), ref: null });
-        lines.push({
-          a: v,
-          b: w,
-          ref: hole === null ? { kind: "edge", bodyId: body.id, index: i } : { kind: "edge", bodyId: body.id, index: i, hole },
-        });
+        const eref: MidpointHost =
+          hole === null ? { kind: "edge", bodyId: body.id, index: i } : { kind: "edge", bodyId: body.id, index: i, hole };
+        points.push({ p: scale(add(v, w), 0.5), ref: { kind: "midpoint", of: eref } });
+        lines.push({ a: v, b: w, ref: eref });
       }
     }
   }
@@ -967,18 +971,22 @@ function objSnapTargetsOf(
   }
   for (const c of s.constraints) {
     if (c.kind !== "slider" || jointExcluded(c.railA) || jointExcluded(c.railB)) continue;
-    lines.push({
-      a: s.jointWorld(s.getJoint(c.railA)!),
-      b: s.jointWorld(s.getJoint(c.railB)!),
-      ref: { kind: "rail", sliderId: c.id },
-    });
+    const a = s.jointWorld(s.getJoint(c.railA)!);
+    const b = s.jointWorld(s.getJoint(c.railB)!);
+    const rref: MidpointHost = { kind: "rail", sliderId: c.id };
+    lines.push({ a, b, ref: rref });
+    points.push({ p: scale(add(a, b), 0.5), ref: { kind: "midpoint", of: rref } });
   }
   for (const g of s.guides) {
     for (const which of s.guidePointKeys(g)) {
       const q = s.guidePointWorld(g, which);
       if (q) points.push({ p: q, ref: { kind: "guidePoint", guideId: g.id, which } });
     }
-    for (const l of s.guideLines(g)) lines.push({ a: l.a, b: l.b, ref: guideLineRef(g.id, l.edge) });
+    for (const l of s.guideLines(g)) {
+      const lref = guideLineRef(g.id, l.edge);
+      lines.push({ a: l.a, b: l.b, ref: lref });
+      points.push({ p: scale(add(l.a, l.b), 0.5), ref: { kind: "midpoint", of: lref } });
+    }
   }
   return { points, lines };
 }
@@ -1102,14 +1110,14 @@ function dragSnapView(): { ref: ResolvedMeasureRef; hit: ResolvedMeasureRef | nu
 // --- implicit constraints (alignment while dragging) ---------------------------------
 /** Whether a reference can take a sketch constraint (see `Scene.addSketchConstraint`). */
 function alignPointRef(r: MeasureRef): boolean {
-  return r.kind === "joint" || r.kind === "vertex" || r.kind === "guidePoint";
+  return r.kind === "joint" || r.kind === "vertex" || r.kind === "centre" || r.kind === "midpoint" || r.kind === "guidePoint";
 }
 function alignLineRef(r: MeasureRef): boolean {
   return r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
 }
 
 /** Fresh implicit-constraint state for a drag whose reference is `ref` — none when the
- *  reference can't take a constraint (a body centre / edge midpoint `bodyPoint`). */
+ *  reference can't take a constraint (a free-form body's centre, a `bodyPoint`). */
 function newDragAlign(ref: MeasureRef | null | undefined): DragAlign | undefined {
   if (!autoConstrain || !ref || !(alignPointRef(ref) || alignLineRef(ref))) return undefined;
   return { ref, hover: null, cands: [], matches: [], slip: vec(0, 0) };
@@ -1130,7 +1138,8 @@ function sketchConstraintExists(kind: SketchConstraintKind, a: MeasureRef, b: Me
  * cursor rests (a hover is a matter of time, not motion).
  *
  * Hovering: the nearest constraint-capable target under the dragged reference — a point
- * reference over a target point, else over a target line; a line reference over a target
+ * reference over a target point, else over a target line (a point in range always beats
+ * a line, so a midpoint wins over the edge it sits on); a line reference over a target
  * point along its segment — within the object-snap range of where the *cursor* put the
  * reference (`slip` undoes the grid / object snap). Held for `ALIGN_HOVER_MS` it joins the
  * armed candidates; the oldest drops once there are more than `ALIGN_MAX_CANDS`, and
@@ -3408,16 +3417,18 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
     }
     if (unit.instanceId !== null) movedInstances.add(unit.instanceId);
   };
-  switch (liveRef.kind) {
+  // A midpoint moves as its line does — the line is the element a drag would grab.
+  const moved = refHost(liveRef);
+  switch (moved.kind) {
     case "vertex":
-      if (scene.instanceOfBody(liveRef.bodyId)) moveUnit(moveUnitOfBody(liveRef.bodyId));
+      if (scene.instanceOfBody(moved.bodyId)) moveUnit(moveUnitOfBody(moved.bodyId));
       else {
-        scene.moveBodyVertex(liveRef.bodyId, liveRef.index, delta, liveRef.hole ?? null);
-        anchors.add(anchorVarForVertex(liveRef.bodyId, liveRef.index, liveRef.hole ?? null));
+        scene.moveBodyVertex(moved.bodyId, moved.index, delta, moved.hole ?? null);
+        anchors.add(anchorVarForVertex(moved.bodyId, moved.index, moved.hole ?? null));
       }
       break;
     case "joint": {
-      const j = scene.getJoint(liveRef.jointId);
+      const j = scene.getJoint(moved.jointId);
       if (!j) return reject();
       const inst = scene.instanceOfJoint(j.id);
       if (inst) {
@@ -3437,10 +3448,10 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
     case "edge":
     case "bodyPoint":
     case "centre":
-      moveUnit(moveUnitOfBody(liveRef.bodyId));
+      moveUnit(moveUnitOfBody(moved.bodyId));
       break;
     case "rail": {
-      const c = scene.constraints.find((cc) => cc.id === liveRef.sliderId);
+      const c = scene.constraints.find((cc) => cc.id === moved.sliderId);
       if (!c || c.kind !== "slider") return reject();
       const done = new Set<number>();
       for (const jid of [c.railA, c.railB]) {
@@ -3460,16 +3471,16 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
       break;
     }
     case "guidePoint": {
-      const g = scene.getGuide(liveRef.guideId);
-      const q = g ? scene.guidePointWorld(g, liveRef.which) : null;
+      const g = scene.getGuide(moved.guideId);
+      const q = g ? scene.guidePointWorld(g, moved.which) : null;
       if (!g || !q) return reject();
-      scene.moveGuidePoint(liveRef.guideId, liveRef.which, add(q, delta));
-      anchors.add(anchorVarForGuidePoint(liveRef.guideId, liveRef.which));
+      scene.moveGuidePoint(moved.guideId, moved.which, add(q, delta));
+      anchors.add(anchorVarForGuidePoint(moved.guideId, moved.which));
       break;
     }
     case "guideLine":
-      scene.moveGuide(liveRef.guideId, delta);
-      for (const k of anchorVarsForGuide(scene, liveRef.guideId)) anchors.add(k);
+      scene.moveGuide(moved.guideId, delta);
+      for (const k of anchorVarsForGuide(scene, moved.guideId)) anchors.add(k);
       break;
     default:
       return reject(); // a pattern axis is derived geometry — edit the pattern instead
@@ -4255,8 +4266,8 @@ function constraintPointRefAt(p: Vec2, excludeGuide?: number): MeasureRef | null
   return null;
 }
 
-/** A line reference onto a guide: a reference polyline's edge. */
-function guideLineRef(guideId: number, edge: number): MeasureRef {
+/** A line reference onto a guide: a reference polyline's edge (a midpoint host). */
+function guideLineRef(guideId: number, edge: number): MidpointHost {
   return { kind: "guideLine", guideId, edge };
 }
 
@@ -4335,9 +4346,11 @@ function constraintLineRefAt(p: Vec2): MeasureRef | null {
 
 /**
  * Where a guide-point click (or the placement preview) lands: exactly on a picked point
- * element (joint / body corner / another guide's point — returned as `pick` for the
- * auto-coincident), projected onto a picked slider rail / body edge, else grid/guide-
- * snapped like any placement.
+ * element (joint / body corner / another guide's point / the midpoint of a rail, body
+ * edge or reference segment — returned as `pick` for the auto-coincident), projected
+ * onto a picked slider rail / body edge, else grid/guide-snapped like any placement. A
+ * point always wins over the line it sits on, so a click near an edge's middle takes
+ * the midpoint rather than the projection.
  */
 function guidePlacementAt(p: Vec2): { at: Vec2; pick: MeasureRef | null } {
   const pick = constraintPointRefAt(p);
@@ -4346,14 +4359,17 @@ function guidePlacementAt(p: Vec2): { at: Vec2; pick: MeasureRef | null } {
     if (res?.kind === "point") return { at: res.p, pick };
   }
   const s = scene.sliderAt(p, pickRadius());
-  const lineRes = s ? scene.resolveMeasureRef({ kind: "rail", sliderId: s.id }) : null;
-  let seg = lineRes?.kind === "line" ? lineRes : null;
-  if (!seg) {
-    // Body control edge under the cursor (outer or hole — same pick as the line refs).
-    const edge = bodyEdgeRefAt(p);
-    const res = edge ? scene.resolveMeasureRef(edge) : null;
-    if (res?.kind === "line") seg = res;
+  // Body control edge under the cursor (outer or hole — same pick as the line refs).
+  const line: MeasureRef | null = s ? { kind: "rail", sliderId: s.id } : bodyEdgeRefAt(p);
+  const gl = line ? null : scene.guideLineAt(p, pickRadius());
+  const host = line ?? (gl ? guideLineRef(gl.guide.id, gl.edge) : null);
+  if (host && isMidpointHost(host)) {
+    const midRef: MeasureRef = { kind: "midpoint", of: host };
+    const mid = scene.resolveMeasureRef(midRef);
+    if (mid?.kind === "point" && dist(mid.p, p) <= pickRadius()) return { at: mid.p, pick: midRef };
   }
+  const lineRes = line ? scene.resolveMeasureRef(line) : null;
+  const seg = lineRes?.kind === "line" ? lineRes : null;
   if (seg) {
     const ab = sub(seg.b, seg.a);
     const t = Math.max(0, Math.min(1, dot(sub(p, seg.a), ab) / Math.max(lenSq(ab), 1e-9)));
@@ -8058,6 +8074,7 @@ function sketchRefKey(ref: MeasureRef): string {
     case "guidePoint": return `gp:${ref.guideId}:${ref.which}`;
     case "guideLine": return `gl:${ref.guideId}:${ref.edge}`;
     case "patternAxis": return `px:${ref.patternId}:${ref.axis}`;
+    case "midpoint": return `m:${sketchRefKey(ref.of)}`;
     default: return "?";
   }
 }
@@ -8074,6 +8091,7 @@ function refHovered(ref: MeasureRef, p: Vec2): boolean {
   if (!res) return false;
   if (res.kind === "point" && dist(res.p, p) <= r) return true;
   if (res.kind === "line" && distToSegment(p, res.a, res.b) <= r) return true;
+  if (ref.kind === "midpoint") return refHovered(ref.of, p); // its line's hover reveals it
   if (ref.kind === "vertex" || ref.kind === "edge") return scene.bodyAt(p)?.id === ref.bodyId;
   // Hovering anywhere on a reference element (or one of its points) reveals its constraints.
   if (ref.kind === "guideLine" || ref.kind === "guidePoint") {

@@ -608,6 +608,8 @@ function refUnitMembers(
       if (!c || c.kind !== "slider") return null;
       return refUnitMembers(scene, { kind: "joint", jointId: c.railA });
     }
+    case "midpoint":
+      return refUnitMembers(scene, ref.of); // rigid with its line
     default:
       return null;
   }
@@ -636,6 +638,8 @@ function driverAt(scene: Scene, ref: MeasureRef, p: Vec2): Driver | null {
       const id = far ? c.railB : c.railA;
       return scene.getJoint(id) ? { jointId: id, target: vec(0, 0) } : null;
     }
+    case "midpoint":
+      return driverAt(scene, ref.of, p); // grabbed at its line's middle
     default:
       return null;
   }

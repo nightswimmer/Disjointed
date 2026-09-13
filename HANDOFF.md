@@ -199,6 +199,21 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   through `.tb-sec[id], .group[id]` (`scripts/manual/shoot.ts`), so `glyphs.js` /
   `DISJOINTED_GROUPS` will change shape on the next `npm run manual`.
 
+- **Line midpoints as snap / constraint targets (2026-09-13).** Manual (*Grid & snapping* —
+  the Object snap and *Implicit constraints while dragging* paragraphs; the *Reference
+  geometry* "Placement snaps to existing elements" bullet; the Coincident / Horizontal /
+  Vertical topics where they list what a point can be): the midpoint of a **body / hole
+  edge, a rail or a reference segment** is now a point target everywhere a corner is — object
+  snap (the midpoints of rails and reference segments are new targets; body-edge midpoints
+  already snapped), the drag-time implicit constraints (hold the middle of a line to arm its
+  midpoint — coincident / H / V onto it, badge on the midpoint), and shape / reference-point
+  placement (a click near the middle of an edge lands on the midpoint and records a
+  coincident). Rule to state: **a point target always wins over the line it sits on** (point
+  first, then line, in every pick). A body grabbed nearest an edge midpoint is dragged *by*
+  that midpoint and can take alignments itself. New ref kind `midpoint` (nested `of` line
+  ref) in `src/model.ts`; the constraint *tools* and the Measure tool still don't pick
+  midpoints (deliberate — CAD convention: midpoints are an inference, not a click target).
+  README.md is already updated.
 - **Fixed constraint implemented (2026-09-13).** The dimmed `#fixed-btn` placeholder became a
   real one-shot tool (`data-tool="fixed"`, key `L` — F was already fit-view; plain L had been
   left unbound for the planned shortcut remap, so reconsider it there). A **topic was written**

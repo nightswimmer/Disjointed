@@ -357,10 +357,11 @@ to move it whole; a selected circle shows a rim handle to resize it), is hidden 
 never exported, Delete to remove. (The old infinite guideline is gone: a reference line is a
 finite segment that does everything it did, and takes equal-length and length dimensions too.)
 
-- **Placement snaps to existing elements**: a click lands exactly on a joint, body corner or
-  another reference point (and records an automatic **coincident** constraint so the
-  geometry stays attached when that point later moves), projects onto a rail or body
-  edge, or falls back to the grid.
+- **Placement snaps to existing elements**: a click lands exactly on a joint, body corner,
+  another reference point or the **midpoint** of a body edge, rail or reference segment (and
+  records an automatic **coincident** constraint so the geometry stays attached when that
+  point later moves), projects onto a rail or body edge, or falls back to the grid. A point
+  always wins over the line it sits on: a click near the middle of an edge takes the midpoint.
 - **Snapping prefers reference geometry over the grid**: with Snap on, anything you place or
   drag lands *on* a nearby reference edge (projected onto it, within its span) or rim — and
   where two reference edges cross, on their **intersection**.
@@ -551,11 +552,14 @@ it nearest the grab becomes the **reference** — a **corner**, then an **edge m
 **edge**, or the object's **centre** if nothing is close (holes count too). It's highlighted in
 orange (and previewed while you hover, so you can see what you're about to grab). While dragging,
 that reference snaps onto the same features of everything else — other bodies' corners, midpoints,
-centres and edges, joints, rails and reference geometry (a regular polygon's centre included) —
+centres and edges, joints, rails and reference geometry (a regular polygon's centre and the
+**midpoints** of rails and reference segments included) —
 with the target highlighted dashed. A corner or
 midpoint can also land on another edge or reference edge; an edge snaps onto **parallel** edges
 only, sliding sideways until the two are flush (it can't rotate the body), and the
-target line is shown extended so you can line up bodies that don't overlap. With nothing in
+target line is shown extended so you can line up bodies that don't overlap. When a point
+target and a line are both in range, the **point wins** — so sliding along an edge, the drag
+jumps onto its midpoint as you pass it. With nothing in
 range the drag falls back to the grid / reference snap (or moves freely when Snap is off).
 Object snap also applies to **reshaping**: a dragged corner node or hole centre is its own
 reference and snaps onto the other features (its own body's other corners included, but not
@@ -565,8 +569,16 @@ hole being dragged out, lands on the nearest corner / midpoint / centre / joint 
 **Implicit constraints while dragging** let you place the common sketch constraints without
 picking a tool. While dragging a body, joint, corner node or hole centre (with or without
 object snap), **hold** the dragged point or edge over another element — a corner, hole centre,
-joint, reference point, edge, rail or reference edge — for about half a second: it becomes an
-**alignment candidate** and lights up violet. **Two candidates stay armed at once**: hover a
+joint, reference point, the **midpoint** of an edge / rail / reference segment, or an edge,
+rail or reference edge — for about half a second: it becomes an
+**alignment candidate** and lights up violet. A point under the cursor always takes
+precedence over the line it lies on, so holding the middle of an edge arms its midpoint, and
+holding elsewhere along it arms the edge. A body grabbed by an edge **midpoint** (object snap
+picks it when the grab is nearest the middle) is dragged by that midpoint, which can take the
+same alignments as a corner. A midpoint constraint is a real element reference: it rides
+along when the edge is moved, mirrored, split or renumbered, and the solver keeps the middle
+of the line on its partner — pulling a midpoint moves both ends of its line (an end held by
+the drag or a lock stays put and the other swings twice as far). **Two candidates stay armed at once**: hover a
 second element and both stay lit (a third one drops the oldest, and **Esc** drops the most
 recent while the drag goes on). Now move on to where you want the object. When the dragged
 point lines up **horizontally or vertically** with a candidate point, lands **on** a candidate

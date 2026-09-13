@@ -12,6 +12,7 @@
  */
 import {
   sameMeasureRef,
+  refHost,
   Scene,
   SketchConstraint,
   Measurement,
@@ -100,10 +101,15 @@ function itemRank(sys: System, i: number, tie: boolean): number {
   return !tie && r === 0 && sys.tied.has(sys.keys[i]) ? TIED_GUIDE_RANK : r;
 }
 
-const isGuideRef = (r: MeasureRef) => r.kind === "guidePoint" || r.kind === "guideLine";
+/** Whether a ref names reference geometry (a midpoint counts as its line does). */
+const isGuideRef = (r: MeasureRef) => {
+  const h = refHost(r);
+  return h.kind === "guidePoint" || h.kind === "guideLine";
+};
 
-/** Guide variable keys a ref names (a line ref names the two points of that line / edge). */
-function guideVarKeys(scene: Scene, ref: MeasureRef): string[] {
+/** Guide variable keys a ref names (a line ref — or its midpoint — names the two points of that line / edge). */
+function guideVarKeys(scene: Scene, r: MeasureRef): string[] {
+  const ref = refHost(r);
   if (ref.kind === "guidePoint") return [`g:${ref.guideId}:${ref.which}`];
   if (ref.kind === "guideLine") return lineVarKeys(scene, ref) ?? [];
   return [];
@@ -150,7 +156,7 @@ function multiTiedGuides(scene: Scene): Set<number> {
     const ga = isGuideRef(c.refA);
     const gb = isGuideRef(c.refB);
     if (ga === gb) continue; // geometry–geometry, or guide–guide: not a tie
-    const r = ga ? c.refA : c.refB;
+    const r = refHost(ga ? c.refA : c.refB);
     if (r.kind !== "guidePoint" && r.kind !== "guideLine") continue;
     count.set(r.guideId, (count.get(r.guideId) ?? 0) + 1);
   }
@@ -256,7 +262,60 @@ function pointVarKey(scene: Scene, ref: MeasureRef): string | null {
     // whole polygon follows.
     return scene.regularCentreWorld(ref.bodyId, ref.hole ?? null) ? centreKey(ref.bodyId, ref.hole ?? null) : null;
   }
-  return null; // bodyPoint refs are measurement-only; line refs aren't points
+  return null; // bodyPoint refs are measurement-only; a midpoint is derived (acquirePoint); line refs aren't points
+}
+
+/**
+ * A point a constraint item reads and pushes. Usually one solver variable; for a line's
+ * **midpoint** a point derived from the line's two end variables, pushed by moving the
+ * ends. Its `rank` is that of its most mobile end (a line is as mobile as its most
+ * mobile end, as the line items already assume), and a push is spread over the ends by
+ * rank — an end held by the drag or a lock stays put and the other swings twice as far
+ * — so a midpoint never tugs the drag back and never stalls on a locked end.
+ */
+interface PointHandle {
+  /** The point's current position. */
+  at(pos: Vec2[]): Vec2;
+  /** Put the point at `p` (a plain variable is set exactly; a midpoint moves its ends). */
+  set(pos: Vec2[], p: Vec2): void;
+  rank: number;
+  /** The one variable a plain handle is; undefined for a derived point. */
+  index?: number;
+}
+
+/** The point a ref names, as a handle — null when it can't be a solver point. */
+function acquirePoint(scene: Scene, sys: System, ref: MeasureRef, rank: (i: number) => number): PointHandle | null {
+  if (ref.kind === "midpoint") {
+    const keys = lineVarKeys(scene, ref.of);
+    if (!keys) return null;
+    const a = acquire(scene, sys, keys[0]);
+    const b = acquire(scene, sys, keys[1]);
+    if (a === null || b === null || a === b) return null; // a one-point line has no midpoint
+    const ra = rank(a);
+    const rb = rank(b);
+    const wa = shareOf(ra, rb); // end a's share of a push (it moves twice that, b the rest)
+    return {
+      at: (pos) => scale(add(pos[a], pos[b]), 0.5),
+      set(pos, p) {
+        const d = sub(p, scale(add(pos[a], pos[b]), 0.5));
+        pos[a] = add(pos[a], scale(d, 2 * wa));
+        pos[b] = add(pos[b], scale(d, 2 * (1 - wa)));
+      },
+      rank: Math.min(ra, rb),
+    };
+  }
+  const k = pointVarKey(scene, ref);
+  if (!k) return null;
+  const i = acquire(scene, sys, k);
+  if (i === null) return null;
+  return {
+    at: (pos) => pos[i],
+    set(pos, p) {
+      pos[i] = vec(p.x, p.y);
+    },
+    rank: rank(i),
+    index: i,
+  };
 }
 
 /** Variable keys for a line ref's two endpoints, or null. */
@@ -486,16 +545,16 @@ function buildConstraintItem(
     if (!c.at) return "invalid";
     const at = c.at;
     if (c.angle === undefined) {
-      const kp = pointVarKey(scene, c.refA);
-      if (!kp) return "invalid";
-      const i = acquire(scene, sys, kp);
-      if (i === null) return "invalid";
+      // A locked midpoint holds the middle of its line: the ends stay free to turn and
+      // stretch the line about it (they keep their rank — see fixedPointVars).
+      const P = acquirePoint(scene, sys, c.refA, rank);
+      if (!P) return "invalid";
       return {
         id: c.id,
         kind: "constraint",
         run(pos, apply) {
-          const err = dist(pos[i], at);
-          if (apply) pos[i] = vec(at.x, at.y);
+          const err = dist(P.at(pos), at);
+          if (apply) P.set(pos, at);
           return err;
         },
       };
@@ -531,15 +590,14 @@ function buildConstraintItem(
     // normalizes the point into refA, but handle either order (robust to hand-edited
     // saves). Same projection as a point+line driving dimension with target 0.
     const aLine = isLineRef(c.refA);
-    const kp = pointVarKey(scene, aLine ? c.refB : c.refA);
+    const P = acquirePoint(scene, sys, aLine ? c.refB : c.refA, rank);
     const kl = lineVarKeys(scene, aLine ? c.refA : c.refB);
-    if (!kp || !kl) return "invalid";
-    const p = acquire(scene, sys, kp);
+    if (!P || !kl) return "invalid";
     const l0 = acquire(scene, sys, kl[0]);
     const l1 = acquire(scene, sys, kl[1]);
-    if (p === null || l0 === null || l1 === null) return "invalid";
-    if (p === l0 || p === l1) return null; // the point ends the line: on it by construction
-    const wp = shareOf(rank(p), Math.min(rank(l0), rank(l1))); // fraction the point absorbs
+    if (l0 === null || l1 === null) return "invalid";
+    if (P.index === l0 || P.index === l1) return null; // the point ends the line: on it by construction
+    const wp = shareOf(P.rank, Math.min(rank(l0), rank(l1))); // fraction the point absorbs
     return {
       id: c.id,
       kind: "constraint",
@@ -548,9 +606,10 @@ function buildConstraintItem(
         const l = len(d);
         if (l < EPS) return 0; // degenerate line: nothing to project onto
         const n = perp(scale(d, 1 / l));
-        const s = dot(sub(pos[p], pos[l0]), n); // signed distance off the line
+        const p = P.at(pos);
+        const s = dot(sub(p, pos[l0]), n); // signed distance off the line
         if (apply) {
-          pos[p] = sub(pos[p], scale(n, s * wp));
+          P.set(pos, sub(p, scale(n, s * wp)));
           const shift = scale(n, s * (1 - wp)); // line comes to the point (rank-weighted)
           pos[l0] = add(pos[l0], shift);
           pos[l1] = add(pos[l1], shift);
@@ -560,25 +619,24 @@ function buildConstraintItem(
     };
   }
   if (kind === "coincident" || ((kind === "horizontal" || kind === "vertical") && c.refB)) {
-    const ka = pointVarKey(scene, c.refA);
-    const kb = c.refB ? pointVarKey(scene, c.refB) : null;
-    if (!ka || !kb) return "invalid";
-    const i = acquire(scene, sys, ka);
-    const j = acquire(scene, sys, kb);
-    if (i === null || j === null) return "invalid";
-    if (i === j) return null; // same variable: trivially satisfied
-    const wp = shareOf(rank(i), rank(j)); // fraction i absorbs
+    const A = acquirePoint(scene, sys, c.refA, rank);
+    const B = c.refB ? acquirePoint(scene, sys, c.refB, rank) : null;
+    if (!A || !B) return "invalid";
+    if (A.index !== undefined && A.index === B.index) return null; // same variable: trivially satisfied
+    const wp = shareOf(A.rank, B.rank); // fraction A absorbs
     if (kind === "coincident") {
       return {
         id: c.id,
         kind: "constraint",
         run(pos, apply) {
-          const err = dist(pos[i], pos[j]) / 2;
+          const a = A.at(pos);
+          const b = B.at(pos);
+          const err = dist(a, b) / 2;
           if (apply) {
             // Weighted meeting point: an anchored side stays put, the free side comes to it.
-            const m = add(scale(pos[i], 1 - wp), scale(pos[j], wp));
-            pos[i] = vec(m.x, m.y);
-            pos[j] = vec(m.x, m.y);
+            const m = add(scale(a, 1 - wp), scale(b, wp));
+            A.set(pos, m);
+            B.set(pos, m);
           }
           return err;
         },
@@ -589,11 +647,13 @@ function buildConstraintItem(
       id: c.id,
       kind: "constraint",
       run(pos, apply) {
-        const err = Math.abs(pos[i][axis] - pos[j][axis]) / 2;
+        const a = A.at(pos);
+        const b = B.at(pos);
+        const err = Math.abs(a[axis] - b[axis]) / 2;
         if (apply) {
-          const m = pos[i][axis] * (1 - wp) + pos[j][axis] * wp;
-          pos[i][axis] = m;
-          pos[j][axis] = m;
+          const m = a[axis] * (1 - wp) + b[axis] * wp;
+          A.set(pos, axis === "y" ? vec(a.x, m) : vec(m, a.y));
+          B.set(pos, axis === "y" ? vec(b.x, m) : vec(m, b.y));
         }
         return err;
       },
@@ -1500,11 +1560,14 @@ function refOwnerBody(scene: Scene, ref: MeasureRef): number | null {
     case "guidePoint":
     case "guideLine":
       return null; // guides are world construction — no body owns them
+    case "midpoint":
+      return refOwnerBody(scene, ref.of);
   }
 }
 
-/** Whether a ref touches the body at all (owner match; a rail touches via either joint). */
-function refTouchesBody(scene: Scene, ref: MeasureRef, bodyId: number): boolean {
+/** Whether a ref touches the body at all (owner match; a rail — or its midpoint — touches via either joint). */
+function refTouchesBody(scene: Scene, r: MeasureRef, bodyId: number): boolean {
+  const ref = refHost(r);
   if (ref.kind === "rail") {
     const c = scene.constraints.find((x) => x.id === ref.sliderId && x.kind === "slider");
     if (!c || c.kind !== "slider") return false;

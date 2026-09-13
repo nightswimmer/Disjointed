@@ -522,20 +522,48 @@ export type MeasureMode = "draw" | "sim";
 export type MeasureAxis = "direct" | "h" | "v" | "diameter" | "radius";
 
 /**
+ * The finite line elements a midpoint can stand on: a slider rail, a body / hole
+ * control edge, a reference polyline edge. (Not a pattern axis — its ends are derived.)
+ */
+export type MidpointHost =
+  | { kind: "rail"; sliderId: number } // line: a slider rail
+  | { kind: "edge"; bodyId: number; index: number; hole?: number } // line: control edge index → index+1 (of hole `hole`, or the outer)
+  | { kind: "guideLine"; guideId: number; edge: number }; // line: edge `edge` of a reference polyline (finite)
+
+/**
  * A measurement reference — a point or a line, anchored to scene *elements* (never to
  * bare coordinates), so its world geometry is re-resolved every frame and the value
  * tracks the mechanism as it moves in simulation.
+ *
+ * A `midpoint` names the middle of a line element by **nesting that line's own ref**
+ * (`of`), so it is an element like the others: it resolves through its line, compares
+ * through it, and — since every index remap works on `refHost(ref)` — follows its line
+ * through node inserts / removals, mirrors, splits, combines and cuts for free.
  */
 export type MeasureRef =
   | { kind: "joint"; jointId: number } // point: a joint
   | { kind: "vertex"; bodyId: number; index: number; hole?: number } // point: a control vertex (of hole `hole`, or the outer outline)
   | { kind: "centre"; bodyId: number; hole?: number } // point: the centre of a regular-polygon outline (of hole `hole`, or the outer one)
   | { kind: "bodyPoint"; bodyId: number; local: Vec2 } // point: fixed in a body's frame
-  | { kind: "rail"; sliderId: number } // line: a slider rail
-  | { kind: "edge"; bodyId: number; index: number; hole?: number } // line: control edge index → index+1 (of hole `hole`, or the outer)
+  | { kind: "midpoint"; of: MidpointHost } // point: the midpoint of a rail / edge / reference segment
+  | MidpointHost
   | { kind: "guidePoint"; guideId: number; which: string } // point: a guide's defining point (see `Guide` for the names)
-  | { kind: "guideLine"; guideId: number; edge: number } // line: edge `edge` of a reference polyline (finite)
   | { kind: "patternAxis"; patternId: number; axis: number }; // line: a linear pattern's direction (seed anchor → last instance)
+
+/**
+ * The element reference an index remap must act on: a midpoint's host line, any other
+ * ref itself. Remaps (node inserts / removals, mirrors, splits, combines, cuts, hole
+ * removals) rewrite the host **in place**, so a midpoint stays on its line without
+ * any remap knowing about midpoints.
+ */
+export function refHost(r: MeasureRef): Exclude<MeasureRef, { kind: "midpoint" }> {
+  return r.kind === "midpoint" ? r.of : r;
+}
+
+/** Whether a reference names a line element that can carry a midpoint. */
+export function isMidpointHost(r: MeasureRef): r is MidpointHost {
+  return r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine";
+}
 
 /**
  * A dimension between two references. What it measures follows from the reference kinds:
@@ -1139,9 +1167,17 @@ export class Scene {
    * live solve still has the last word.
    */
   regularRotationLocked(bodyId: number, hole: number | null): boolean {
-    const onOutline = (r: MeasureRef | null): r is MeasureRef & { kind: "edge" | "vertex" | "centre" } =>
-      !!r && (r.kind === "edge" || r.kind === "vertex" || r.kind === "centre") && r.bodyId === bodyId && (r.hole ?? null) === hole;
-    const pointKey = (r: MeasureRef): string => (r.kind === "vertex" ? `v${r.index}` : "c");
+    // Refs are read through their host, so the midpoint of one of the outline's own
+    // edges counts as a point on the outline (a corner-like one: its edge carries it).
+    const onOutline = (r: MeasureRef | null): boolean => {
+      const h = r ? refHost(r) : null;
+      return !!h && (h.kind === "edge" || h.kind === "vertex" || h.kind === "centre") && h.bodyId === bodyId && (h.hole ?? null) === hole;
+    };
+    const isCorner = (r: MeasureRef): boolean => r.kind === "vertex" || r.kind === "midpoint";
+    const pointKey = (r: MeasureRef): string => {
+      const h = refHost(r);
+      return h.kind === "vertex" ? `v${h.index}` : h.kind === "edge" ? `m${h.index}` : "c";
+    };
     const tied = new Set<string>();
     for (const c of this.sketch) {
       const a = onOutline(c.refA);
@@ -1150,22 +1186,22 @@ export class Scene {
       const line = c.kind === "horizontal" || c.kind === "vertical" || c.kind === "parallel" || c.kind === "perpendicular";
       if (line) {
         if (c.refB === null) return true; // H / V on one of its edges
-        if (a && b) return c.refA.kind === "vertex" && c.refB.kind === "vertex"; // two corners aligned; two own edges say nothing
+        if (a && b) return isCorner(c.refA) && isCorner(c.refB); // two corners aligned; two own edges say nothing
         if (c.refA.kind === "edge" || c.refB?.kind === "edge") return true; // an edge against an outside line
         if (a) tied.add(pointKey(c.refA)); // one corner aligned with something outside
         if (b && c.refB) tied.add(pointKey(c.refB));
         continue;
       }
       if (c.kind === "fixed" && a) {
-        // A locked edge holds its angle outright; a locked corner / centre is one tie.
+        // A locked edge holds its angle outright; a locked corner / centre / midpoint is one tie.
         if (c.refA.kind === "edge") return true;
         tied.add(pointKey(c.refA));
         continue;
       }
       if (c.kind === "coincident") {
         if (a && b) continue;
-        if (a && (c.refA.kind === "vertex" || c.refA.kind === "centre")) tied.add(pointKey(c.refA));
-        if (b && c.refB && (c.refB.kind === "vertex" || c.refB.kind === "centre")) tied.add(pointKey(c.refB));
+        if (a && c.refA.kind !== "edge") tied.add(pointKey(c.refA));
+        if (b && c.refB && c.refB.kind !== "edge") tied.add(pointKey(c.refB));
       }
     }
     return tied.size >= 2;
@@ -1497,7 +1533,8 @@ export class Scene {
   }
 
   /** Whether a measurement reference names a pattern **member** (derived geometry). */
-  refPatternMember(ref: MeasureRef): boolean {
+  refPatternMember(r: MeasureRef): boolean {
+    const ref = refHost(r);
     if (ref.kind === "joint") return this.patternOfJoint(ref.jointId)?.role === "member";
     if ((ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre") && ref.hole !== undefined) {
       return this.patternOfHole(ref.bodyId, ref.hole)?.role === "member";
@@ -1506,7 +1543,8 @@ export class Scene {
   }
 
   /** The pattern a reference's element belongs to (as seed or member), or undefined. */
-  patternOfRef(ref: MeasureRef): Pattern | undefined {
+  patternOfRef(r: MeasureRef): Pattern | undefined {
+    const ref = refHost(r);
     if (ref.kind === "joint") return this.patternOfJoint(ref.jointId)?.pattern;
     if ((ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre") && ref.hole !== undefined) {
       return this.patternOfHole(ref.bodyId, ref.hole)?.pattern;
@@ -1864,8 +1902,12 @@ export class Scene {
     }
     const onHole = (ref: MeasureRef | null): ref is MeasureRef & { hole: number } =>
       !!ref && (ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre") && ref.bodyId === body.id && ref.hole !== undefined;
-    const refGone = (ref: MeasureRef | null): boolean => onHole(ref) && set.has(ref.hole);
-    const remap = (ref: MeasureRef | null): void => {
+    const refGone = (r: MeasureRef | null): boolean => {
+      const ref = r ? refHost(r) : null;
+      return onHole(ref) && set.has(ref.hole);
+    };
+    const remap = (r: MeasureRef | null): void => {
+      const ref = r ? refHost(r) : null;
       if (onHole(ref)) ref.hole = map.get(ref.hole)!;
     };
     this.measurements = this.measurements.filter((m) => !refGone(m.refA) && !refGone(m.refB));
@@ -2291,7 +2333,8 @@ export class Scene {
     const holeMap = new Map<number, { bodyId: number; hole: number }>();
     holesA.forEach((hi, k) => holeMap.set(hi, { bodyId: body.id, hole: k }));
     holesB.forEach((hi, k) => holeMap.set(hi, { bodyId: bBody.id, hole: k }));
-    const remap = (ref: MeasureRef | null): boolean => {
+    const remap = (r: MeasureRef | null): boolean => {
+      const ref = r ? refHost(r) : null;
       if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) return true;
       if (ref.hole !== undefined) {
         const h = holeMap.get(ref.hole);
@@ -2594,7 +2637,8 @@ export class Scene {
     // Vertex/edge refs: remember world geometry of the referenced corners to match after.
     type RefRec = { ref: MeasureRef & { kind: "vertex" | "edge" }; a: Vec2; b: Vec2 | null; origin: HoleOrigin | null };
     const refRecs: RefRec[] = [];
-    const record = (ref: MeasureRef | null): void => {
+    const record = (r: MeasureRef | null): void => {
+      const ref = r ? refHost(r) : null;
       if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || !inputIds.has(ref.bodyId)) return;
       const b = this.getBody(ref.bodyId)!;
       const ctrl = this.controlListOf(b, ref.hole ?? null);
@@ -2677,8 +2721,9 @@ export class Scene {
       ok.add(ref);
     }
     const stale = new Set<MeasureRef>(refRecs.map((r) => r.ref).filter((r) => !ok.has(r)));
-    this.measurements = this.measurements.filter((mm) => !stale.has(mm.refA) && !stale.has(mm.refB));
-    this.sketch = this.sketch.filter((c) => !stale.has(c.refA) && !(c.refB && stale.has(c.refB)));
+    const isStale = (r: MeasureRef | null): boolean => !!r && stale.has(refHost(r)); // recorded through the host
+    this.measurements = this.measurements.filter((mm) => !isStale(mm.refA) && !isStale(mm.refB));
+    this.sketch = this.sketch.filter((c) => !isStale(c.refA) && !isStale(c.refB));
     for (const { ref, world } of bodyPoints) {
       ref.bodyId = survivor.id;
       ref.local = rotate(sub(world, survivor.pos), -survivor.angle);
@@ -3312,6 +3357,11 @@ export class Scene {
         const ln = g ? this.guideLines(g).find((l) => l.edge === ref.edge) : undefined;
         return ln ? { kind: "line", a: ln.a, b: ln.b } : null;
       }
+      case "midpoint": {
+        // The middle of its line — gone when the line is.
+        const ln = this.resolveMeasureRef(ref.of);
+        return ln?.kind === "line" ? { kind: "point", p: scale(add(ln.a, ln.b), 0.5) } : null;
+      }
     }
   }
 
@@ -3454,7 +3504,7 @@ export class Scene {
       (ref.hole ?? null) === hole;
     const gone = new Set<number>();
     for (const m of this.measurements) {
-      for (const ref of [m.refA, m.refB]) {
+      for (const ref of [refHost(m.refA), refHost(m.refB)]) {
         if (!affected(ref)) continue;
         if (delta === -1) {
           if (ref.index === at) gone.add(m.id);
@@ -3467,7 +3517,7 @@ export class Scene {
     if (gone.size) this.measurements = this.measurements.filter((m) => !gone.has(m.id));
     const cGone = new Set<number>();
     for (const c of this.sketch) {
-      for (const ref of [c.refA, c.refB]) {
+      for (const ref of [refHost(c.refA), c.refB ? refHost(c.refB) : null]) {
         if (!affected(ref)) continue;
         if (delta === -1) {
           if (ref.index === at) cGone.add(c.id);
@@ -3488,20 +3538,21 @@ export class Scene {
    * on the **infinite** line; normalized so the point is stored as `refA`);
    * `horizontal`/`vertical` take one line ref (refB
    * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs.
-   * Point refs are joints, body control vertices, or reference-geometry points
-   * (`bodyPoint` refs are measurement-only — the sketch solver can't move them
-   * independently); line refs are slider rails, body control edges, or reference
-   * polyline edges.
+   * Point refs are joints, body control vertices, regular-polygon centres, line
+   * midpoints, or reference-geometry points (`bodyPoint` refs are measurement-only —
+   * the sketch solver can't move them independently); line refs are slider rails,
+   * body control edges, or reference polyline edges.
    * Returns null on a kind mismatch, an unresolvable ref, or two refs naming the
-   * same element (for point-on-line: a point that *is* an endpoint of the line, which
-   * would be trivially satisfied forever).
+   * same element (for point-on-line: a point that *is* an endpoint — or the midpoint —
+   * of the line, which would be trivially satisfied forever).
    */
   addSketchConstraint(
     kind: SketchConstraintKind,
     refA: MeasureRef,
     refB?: MeasureRef
   ): SketchConstraint | null {
-    const isPoint = (r: MeasureRef) => r.kind === "joint" || r.kind === "vertex" || r.kind === "centre" || r.kind === "guidePoint";
+    const isPoint = (r: MeasureRef) =>
+      r.kind === "joint" || r.kind === "vertex" || r.kind === "centre" || r.kind === "guidePoint" || r.kind === "midpoint";
     const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
     let b = refB ?? null;
     if (kind === "coincident") {
@@ -3584,11 +3635,12 @@ export class Scene {
 
   /**
    * Whether a point ref structurally names one of a line ref's two defining points
-   * (a vertex that ends the edge, a rail's own joint, a guideline's defining point) —
-   * such a point lies on the line by construction, so a coincident between them is a
-   * permanent no-op and gets rejected.
+   * (a vertex that ends the edge, a rail's own joint, a guideline's defining point) or
+   * its midpoint — such a point lies on the line by construction, so a coincident
+   * between them is a permanent no-op and gets rejected.
    */
   private pointIsLineEndpoint(pt: MeasureRef, ln: MeasureRef): boolean {
+    if (pt.kind === "midpoint") return sameMeasureRef(pt.of, ln);
     if (ln.kind === "edge" && pt.kind === "vertex") {
       if (pt.bodyId !== ln.bodyId || (pt.hole ?? null) !== (ln.hole ?? null)) return false;
       const body = this.getBody(ln.bodyId);
@@ -4120,7 +4172,8 @@ export class Scene {
   private remapReversedOutlineRefs(bodyId: number): void {
     const body = this.getBody(bodyId);
     if (!body) return;
-    const remap = (ref: MeasureRef | null): void => {
+    const remap = (r: MeasureRef | null): void => {
+      const ref = r ? refHost(r) : null;
       if (!ref || (ref.kind !== "vertex" && ref.kind !== "edge") || ref.bodyId !== bodyId) return;
       // Each outline reversed independently, so a ref remaps within its own outline.
       const ctrl = this.controlListOf(body, ref.hole ?? null);
@@ -4699,6 +4752,8 @@ export class Scene {
         case "guidePoint":
         case "guideLine":
           return false; // guides don't travel with a selection clip
+        case "midpoint":
+          return internal(r.of);
       }
     };
     const sketch: SelectionClip["sketch"] = [];
@@ -4923,6 +4978,10 @@ export class Scene {
         case "guidePoint":
         case "guideLine":
           return null; // guides never travel with a clip (extractSelection drops these refs)
+        case "midpoint": {
+          const of = remapRef(r.of);
+          return of && isMidpointHost(of) ? { kind: "midpoint", of } : null;
+        }
       }
     };
     for (const c of clip.sketch) {
@@ -5043,6 +5102,8 @@ export class Scene {
         case "guidePoint":
         case "guideLine":
           return false;
+        case "midpoint":
+          return internal(r.of);
       }
     };
     const sketch: FeatureClip["sketch"] = [];
@@ -5198,6 +5259,10 @@ export class Scene {
         case "guidePoint":
         case "guideLine":
           return null;
+        case "midpoint": {
+          const of = remapRef(r.of);
+          return of && isMidpointHost(of) ? { kind: "midpoint", of } : null;
+        }
       }
     };
     for (const c of clip.sketch) {
@@ -5367,6 +5432,8 @@ export class Scene {
         return this.instanceOfBody(ref.bodyId);
       case "rail":
         return this.instanceOfConstraint(ref.sliderId);
+      case "midpoint":
+        return this.instanceOfRef(ref.of);
       default:
         return undefined;
     }
@@ -5414,6 +5481,8 @@ export class Scene {
         const p = this.getPattern(ref.patternId);
         return p ? bodyKey(p.bodyId) : null;
       }
+      case "midpoint":
+        return this.refRigidUnitKey(ref.of);
       default:
         return null; // guides aren't rigid material
     }
@@ -6705,7 +6774,9 @@ function loadGuide(raw: unknown): Guide | null {
 }
 
 function cloneMeasureRef(r: MeasureRef): MeasureRef {
-  return r.kind === "bodyPoint" ? { ...r, local: clone(r.local) } : { ...r };
+  if (r.kind === "bodyPoint") return { ...r, local: clone(r.local) };
+  if (r.kind === "midpoint") return { kind: "midpoint", of: { ...r.of } };
+  return { ...r };
 }
 
 /** Whether two references name the same element (bodyPoint refs never match). */
@@ -6714,6 +6785,8 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
   switch (a.kind) {
     case "joint":
       return a.jointId === (b as { jointId: number }).jointId;
+    case "midpoint":
+      return sameMeasureRef(a.of, (b as { of: MeasureRef }).of);
     case "vertex":
     case "edge":
       return (
