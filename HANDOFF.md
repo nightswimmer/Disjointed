@@ -110,3 +110,13 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   a 90° turn included). Split / combine turn it into a free polygon. The
   Polygon what's-this string in `src/main.ts` still says "Sides: the toolbar field" — reword
   in the same pass. A "convert to free polygon" action is planned later (not built).
+- **Projected corner-pair sizes (2026-09-13).** Manual (Polygon / Measure topics): a
+  dimension between two corners of a regular polygon whose label sits *between* the corners
+  is a horizontal / vertical dimension (the Measure tool's placement rule). It is now a *size
+  dimension* like a chord, whatever the sketch says about the polygon's rotation: driving it
+  scales the polygon and keeps its rotation (a pentagon's height, apex to a base corner, works
+  this way; a projection near zero, a chord across the axis, can't drive). Rotation is set
+  only by drags and line constraints — the old "an h / v corner pair turns the polygon" rule
+  is gone. A size the polygon can't reach, or one that disagrees with another driving size
+  on the same polygon, is refused with the conflicting dimension flashed. Field repro:
+  `dimensioning.json` (a hexagon with an "h" dimension on one side).

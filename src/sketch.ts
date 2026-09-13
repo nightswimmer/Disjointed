@@ -1361,7 +1361,21 @@ export function applyDrivingDimension(
     // about its centre, then re-solve whatever else the sketch says about it.
     const snap = snapshot(scene);
     scene.setRegularSize(size.bodyId, size.hole, size.size, target);
-    const breaks = solveAndApply(scene);
+    // The size must actually be reached (a projection can't be scaled onto a value it
+    // never had), and every other size dimension on the outline must still hold — two
+    // sizes on one polygon are one parameter twice, so a disagreeing pair is rejected
+    // here rather than left to fight over the polygon on every later solve.
+    const got = scene.regularSize(size.bodyId, size.hole, size.size);
+    const sizeBreaks: SketchBreak[] = [];
+    if (got === null || Math.abs(got - target) > sketchConfig.tol) sizeBreaks.push({ id: m.id, kind: "dimension", error: got === null ? Infinity : Math.abs(got - target) });
+    for (const o of scene.measurements) {
+      if (o.id === m.id || o.mode !== "draw" || !o.driving || o.target === undefined) continue;
+      const os = scene.regularSizeOfDim(o);
+      if (!os || os.bodyId !== size.bodyId || os.hole !== size.hole) continue;
+      const v = scene.regularSize(os.bodyId, os.hole, os.size);
+      if (v === null || Math.abs(v - o.target) > sketchConfig.tol) sizeBreaks.push({ id: o.id, kind: "dimension", error: v === null ? Infinity : Math.abs(v - o.target) });
+    }
+    const breaks = sizeBreaks.length ? sizeBreaks : solveAndApply(scene);
     if (breaks.length) {
       restore(scene, snap);
       return breaks;

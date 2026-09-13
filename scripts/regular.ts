@@ -291,7 +291,7 @@ const sq = (x: number, y: number, w: number, h: number): Vec2[] => [vec(x, y), v
   check("centre–edge is the apothem", s.regularSizeOfDim(apo)?.size.kind === "apothem");
   const hDim = s.addMeasurement("draw", { kind: "vertex", bodyId: hex.id, index: 0 }, { kind: "vertex", bodyId: hex.id, index: 1 }, vec(0, 0))!;
   hDim.axis = "h";
-  check("a horizontal corner-pair distance is not a size", s.regularSizeOfDim(hDim) === null);
+  check("a horizontal corner-pair distance is a projected size", s.regularSizeOfDim(hDim)?.size.kind === "proj");
 }
 
 // ---------------------------------------------------------------- corner drags respect the sketch
@@ -346,6 +346,87 @@ const sq = (x: number, y: number, w: number, h: number): Vec2[] => [vec(x, y), v
   const j2 = u.addFreeJoint(vec(0, 50));
   tryAddConstraint(u, "coincident", { kind: "vertex", bodyId: sq4.id, index: 1 }, { kind: "joint", jointId: j2.id });
   check("two tied corners lock the rotation", u.regularRotationLocked(sq4.id, null));
+}
+
+// ---------------------------------------------------------------- projected corner-pair sizes
+{
+  // The field case: H on a side, then the Measure tool on that side's two ends with the
+  // label above the side → an "h" dimension (same value as the edge length). It must be
+  // a size, or a corner drag resizes the polygon and every solve fails.
+  const s = new Scene();
+  const hex = s.addBody(regularPolygon(vec(0, 0), vec(80 * Math.cos(0.4), 80 * Math.sin(0.4)), 6), 0, "fillet", undefined, undefined, 6);
+  const hDim = s.addMeasurement("draw", { kind: "vertex", bodyId: hex.id, index: 2 }, { kind: "vertex", bodyId: hex.id, index: 3 }, vec(0, 0))!;
+  hDim.axis = "h";
+  check("h corner pair is a projected size while free too", s.regularSizeOfDim(hDim)?.size.kind === "proj");
+  check("H on that side accepted", tryAddConstraint(s, "horizontal", { kind: "edge", bodyId: hex.id, index: 2 }).constraint !== null);
+  const size = s.regularSizeOfDim(hDim);
+  check("h corner pair on the H side is a size", size?.size.kind === "proj" && size.size.axis === "h");
+  check("its value is the edge length", near(s.regularSize(hex.id, null, size!.size)!, 80, 1e-6));
+  check("drives: edge 100 → circumradius 100", applyDrivingDimension(s, hDim.id, 100).length === 0 && near(fitRegularPolygon(s.bodyControlWorld(hex))!.r, 100, 1e-6));
+  check("size driven, rotation locked", s.regularSizeDriven(hex.id, null) && s.regularRotationLocked(hex.id, null));
+  let w = s.bodyControlWorld(hex);
+  for (const d of [vec(30, -20), vec(-15, 45)]) {
+    const pos0 = vec(hex.pos.x, hex.pos.y);
+    const r0 = fitRegularPolygon(s.bodyControlWorld(hex))!.r;
+    s.moveBodyVertex(hex.id, 0, d);
+    const live = solveSketch(s, new Set([`v:${hex.id}:0`]));
+    w = s.bodyControlWorld(hex);
+    check(`corner drag (${d.x},${d.y}) moves the polygon whole, size kept`, live.length === 0 && near(hex.pos.x - pos0.x, d.x, 1e-6) && near(hex.pos.y - pos0.y, d.y, 1e-6) && near(fitRegularPolygon(w)!.r, r0, 1e-6) && near(s.measureInfo(hDim)!.value, 100, 1e-6), `${live.length} breaks, r ${fitRegularPolygon(w)!.r}`);
+  }
+  check("side still horizontal", Math.abs(w[2].y - w[3].y) < 1e-6);
+
+  // A slanted chord's projection: a pentagon's height (apex → base corner, vertical).
+  const u = new Scene();
+  const pent = u.addBody(regularPolygon(vec(0, 0), vec(50, 0), 5), 0, "fillet", undefined, undefined, 5);
+  tryAddConstraint(u, "horizontal", { kind: "edge", bodyId: pent.id, index: 1 }); // 1–2 becomes a horizontal side
+  const pw = u.bodyControlWorld(pent);
+  // The apex is the corner opposite that side (index 4); the height is apex ↔ base corner, vertically.
+  const height = u.addMeasurement("draw", { kind: "vertex", bodyId: pent.id, index: 4 }, { kind: "vertex", bodyId: pent.id, index: 1 }, vec(0, 0))!;
+  height.axis = "v";
+  const hs = u.regularSizeOfDim(height);
+  check("vertical apex–base pair is a projected size", hs?.size.kind === "proj" && hs.size.axis === "v");
+  const expect = Math.abs(pw[4].y - pw[1].y);
+  check("its value is the current height", near(u.regularSize(pent.id, null, hs!.size)!, expect, 1e-6));
+  check("driving the height to 120 scales the pentagon", applyDrivingDimension(u, height.id, 120).length === 0 && near(u.measureInfo(height)!.value, 120, 1e-6) && irregularity(u.bodyControlWorld(pent)) < 1e-6);
+  check("the base stayed horizontal", (() => { const q = u.bodyControlWorld(pent); return Math.abs(q[1].y - q[2].y) < 1e-6; })());
+  // The h projection of that same slanted chord is also a size; the h projection of a
+  // vertical chord is not (nothing to scale).
+  const hh = u.addMeasurement("draw", { kind: "vertex", bodyId: pent.id, index: 4 }, { kind: "vertex", bodyId: pent.id, index: 1 }, vec(0, 0))!;
+  hh.axis = "h";
+  check("h projection of a slanted chord is a size", u.regularSizeOfDim(hh)?.size.kind === "proj");
+  const sq = u.addBody(regularPolygon(vec(300, 0), vec(340, 0), 4), 0, "fillet", undefined, undefined, 4);
+  tryAddConstraint(u, "horizontal", { kind: "edge", bodyId: sq.id, index: 0 });
+  const sw = u.bodyControlWorld(sq);
+  const vertPair = [0, 1, 2, 3].find((i) => Math.abs(sw[i].x - sw[(i + 1) % 4].x) < 1e-6)!;
+  const degenerate = u.addMeasurement("draw", { kind: "vertex", bodyId: sq.id, index: vertPair }, { kind: "vertex", bodyId: sq.id, index: (vertPair + 1) % 4 }, vec(0, 0))!;
+  degenerate.axis = "h";
+  check("h projection of a vertical side is not a size", u.regularSizeOfDim(degenerate) === null);
+
+  // Free rotation: an h projection driven on an unconstrained polygon scales it and keeps
+  // its rotation (no solver item that can stall); a second size that disagrees is refused
+  // and leaves the scene untouched; a later unrelated edit still solves.
+  const f = new Scene();
+  const free = f.addBody(regularPolygon(vec(0, 0), vec(100 * Math.cos(0.25), 100 * Math.sin(0.25)), 6), 0, "fillet", undefined, undefined, 6);
+  const other = f.addBody([vec(500, 0), vec(800, 0), vec(800, 150), vec(500, 150)], 0, "fillet");
+  const proj = f.addMeasurement("draw", { kind: "vertex", bodyId: free.id, index: 4 }, { kind: "vertex", bodyId: free.id, index: 5 }, vec(0, 0))!;
+  proj.axis = "h";
+  const angle0 = free.angle;
+  const v0 = f.measureInfo(proj)!.value;
+  check("free polygon: h projection drives by scaling", applyDrivingDimension(f, proj.id, 200).length === 0 && near(f.measureInfo(proj)!.value, 200, 1e-6) && near(fitRegularPolygon(f.bodyControlWorld(free))!.r, (100 * 200) / v0, 1e-6));
+  check("free polygon: rotation kept", near(free.angle, angle0, 1e-9));
+  check("plain re-solve stays clean", solveSketch(f).length === 0);
+  const edgeDim = f.addMeasurement("draw", { kind: "vertex", bodyId: free.id, index: 0 }, { kind: "vertex", bodyId: free.id, index: 1 }, vec(0, 0))!;
+  edgeDim.axis = "direct";
+  const snapR = fitRegularPolygon(f.bodyControlWorld(free))!.r;
+  const disagree = applyDrivingDimension(f, edgeDim.id, 50);
+  check("a disagreeing second size is refused, naming the size it breaks", disagree.length >= 1 && disagree.some((b) => b.id === proj.id));
+  // (the refusal restores the scene from a snapshot — re-fetch the body, the old object is stale)
+  check("refusal leaves the polygon untouched", near(fitRegularPolygon(f.bodyControlWorld(f.getBody(free.id)!))!.r, snapR, 1e-9) && f.getMeasurement(edgeDim.id)!.driving !== true && near(f.measureInfo(f.getMeasurement(proj.id)!)!.value, 200, 1e-6));
+  check("an agreeing second size is accepted", applyDrivingDimension(f, edgeDim.id, snapR).length === 0);
+  const otherDim = f.addMeasurement("draw", { kind: "vertex", bodyId: other.id, index: 0 }, { kind: "vertex", bodyId: other.id, index: 1 }, vec(0, 0))!;
+  otherDim.axis = "direct";
+  check("an unrelated body still takes dimensions", applyDrivingDimension(f, otherDim.id, 320).length === 0);
+  check("…and constraints", tryAddConstraint(f, "horizontal", { kind: "edge", bodyId: other.id, index: 0 }).constraint !== null);
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

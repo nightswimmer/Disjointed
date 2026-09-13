@@ -67,7 +67,14 @@ pushed adjacent corners are read as an edge-direction demand, so H / V / paralle
 perpendicular on an edge turn it in one step (a 90° turn included). Its **size** is a
 parameter set by **size dimensions** (`Scene.regularSizeOfDim`: a chord between two corners
 measured directly — the edge length included — centre → corner, centre → edge, or across
-flats between opposite edges), applied like a disk diameter (excluded from the vertex system,
+flats between opposite edges; and the **h / v projection of a corner pair** — `{ kind: "proj" }`,
+what the Measure tool yields when the label sits between the two corners, e.g. the two ends of
+a side — which scales with the polygon like any other size and leaves its rotation alone (a
+projection near zero is refused). A dimension never turns a regular polygon: the earlier
+"h / v corner pair turns it" solver item could stall, and one stalled item fails every solve in
+the scene, so nothing else could be dimensioned or constrained. `applyDrivingDimension` also
+refuses a size dimension the polygon can't reach or that disagrees with another driving size
+on the same outline (one parameter, two values), naming the conflicting dimension), applied like a disk diameter (excluded from the vertex system,
 `setRegularSize`, re-applied by `enforceSizeDims`). A **corner drag** respects what the sketch
 leaves free (decided in `moveBodyVertex`, so the live solve never fights it): size driven →
 turn only; rotation locked (`regularRotationLocked`: a line constraint on the polygon, or two

@@ -231,10 +231,22 @@ export type CombineResult = { ok: true; body: Body } | { ok: false; reason: stri
 /**
  * The size measures of a regular-polygon outline a driving dimension can set directly:
  * a chord between corners `k` apart (k = 1 the edge length, k = n/2 across corners), the
- * circumradius (centre → corner), the apothem (centre → edge) or across flats (opposite
- * edges of an even polygon).
+ * circumradius (centre → corner), the apothem (centre → edge), across flats (opposite
+ * edges of an even polygon), or the horizontal / vertical projection of the chord
+ * between corners `i` and `j` (the value the Measure tool gives a corner pair whose
+ * label sits between the two corners; it scales with the polygon like any other size —
+ * the rotation is set by drags and line constraints, never by a dimension).
  */
-export type RegularSize = { kind: "chord"; k: number } | { kind: "radius" } | { kind: "apothem" } | { kind: "flats" };
+export type RegularSize =
+  | { kind: "chord"; k: number }
+  | { kind: "radius" }
+  | { kind: "apothem" }
+  | { kind: "flats" }
+  | { kind: "proj"; i: number; j: number; axis: "h" | "v" };
+
+/** Smallest projected chord (as a fraction of the circumradius) that still counts as a
+ *  size: a chord (nearly) perpendicular to the axis has no usable projection. */
+const REGULAR_PROJ_MIN = 1e-3;
 
 /** Outcome of `Scene.cutBody`: `hole` is the new hole's index when the cut became a plain hole, else null. */
 export type CutResult = { ok: true; hole: number | null } | { ok: false; reason: string };
@@ -1011,9 +1023,18 @@ export class Scene {
     const ctrl = body ? this.controlListOf(body, hole) : null;
     const n = body ? this.outlineRegular(body, hole) : null;
     if (!body || !ctrl || n === null) return null;
+    if (size.kind === "proj") return this.regularProjection(body, ctrl, size);
     const fit = fitRegularPolygon(ctrl);
     if (!fit) return null;
     return Scene.regularMeasure(fit.r, n, size);
+  }
+
+  /** The horizontal / vertical distance between two corners of an outline (world), or null. */
+  private regularProjection(body: Body, ctrl: Vec2[], size: { i: number; j: number; axis: "h" | "v" }): number | null {
+    if (size.i < 0 || size.j < 0 || size.i >= ctrl.length || size.j >= ctrl.length) return null;
+    const a = add(body.pos, rotate(ctrl[size.i], body.angle));
+    const b = add(body.pos, rotate(ctrl[size.j], body.angle));
+    return size.axis === "h" ? Math.abs(b.x - a.x) : Math.abs(b.y - a.y);
   }
 
   /** Resize a regular outline about its centre so that measure `size` equals `value`
@@ -1026,13 +1047,21 @@ export class Scene {
     const world = ctrl.map((p) => add(body.pos, rotate(p, body.angle)));
     const fit = fitRegularPolygon(world);
     if (!fit) return;
-    const r = value / Scene.regularMeasure(1, n, size);
+    let r: number;
+    if (size.kind === "proj") {
+      // A projected chord: every corner offset scales with r (phase kept), so the
+      // projection does too — scale by the ratio to the current value.
+      const cur = this.regularProjection(body, ctrl, size);
+      if (cur === null || !(cur > REGULAR_PROJ_MIN * fit.r)) return;
+      r = (fit.r * value) / cur;
+    } else r = value / Scene.regularMeasure(1, n, size);
     const winding: 1 | -1 = polygonArea(ctrl) >= 0 ? 1 : -1;
     this.applyOutlineWorld(body, hole, regularPolygonFrom(fit.c, r, fit.phase, n, winding));
   }
 
-  /** Measure `size` of a regular `n`-gon of circumradius `r`. */
-  static regularMeasure(r: number, n: number, size: RegularSize): number {
+  /** Measure `size` of a regular `n`-gon of circumradius `r` (not for projections — those
+   *  depend on the polygon's orientation, see `regularSize`). */
+  static regularMeasure(r: number, n: number, size: Exclude<RegularSize, { kind: "proj" }>): number {
     switch (size.kind) {
       case "chord": return 2 * r * Math.sin((size.k * Math.PI) / n);
       case "radius": return r;
@@ -1047,8 +1076,12 @@ export class Scene {
    * length), the centre to a corner (the circumradius), the centre to an edge (the
    * apothem), or two opposite edges of an even polygon (across flats). Such a dimension
    * is the outline's size parameter — set directly, never through the vertex system
-   * (where the outline is rigid). A corner pair dimensioned horizontally / vertically is
-   * not a size: it turns the polygon instead.
+   * (where the outline is rigid). A corner pair dimensioned horizontally / vertically —
+   * what the Measure tool produces for a label placed between the two corners — is the
+   * projected chord, a size like the others: the polygon scales to it and keeps its
+   * rotation (turning the polygon to meet a projection was a solver item that could stall,
+   * and one stalled item fails every solve in the scene). A projection near zero (a chord
+   * across the axis) is not a size — nothing can scale it to a value.
    */
   regularSizeOfDim(m: Measurement): { bodyId: number; hole: number | null; size: RegularSize } | null {
     const a = m.refA, b = m.refB;
@@ -1065,7 +1098,13 @@ export class Scene {
     };
     if (a.kind === "vertex" && b.kind === "vertex") {
       const k = apart(a.index, b.index);
-      return m.axis === "direct" && k >= 1 ? { ...at, size: { kind: "chord", k } } : null;
+      if (k < 1) return null;
+      if (m.axis === "direct") return { ...at, size: { kind: "chord", k } };
+      if (m.axis !== "h" && m.axis !== "v") return null;
+      const size: RegularSize = { kind: "proj", i: a.index, j: b.index, axis: m.axis };
+      const cur = this.regularSize(at.bodyId, at.hole, size);
+      const r = fitRegularPolygon(this.controlListOf(body, at.hole)!)?.r ?? 0;
+      return cur !== null && cur > REGULAR_PROJ_MIN * r ? { ...at, size } : null;
     }
     if ((a.kind === "centre" && b.kind === "vertex") || (a.kind === "vertex" && b.kind === "centre")) {
       return m.axis === "direct" ? { ...at, size: { kind: "radius" } } : null;
