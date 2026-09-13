@@ -59,7 +59,7 @@ import {
   anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
 } from "./sketch";
 import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolated } from "./pose";
-import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView } from "./renderer";
+import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView, dimensionLabelHit, dimensionLabelWidth, LabelHit } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine, distToArc, regularPolygon, arcThrough, sampleArc } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt, rotateViewTo, rotateToScreen, rotateToWorld } from "./view";
 import { installHelp } from "./help";
@@ -3268,14 +3268,11 @@ function addTempDim(refA: TempRef, refB: TempRef, labelPos: Vec2): TempDim | nul
   return td;
 }
 
-/** Move a temporary dimension's label (a point pair re-derives h / v / direct, like the scene's). */
+/** Move a temporary dimension's label. Only the label moves — the axis a point pair was
+ *  placed with is fixed, like the scene's (`Scene.setMeasurementLabel`). */
 function setTempDimLabel(td: TempDim, labelPos: Vec2): void {
-  const a = resolveTemp(td.refA);
-  const b = resolveTemp(td.refB);
-  if (!a || !b) return;
-  const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
-  td.labelOffset = sub(labelPos, anchor);
-  if (a.kind === "point" && b.kind === "point") td.axis = measureAxisForPlacement(a.p, b.p, labelPos);
+  const anchor = tempDimAnchor(td);
+  if (anchor) td.labelOffset = sub(labelPos, anchor);
 }
 
 function removeTempDim(id: number): void {
@@ -3284,15 +3281,27 @@ function removeTempDim(id: number): void {
   if (i >= 0) list.splice(i, 1);
 }
 
-/** The temporary dimension whose label sits under `p` (topmost first), or null. */
-function tempDimLabelAt(p: Vec2): TempDim | null {
+/** The temporary dimension whose label pill sits under `p` (topmost first) and which part of it. */
+function tempDimLabelHitAt(p: Vec2): { td: TempDim; hit: LabelHit } | null {
   if (!measureVisible || mode !== "draw") return null;
   const list = curTempDims();
   for (let i = list.length - 1; i >= 0; i--) {
-    const lp = tempDimLabelPos(list[i]);
-    if (lp && dist(lp, p) <= LABEL_PICK_RADIUS / view.scale) return list[i];
+    const info = tempDimInfo(list[i]);
+    const hit = info ? labelHitAt(info, p) : null;
+    if (hit) return { td: list[i], hit };
   }
   return null;
+}
+
+/** The temporary dimension whose label sits under `p` (topmost first), or null. */
+function tempDimLabelAt(p: Vec2): TempDim | null {
+  return tempDimLabelHitAt(p)?.td ?? null;
+}
+
+/** The temporary dimension whose label's direction glyph sits under `p`, or null. */
+function tempDimGlyphAt(p: Vec2): TempDim | null {
+  const h = tempDimLabelHitAt(p);
+  return h?.hit === "glyph" ? h.td : null;
 }
 
 /** Drop temporary dimensions whose ends no longer resolve (a def edit removed a corner,
@@ -4844,17 +4853,113 @@ function placeMeasurement(pa: TempRef, pb: TempRef, p: Vec2): void {
   }
 }
 
-/** The current mode's measurement whose value label sits under `p`, or null (topmost first). */
-function measurementLabelAt(p: Vec2): Measurement | null {
+/**
+ * Where world point `p` falls on the label pill drawn for `info`: `"glyph"` (the direction
+ * arrow, which is a button), `"value"` (the rest of the pill), or null. The pill's real
+ * extent is the pick target (`dimensionLabelHit`, on the renderer's own layout), with the
+ * old round zone about the centre kept as a floor so a short pill grabs as easily as ever.
+ */
+function labelHitAt(info: MeasureInfo, p: Vec2): LabelHit | null {
+  const paren = mode === "draw" && !info.driving;
+  const hit = dimensionLabelHit(ctx, info, paren, scene.unit, worldToScreen(view, info.labelPos), worldToScreen(view, p));
+  if (hit) return hit;
+  return dist(info.labelPos, p) <= LABEL_PICK_RADIUS / view.scale ? "value" : null;
+}
+
+/** The current mode's measurement whose label pill sits under `p` (topmost first) and which part of it. */
+function measurementLabelHitAt(p: Vec2): { m: Measurement; hit: LabelHit } | null {
   if (!measureVisible) return null; // hidden measurements aren't clickable
   const mm = mode === "sim" ? "sim" : "draw";
   for (let i = scene.measurements.length - 1; i >= 0; i--) {
     const m = scene.measurements[i];
     if (m.mode !== mm) continue;
-    const lp = scene.measurementLabelPos(m);
-    if (lp && dist(lp, p) <= LABEL_PICK_RADIUS / view.scale) return m;
+    const info = scene.measureInfo(m); // null = not drawn this frame, so not clickable either
+    const hit = info ? labelHitAt(info, p) : null;
+    if (hit) return { m, hit };
   }
   return null;
+}
+
+/** The current mode's measurement whose value label sits under `p`, or null (topmost first). */
+function measurementLabelAt(p: Vec2): Measurement | null {
+  return measurementLabelHitAt(p)?.m ?? null;
+}
+
+/** The current mode's measurement whose label's direction glyph sits under `p`, or null. */
+function measurementGlyphAt(p: Vec2): Measurement | null {
+  const h = measurementLabelHitAt(p);
+  return h?.hit === "glyph" ? h.m : null;
+}
+
+/** The glyph click's cycle: horizontal → vertical → direct → horizontal. */
+const NEXT_AXIS: Record<"h" | "v" | "direct", "h" | "v" | "direct"> = { h: "v", v: "direct", direct: "h" };
+
+/**
+ * A press on a dimension label's direction glyph: cycle the point–point axis (the one
+ * deliberate way to change what a dimension measures — dragging its label never does)
+ * and select the dimension. A driving dimension keeps its target and the sketch
+ * re-solves along the new axis with the usual reject semantics: when the held value
+ * can't be met that way the direction stays and the dimension flashes. Context
+ * dimensions onto the ghost cycle the same way (session state, nothing to record).
+ * Returns false when no glyph is under `p`, so the press falls through to the normal
+ * label grab / selection.
+ */
+function clickDimensionGlyph(p: Vec2): boolean {
+  const td = tempDimGlyphAt(p);
+  if (td) {
+    if (td.axis === "h" || td.axis === "v" || td.axis === "direct") {
+      const before = tempDimInfo(td);
+      td.axis = NEXT_AXIS[td.axis];
+      const after = tempDimInfo(td);
+      const lp = before && after ? keepGlyphPut(before, after) : null;
+      if (lp) setTempDimLabel(td, lp);
+    }
+    multiSel = null;
+    selection = { kind: "tempDim", id: td.id };
+    return true;
+  }
+  const m = measurementGlyphAt(p);
+  if (!m) return false;
+  multiSel = null;
+  selection = { kind: "measure", id: m.id };
+  if (m.axis !== "h" && m.axis !== "v" && m.axis !== "direct") return true;
+  const prev = m.axis;
+  const before = scene.measureInfo(m);
+  if (!scene.setMeasurementAxis(m.id, NEXT_AXIS[prev])) return true;
+  if (m.driving && m.target !== undefined) {
+    const breaks = applyDimensionValue(scene, m.id, m.target);
+    if (breaks.length) {
+      scene.setMeasurementAxis(m.id, prev); // the geometry is untouched, so the side re-captures as it was
+      flashSketchItems(breaks);
+      return true;
+    }
+  }
+  const after = scene.measureInfo(m);
+  const lp = before && after ? keepGlyphPut(before, after) : null;
+  if (lp) scene.setMeasurementLabel(m.id, lp);
+  markDirty();
+  return true;
+}
+
+/** Screen width of a dimension's label pill as drawn in the current mode. */
+function labelWidth(info: MeasureInfo): number {
+  return dimensionLabelWidth(ctx, info, mode === "draw" && !info.driving, scene.unit);
+}
+
+/**
+ * The label position that keeps a pill's glyph end where it was after its value text
+ * changed length. The pill is centred on the label position, so a longer / shorter value
+ * would slide its left end — the button just pressed — sideways from under the cursor,
+ * and the next click would land on the value instead (a 2-digit → 5-character value moves
+ * it ~11 px, about the glyph's own width). Shifting the label by half the width change,
+ * along screen x, makes the pill grow and shrink at its value end only. Null when the
+ * width didn't change.
+ */
+function keepGlyphPut(before: MeasureInfo, after: MeasureInfo): Vec2 | null {
+  const dw = labelWidth(after) - labelWidth(before);
+  if (Math.abs(dw) < 0.01) return null;
+  const s = worldToScreen(view, after.labelPos);
+  return screenToWorld(view, vec(s.x + dw / 2, s.y));
 }
 
 /** The sketch constraint whose badge sits under `p` (using last frame's badge layout), or null. */
@@ -6770,6 +6875,9 @@ canvas.addEventListener("mousedown", (e) => {
         const h = patternHandleAt(world)!;
         leftDrag = { kind: "patternHandle", id: h.id, axis: h.axis, moved: false };
         canvas.style.cursor = "move";
+      } else if (!e.shiftKey && clickDimensionGlyph(world)) {
+        // The direction glyph on a dimension label is a button: the press cycled the
+        // axis and selected the dimension — nothing to drag.
       } else if (e.shiftKey) {
         // Shift+drag: rigid drag — what's grabbed moves like in simulation (grounds
         // hold, connections constrain) while the rest of the scene stays frozen.
@@ -6863,7 +6971,9 @@ canvas.addEventListener("mousedown", (e) => {
       return;
     }
     // A measurement's value label is the topmost overlay: grab it to reposition,
-    // select it to delete — without disturbing the mechanism underneath.
+    // select it to delete — without disturbing the mechanism underneath. Its direction
+    // glyph is a button (cycles h / v / direct).
+    if (clickDimensionGlyph(world)) return;
     const ml = measurementLabelAt(world);
     if (ml) {
       selection = { kind: "measure", id: ml.id };
@@ -6965,8 +7075,9 @@ canvas.addEventListener("mousemove", (e) => {
   }
 
   if (leftDrag) {
-    // A measurement label follows the cursor exactly (no grid snap — it's an annotation,
-    // and a new placement re-derives h/v/direct for a point–point measurement).
+    // A measurement label follows the cursor exactly (no grid snap — it's an annotation).
+    // Only the label moves: a point–point dimension keeps the h / v / direct axis it was
+    // placed with, whatever zone the label lands in.
     if (leftDrag.kind === "measureLabel") {
       if (leftDrag.temp) {
         const td = getTempDim(leftDrag.id);
@@ -7082,6 +7193,8 @@ canvas.addEventListener("mousemove", (e) => {
       scene.guideAt(world, pickRadius()) !== undefined;
     // With Shift held a drag would be rigid (sim-style), so hint with the sim grab cursor.
     canvas.style.cursor = grabbable ? (e.shiftKey ? "grab" : "move") : "crosshair";
+    // The direction glyph on a dimension label is a button (a click cycles h / v / direct).
+    if (!e.shiftKey && (measurementGlyphAt(world) || tempDimGlyphAt(world))) canvas.style.cursor = "pointer";
   }
   // Rotate tool: a grab cursor over a node of the selected body or any body.
   if (mode === "draw" && tool === "rotate") {
@@ -7091,7 +7204,7 @@ canvas.addEventListener("mousemove", (e) => {
   if (mode === "sim") {
     if (driver) driver.target = world;
     else if (tool === "measure") canvas.style.cursor = "crosshair";
-    else if (measurementLabelAt(world)) canvas.style.cursor = "move";
+    else if (measurementLabelAt(world)) canvas.style.cursor = measurementGlyphAt(world) ? "pointer" : "move";
     else {
       // Hint that joints and bodies are both grabbable to drive the mechanism.
       const grabbable = hoverJoint !== null || scene.bodyAt(world) !== undefined;
@@ -7220,16 +7333,18 @@ canvas.addEventListener("dblclick", (e) => {
       openPatternEditor(pl.id, pl.field, pl.axis);
       return;
     }
+    // (A double-click on a label's direction glyph is two button presses — the axis
+    // cycled twice on the mousedowns — not a request to edit the value.)
     const tl = tempDimLabelAt(eventWorld(e));
     if (tl) {
       leftDrag = null;
-      openTempDimEditor(tl); // one-shot move of the live side to the typed value
+      if (!tempDimGlyphAt(eventWorld(e))) openTempDimEditor(tl); // one-shot move of the live side to the typed value
       return;
     }
     const ml = measurementLabelAt(eventWorld(e));
     if (ml) {
       leftDrag = null; // the double-click's mousedowns started a label drag — cancel it
-      openDimEditor(ml);
+      if (!measurementGlyphAt(eventWorld(e))) openDimEditor(ml);
       return;
     }
     // Double-click a text label to edit its text in place.

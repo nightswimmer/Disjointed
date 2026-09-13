@@ -266,6 +266,11 @@ set of measurements. What gets measured follows from the two references you pick
 
 - **Two points** — where you place the value picks the dimension, CAD-style: above/below the
   pair → **horizontal** distance, beside it → **vertical**, in the diagonal zones → **direct**.
+  The value pill leads with a small arrow saying which (↔ horizontal, ↕ vertical, ⤢ direct),
+  and the choice is fixed once placed — dragging the pill afterwards only moves the pill.
+  **Click the arrow** to change it: each click cycles horizontal → vertical → direct. A
+  driving dimension keeps its value and the geometry follows along the new direction (or,
+  if it can't, the change is refused and the dimension flashes).
 - **A point and a line** — the perpendicular distance to the (infinite) line. The dimension
   line sits wherever you drag the label along the line, with dashed extensions back to the
   point (and to the line's end when you're beyond it).
@@ -295,8 +300,9 @@ set of measurements. What gets measured follows from the two references you pick
 References anchor to the elements themselves, so in **Simulate mode the values update live**
 as the mechanism moves — measure a stroke length by dimensioning two joints, or a transmission
 angle by dimensioning two rails. Click a value pill to select it, drag it to reposition
-(a point–point dimension re-derives h/v/direct), press **Delete** to remove it — all of this
-works in both modes. Measurements are saved with the mechanism.
+(only the label moves — a dimension's direction is fixed when it is placed, and a pill dragged
+past the end of its dimension line gets a dashed leader back to it), press **Delete** to
+remove it — all of this works in both modes. Measurements are saved with the mechanism.
 
 **Sketch constraints & driving dimensions** (draw mode). Draw mode works like a CAD sketch:
 

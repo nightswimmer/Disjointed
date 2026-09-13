@@ -1642,6 +1642,111 @@ function drawArrowHead(
   ctx.stroke();
 }
 
+/** Width of the direction glyph in a dimension label, and its gap to the value text (screen px). */
+const AXIS_GLYPH_W = 11;
+const AXIS_GLYPH_GAP = 4;
+/** The dimension-label pill: its font, padding either side of the content, and height (screen px). */
+const LABEL_FONT = "12px ui-sans-serif, system-ui, sans-serif";
+const LABEL_PAD = 6;
+const LABEL_H = 18;
+
+/**
+ * Screen-space layout of a dimension label pill: the value text and its width, the room
+ * the direction glyph takes before it (`lead`, 0 without a glyph), and the pill size.
+ * Sets the label font on `ctx` for the measurement (callers save / restore). Drawing and
+ * hit-testing both go through here so the picked region is exactly the drawn pill.
+ */
+function labelLayout(
+  ctx: CanvasRenderingContext2D,
+  info: MeasureInfo,
+  paren: boolean,
+  unit: string
+): { text: string; tw: number; lead: number; pw: number; ph: number } {
+  ctx.font = LABEL_FONT;
+  const text = measureText(info, paren, unit);
+  const tw = ctx.measureText(text).width;
+  const lead = info.axis !== undefined ? AXIS_GLYPH_W + AXIS_GLYPH_GAP : 0;
+  return { text, tw, lead, pw: tw + lead + 2 * LABEL_PAD, ph: LABEL_H };
+}
+
+/** Screen width (CSS px) of the dimension label pill for `info`, so a caller can keep one end of it anchored. */
+export function dimensionLabelWidth(ctx: CanvasRenderingContext2D, info: MeasureInfo, paren: boolean, unit: string): number {
+  ctx.save();
+  const { pw } = labelLayout(ctx, info, paren, unit);
+  ctx.restore();
+  return pw;
+}
+
+/** The part of a dimension label pill a point falls on: its direction glyph, or the rest. */
+export type LabelHit = "glyph" | "value";
+
+/**
+ * Where canvas point `at` (CSS px) falls on the dimension label for `info`, drawn centred
+ * on `label` (CSS px): `"glyph"` on the direction arrow's end of the pill (up to halfway
+ * into its gap), `"value"` anywhere else on the pill, null off it — with a couple of
+ * pixels of slack all round. The same layout `drawMeasurement` uses, so the hit region
+ * can't drift from the picture. A label without a glyph is all `"value"`.
+ */
+export function dimensionLabelHit(
+  ctx: CanvasRenderingContext2D,
+  info: MeasureInfo,
+  paren: boolean,
+  unit: string,
+  label: Vec2,
+  at: Vec2
+): LabelHit | null {
+  ctx.save();
+  const { pw, ph, lead } = labelLayout(ctx, info, paren, unit);
+  ctx.restore();
+  const slack = 3;
+  const left = label.x - pw / 2;
+  if (at.x < left - slack || at.x > left + pw + slack || Math.abs(at.y - label.y) > ph / 2 + slack) return null;
+  return lead > 0 && at.x <= left + LABEL_PAD + AXIS_GLYPH_W + AXIS_GLYPH_GAP / 2 ? "glyph" : "value";
+}
+
+/**
+ * The direction glyph of a point–point dimension label: a small double-headed arrow —
+ * horizontal for an h dimension, vertical for v, a rising diagonal for a direct distance.
+ * The diagonal is a fixed 45°, not the pair's own angle: a direct dimension on a level
+ * pair must still read differently from an h one (that is exactly the case where the
+ * drawing can't tell them apart). Vector art rather than ↔ ↕ ⤢: the characters come out
+ * at different sizes and weights across fonts, and ⤢ is missing in some. Screen space,
+ * centred on (cx, cy).
+ */
+function drawAxisGlyph(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  axis: "h" | "v" | "direct",
+  color: string,
+  bold: boolean
+): void {
+  const u = axis === "h" ? { x: 1, y: 0 } : axis === "v" ? { x: 0, y: 1 } : { x: Math.SQRT1_2, y: -Math.SQRT1_2 };
+  const half = axis === "direct" ? 4.5 : 5; // the diagonal's box matches the others' extent
+  const wing = 2.8;
+  const a = { x: cx - u.x * half, y: cy - u.y * half };
+  const b = { x: cx + u.x * half, y: cy + u.y * half };
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = bold ? 1.5 : 1.2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+  // A 90° head at each end (wings at ±45° to the shaft).
+  for (const [tip, d] of [[b, u], [a, scale(u, -1)]] as const) {
+    ctx.beginPath();
+    ctx.moveTo(tip.x - d.x * wing - d.y * wing, tip.y - d.y * wing + d.x * wing);
+    ctx.lineTo(tip.x, tip.y);
+    ctx.lineTo(tip.x - d.x * wing + d.y * wing, tip.y - d.y * wing - d.x * wing);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 /**
  * Draw one measurement: dashed extension lines, an arrowed dimension line (distance) or
  * an arc (angle), and the value label — rendered in screen space at a constant size.
@@ -1713,26 +1818,30 @@ function drawMeasurement(
     ctx.setLineDash([]);
   }
 
-  // Value label: a pill + text drawn in screen space so it stays legible at any zoom.
-  const text = measureText(info, paren, unit);
+  // Value label: a pill + text drawn in screen space so it stays legible at any zoom. A
+  // point–point dimension leads with its direction glyph (↔ / ↕ / ⤢ as vector art): the
+  // axis is fixed at placement and the label can sit anywhere afterwards, so the glyph
+  // is what tells an h dimension whose label was dragged beside the pair from a v one.
+  // The pill stays centred on `labelPos` (the pick / editor anchor), glyph included; the
+  // glyph doubles as a button (`dimensionLabelHit`), so the layout is shared.
   const { x: sx, y: sy } = worldToScreen(view, info.labelPos);
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
-  const tw = ctx.measureText(text).width;
-  const pw = tw + 12;
-  const ph = 18;
+  const { text, tw, lead, pw, ph } = labelLayout(ctx, info, paren, unit);
+  const left = sx - pw / 2;
+  const bold = selected || !!info.driving; // a driving dimension reads bolder
   ctx.beginPath();
-  ctx.roundRect(sx - pw / 2, sy - ph / 2, pw, ph, 5);
+  ctx.roundRect(left, sy - ph / 2, pw, ph, 5);
   ctx.fillStyle = theme.surface + (draft ? "cc" : "e6");
   ctx.fill();
   ctx.strokeStyle = color;
-  ctx.lineWidth = selected || info.driving ? 1.6 : 1; // a driving dimension reads bolder
+  ctx.lineWidth = bold ? 1.6 : 1;
   ctx.stroke();
+  if (info.axis !== undefined) drawAxisGlyph(ctx, left + LABEL_PAD + AXIS_GLYPH_W / 2, sy, info.axis, color, bold);
   ctx.fillStyle = color;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, sx, sy + 0.5);
+  ctx.fillText(text, left + LABEL_PAD + lead + tw / 2, sy + 0.5);
   ctx.restore();
 }
 

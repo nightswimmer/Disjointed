@@ -238,6 +238,19 @@ motion; actuators / motors animate.
   `drawLockGlyph` — it matches the tool's toolbar icon, and every character that means "locked"
   is either an emoji, which ignores the badge colour, or another shape-in-a-shape that reads as
   the coincident ◎ at that size). `SvgRecorder` replays the drawn glyph fine.
+- **A dimension's direction is fixed at placement.** The h / v / direct choice of a point–point
+  dimension is read from the label position only when it is created (`measureAxisForPlacement`);
+  `setMeasurementLabel` and the context dimensions' `setTempDimLabel` move the label and nothing
+  else (they used to re-derive the axis, which silently changed what a dragged dimension
+  measured). Because the label can then sit anywhere, the pill leads with a direction glyph
+  (`MeasureInfo.axis`, set only by `pointPointInfo`; `drawAxisGlyph` — vector art like the
+  padlock, a fixed 45° diagonal for direct so it never looks like h on a level pair). The glyph
+  is also the **only** control that changes the direction: a click cycles h → v → direct
+  (`clickDimensionGlyph` in main.ts → `Scene.setMeasurementAxis`); a driving dimension keeps its
+  target and re-solves along the new axis through `applyDimensionValue`, reverting on a reject.
+  Pill layout lives in the renderer (`labelLayout`) and label hit-testing goes through
+  `dimensionLabelHit` on the same layout, with the old 16 px pick circle kept as a floor. A
+  label dragged past an end of its dimension line gets a dashed leader (`pushLeader`).
 - Tools are **one-shot** (Rotate is a mode; the polyline/body draft spans clicks). Toolbar wiring is
   by id / `data-*` / class, never button text **and never by position** — the user reorders the
   groups. All user-facing warnings go through `notify`.
@@ -318,9 +331,10 @@ it for the exact cases.
   Currently pending there: guideline removal, parametric polygons and the "n sides" tag,
   projected corner-pair size dimensions, single-click line dimensions, the two-candidate /
   point-on-point implicit constraints with their new toolbar switch, the Fixed constraint,
-  line midpoints as snap / implicit-constraint / placement targets, and stale what's-this
-  strings. One manual exception so far: a **text-only** `tool-fixed` topic had
-  to be written, because `npm run manual` hard-fails on a topic the app can ask for and every
+  line midpoints as snap / implicit-constraint / placement targets, the fixed dimension
+  direction with its pill glyph / glyph button / off-line leader, and stale what's-this
+  strings. One manual exception so far: a **text-only** `tool-fixed` topic had to be
+  written, because `npm run manual` hard-fails on a topic the app can ask for and every
   `data-tool` button implies one — it still needs the illustration pass like the rest.
 - Plain `L` arms the Fixed constraint (F was already fit-view); a full shortcut remap is planned.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.

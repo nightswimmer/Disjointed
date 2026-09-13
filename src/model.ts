@@ -510,8 +510,11 @@ export interface GuideLine {
 export type MeasureMode = "draw" | "sim";
 
 /**
- * For a point–point measurement, which distance the label placement selected:
- * `"h"` horizontal (|Δx|), `"v"` vertical (|Δy|), `"direct"` straight-line.
+ * For a point–point measurement, which distance the label's placement **at creation**
+ * selected: `"h"` horizontal (|Δx|), `"v"` vertical (|Δy|), `"direct"` straight-line.
+ * Moving the label afterwards never changes it; the only way to is an explicit click on
+ * the label's direction glyph (`Scene.setMeasurementAxis`), which is also what keeps the
+ * choice visible wherever the label sits.
  * `"diameter"` is the special case of a dimension whose two refs are the *same*
  * control vertex of a **disk outline** (a one-point offset-mode outer outline or hole):
  * it measures — and, when driving, sets — that disk's diameter. `"radius"` is the
@@ -708,6 +711,14 @@ export interface MeasureInfo {
    *  definition is edited): drawn in the muted context tint, never persisted. */
   temp?: boolean;
   labelPos: Vec2;
+  /**
+   * The direction a point–point distance measures along (`h` |Δx|, `v` |Δy|, `direct`
+   * straight-line), drawn as a small double arrow in the label — the axis is fixed at
+   * placement, so the drawing alone can't always tell which one it is. Absent for every
+   * other kind (point–line, line–line, diameter, radius, angle), whose meaning the drawing
+   * itself shows.
+   */
+  axis?: "h" | "v" | "direct";
   /** The disk a diameter dimension measures (its value is 2·r; drawn with a ⌀ prefix). */
   circle?: { c: Vec2; r: number };
   /** The corner arc a radius dimension measures (value r; drawn with an R prefix). */
@@ -3410,8 +3421,12 @@ export class Scene {
   }
 
   /**
-   * Move a measurement's label to a new world position. For a point–point measurement
-   * the new placement also re-derives the axis (h / v / direct), like at creation.
+   * Move a measurement's label to a new world position. Only the label moves: the axis a
+   * point–point dimension got from its original placement (h / v / direct) is fixed for
+   * life, so dragging the value pill around can never silently turn a horizontal size
+   * into a vertical one — the pill's direction glyph says which it is. (Diameter / radius
+   * dimensions never re-derived either: their label only picks where the line is drawn
+   * through the disk / arc.)
    */
   setMeasurementLabel(id: number, labelPos: Vec2): void {
     const m = this.getMeasurement(id);
@@ -3421,15 +3436,24 @@ export class Scene {
     if (!a || !b) return;
     const anchor = scale(add(refCenter(a), refCenter(b)), 0.5);
     m.labelOffset = sub(labelPos, anchor);
-    // A diameter / radius dimension keeps its axis wherever the label goes (the label's
-    // direction only picks where the dimension line is drawn through the disk / arc).
-    if (m.axis !== "diameter" && m.axis !== "radius" && a.kind === "point" && b.kind === "point") {
-      const before = m.axis;
-      m.axis = measureAxisForPlacement(a.p, b.p, labelPos);
-      // A driving dimension that changed axis measures a different quantity — its held
-      // side re-captures from the current geometry (h/v gain one, direct drops it).
-      if (m.driving && m.axis !== before) this.captureMeasurementSide(m);
-    }
+  }
+
+  /**
+   * Switch a point–point dimension's axis — the deliberate way to change what it measures
+   * after placement (the label's direction glyph cycles h → v → direct). Refused (false)
+   * for every other kind: a diameter / radius, point–line or line–line dimension has no
+   * axis to choose. A driving dimension re-captures its held side for the new quantity
+   * (h / v gain one, direct drops it); the caller re-solves with the target it still holds.
+   */
+  setMeasurementAxis(id: number, axis: "h" | "v" | "direct"): boolean {
+    const m = this.getMeasurement(id);
+    if (!m || m.axis === "diameter" || m.axis === "radius") return false;
+    const a = this.resolveMeasureRef(m.refA);
+    const b = this.resolveMeasureRef(m.refB);
+    if (!a || !b || a.kind !== "point" || b.kind !== "point") return false;
+    m.axis = axis;
+    if (m.driving) this.captureMeasurementSide(m);
+    return true;
   }
 
   /**
@@ -6857,6 +6881,24 @@ function pushExt(ext: { a: Vec2; b: Vec2 }[], a: Vec2, b: Vec2): void {
   if (dist(a, b) > 1e-6) ext.push({ a, b });
 }
 
+/**
+ * Leader from a dimension line `a`–`b` to a label dragged past one of its ends. The
+ * label of an h / v / direct, point–line or parallel line–line dimension always sits on
+ * the dimension line's *supporting* line (the line is drawn at the label's height /
+ * offset / position), but nothing keeps it between the arrows: beyond an end, a dashed
+ * leader continues the line from that end to the label, so the value still reads as
+ * belonging to it (the diameter / radius leaders' convention). Nothing while the label
+ * is between the ends, or for a degenerate line.
+ */
+function pushLeader(ext: { a: Vec2; b: Vec2 }[], a: Vec2, b: Vec2, labelPos: Vec2): void {
+  const d = sub(b, a);
+  const l2 = dot(d, d);
+  if (l2 < 1e-12) return;
+  const s = dot(sub(labelPos, a), d) / l2;
+  if (s < 0) pushExt(ext, a, labelPos);
+  else if (s > 1) pushExt(ext, b, labelPos);
+}
+
 function pointPointInfo(
   id: number,
   p: Vec2,
@@ -6871,14 +6913,16 @@ function pointPointInfo(
     const d2 = vec(q.x, labelPos.y);
     pushExt(ext, p, d1);
     pushExt(ext, q, d2);
-    return { id, kind: "distance", value: Math.abs(q.x - p.x), labelPos, dim: { a: d1, b: d2 }, ext };
+    pushLeader(ext, d1, d2, labelPos);
+    return { id, kind: "distance", value: Math.abs(q.x - p.x), labelPos, axis: "h", dim: { a: d1, b: d2 }, ext };
   }
   if (axis === "v") {
     const d1 = vec(labelPos.x, p.y);
     const d2 = vec(labelPos.x, q.y);
     pushExt(ext, p, d1);
     pushExt(ext, q, d2);
-    return { id, kind: "distance", value: Math.abs(q.y - p.y), labelPos, dim: { a: d1, b: d2 }, ext };
+    pushLeader(ext, d1, d2, labelPos);
+    return { id, kind: "distance", value: Math.abs(q.y - p.y), labelPos, axis: "v", dim: { a: d1, b: d2 }, ext };
   }
   // Direct: the dimension line is parallel to p–q, offset sideways to pass by the label.
   const d = sub(q, p);
@@ -6893,7 +6937,8 @@ function pointPointInfo(
   const d2 = add(q, off);
   pushExt(ext, p, d1);
   pushExt(ext, q, d2);
-  return { id, kind: "distance", value: l, labelPos, dim: { a: d1, b: d2 }, ext };
+  pushLeader(ext, d1, d2, labelPos);
+  return { id, kind: "distance", value: l, labelPos, axis: "direct", dim: { a: d1, b: d2 }, ext };
 }
 
 /**
@@ -6954,6 +6999,7 @@ function pointLineInfo(
   pushExt(ext, p, d2); // from the point along to the dimension line's far end
   if (t < 0) pushExt(ext, line.a, d1);
   else if (t > l) pushExt(ext, line.b, d1);
+  pushLeader(ext, d2, d1, labelPos); // a label dragged past the point's side, or through the line
   return { id, kind: "distance", value: len(across), labelPos, dim: { a: d2, b: d1 }, ext };
 }
 
@@ -6983,6 +7029,7 @@ function lineLineInfo(
     else if (t1 > len1) pushExt(ext, l1.b, f1);
     if (t2 < 0) pushExt(ext, l2.a, f2);
     else if (t2 > len2) pushExt(ext, l2.b, f2);
+    pushLeader(ext, f1, f2, labelPos); // a label dragged outside the pair of lines
     return { id, kind: "distance", value: dist(f1, f2), labelPos, dim: { a: f1, b: f2 }, ext };
   }
   // Not parallel: the angle of whichever sector the label sits in (of the four the two

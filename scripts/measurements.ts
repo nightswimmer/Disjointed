@@ -45,6 +45,8 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   check("h value = |Δx|", near(iH.value, 60), `${iH.value}`);
   check("v value = |Δy|", near(iV.value, 80), `${iV.value}`);
   check("h dimension line at label height", near(iH.dim!.a.y, -50) && near(iH.dim!.b.y, -50));
+  // The display info carries the axis, so the label can show its direction glyph.
+  check("point-point info carries its axis", iH.axis === "h" && iV.axis === "v" && iD.axis === "direct");
 
   // Preview (no measurement created) matches what placement would create.
   const before = s.measurements.length;
@@ -52,9 +54,33 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   check("preview value matches placement", prev.kind === "distance" && near(prev.value, 100));
   check("preview creates nothing", s.measurements.length === before);
 
-  // Re-placing the label re-derives the axis.
+  // Re-placing the label only moves the label: the axis picked at creation is fixed,
+  // even when the new position is in another placement zone (beside the pair here).
   s.setMeasurementLabel(mH.id, { x: 120, y: 40 });
-  check("label move re-derives axis", mH.axis === "v" && near(s.measureInfo(mH)!.value, 80));
+  const movedH = s.measureInfo(mH)!;
+  check("label move keeps the axis", mH.axis === "h" && near(movedH.value, 60), `${mH.axis} ${movedH.value}`);
+  check("label move lands the label", near(movedH.labelPos.x, 120) && near(movedH.labelPos.y, 40));
+  check("h dimension line follows the label's height", near(movedH.dim!.a.y, 40) && near(movedH.dim!.b.y, 40));
+  // A label between the arrows has no leader; one dragged past an end gets a dashed
+  // leader from that end (here x = 60 → 120 at the label's height).
+  check("label between the arrows: no leader", iH.ext.length === 2);
+  check(
+    "label past the end of the dimension line gets a leader",
+    movedH.ext.length === 3 && near(movedH.ext[2].a.x, 60) && near(movedH.ext[2].b.x, 120) && near(movedH.ext[2].b.y, 40)
+  );
+
+  // The direction glyph's click: an explicit axis switch, the only way to change it.
+  check("axis switch h → v", s.setMeasurementAxis(mH.id, "v") && mH.axis === "v" && near(s.measureInfo(mH)!.value, 80));
+  check("axis switch v → direct", s.setMeasurementAxis(mH.id, "direct") && near(s.measureInfo(mH)!.value, 100));
+  check("axis switch direct → h", s.setMeasurementAxis(mH.id, "h") && near(s.measureInfo(mH)!.value, 60));
+  // A driving dimension re-captures its held side for the new quantity (direct has none).
+  s.setMeasurementDriving(mV.id, 80);
+  check("driving v dimension holds a side", mV.side === 1, `${mV.side}`);
+  s.setMeasurementAxis(mV.id, "direct");
+  check("switching to direct drops the side", mV.side === undefined);
+  s.setMeasurementAxis(mV.id, "h");
+  check("switching to h re-captures the side", mV.side === 1, `${mV.side}`);
+  s.clearMeasurementDriving(mV.id);
 
   // Values and the label track the geometry as it moves.
   s.moveJoint(jB.id, { x: 10, y: 0 }); // B → (70, 80)
@@ -82,6 +108,7 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   )!;
   const info = s.measureInfo(m)!;
   check("point-line uses the infinite line", info.kind === "distance" && near(info.value, 40), `${info.value}`);
+  check("point-line info has no direction glyph", info.axis === undefined);
   check("foot beyond the rail end gets an extension line", info.ext.length === 1);
   check("dimension line runs point → foot", near(info.dim!.b.x, 150) && near(info.dim!.b.y, 0));
   // Sliding the label along the rail carries the dimension line with it: dropped
@@ -97,6 +124,14 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
     "extension runs from the point to the dimension line",
     moved.ext.length === 1 && near(moved.ext[0].a.x, 150) && near(moved.ext[0].b.x, 50) && near(moved.ext[0].b.y, 40)
   );
+  // A label dragged past the point's end of the dimension line gets a leader from it.
+  s.setMeasurementLabel(m.id, { x: 50, y: 80 });
+  const far = s.measureInfo(m)!;
+  check(
+    "point-line label beyond the dimension line gets a leader",
+    far.ext.length === 2 && near(far.ext[1].a.y, 40) && near(far.ext[1].b.y, 80) && near(far.ext[1].b.x, 50)
+  );
+  check("point-line has no axis to switch", !s.setMeasurementAxis(m.id, "h") && m.axis === "direct");
 
   s.removeConstraint(slider.id);
   check("cascade: slider removal prunes rail measurements", s.measurements.length === 0);
@@ -255,6 +290,7 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   s.setMeasurementLabel(m.id, { x: 50, y: 10 });
   info = s.measureInfo(m)!;
   check("label move keeps the diameter axis", m.axis === "diameter" && !!info.dim && near(info.dim.b.y, 40));
+  check("a diameter dimension has no axis to switch", !s.setMeasurementAxis(m.id, "h") && m.axis === "diameter");
 
   // Centre + another point is an ordinary point–point dimension.
   const mc = s.addMeasurement("draw", refC, refV, { x: 25, y: 25 })!;

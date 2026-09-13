@@ -214,6 +214,29 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   ref) in `src/model.ts`; the constraint *tools* and the Measure tool still don't pick
   midpoints (deliberate — CAD convention: midpoints are an inference, not a click target).
   README.md is already updated.
+- **Dimension direction fixed at placement, shown on the pill (2026-09-13).** Manual (the
+  *Dimensions* topic `dimensions`, the *Dimension* element topic `el-dimension` — "Drag the
+  label to reposition it" — and the Measure tool topic / `measure` what's-this string in
+  `src/main.ts`): a point–point dimension's horizontal / vertical / direct choice is made
+  only by where the value is **first** placed; dragging the pill afterwards only moves the
+  pill (it used to re-derive the axis from the new position, so a label dragged beside the
+  pair silently turned a horizontal size into a vertical one — context dimensions onto the
+  ghost behaved the same and are fixed too). The pill now **leads with a small double
+  arrow** — horizontal for h, vertical for v, a rising diagonal for a direct distance —
+  drawn as vector art (`drawAxisGlyph` in `src/renderer.ts`, same reasoning as the Fixed
+  padlock), on the placement preview, context dimensions and placed dimensions alike;
+  diameter (⌀), radius (R), point–line, line–line and angle dimensions carry no glyph.
+  The glyph is also a **button**: a click cycles the direction h → v → direct (the only
+  way to change it after placement; pointer cursor over it; a double-click on the glyph
+  does not open the value editor). A driving dimension keeps its target and the geometry
+  re-solves along the new axis, or the switch is refused with the usual red flash.
+  Context dimensions onto the ghost cycle the same way. Also new: a pill dragged **past
+  the end of its dimension line** gets a dashed **leader** from that end (h / v / direct,
+  point–line and parallel line–line dimensions; the diameter / radius leaders already
+  existed). Label picking is now the whole pill rather than a 16 px circle at its centre.
+  Every illustration that shows a dimension label (overview "Bottom row: … a dimension",
+  the Measure / Dimensions / context-dimension shots) will need reshooting. README.md is
+  already updated.
 - **Fixed constraint implemented (2026-09-13).** The dimmed `#fixed-btn` placeholder became a
   real one-shot tool (`data-tool="fixed"`, key `L` — F was already fit-view; plain L had been
   left unbound for the planned shortcut remap, so reconsider it there). A **topic was written**
