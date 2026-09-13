@@ -69,6 +69,16 @@ export interface RenderInput {
    * drawn faded under everything and never interactive. Empty at the root / when off.
    */
   ghostScenes: Scene[];
+  /**
+   * Group isolation (draw mode): the members — bodies and the group's own free joints —
+   * of the group opened for editing, plus `items`, the ids of the annotations that touch
+   * them (sketch constraints, dimensions, patterns). Everything else is veiled towards
+   * the background and reads as surroundings, the same "you are working inside this"
+   * signal a component definition gets from its context ghost. Material is veiled by one
+   * rectangle over the geometry layers; the annotation layers draw after it, so each of
+   * those fades itself by id. Null when no group is open.
+   */
+  isolate: { bodies: number[]; joints: number[]; items: number[] } | null;
   /** Joints highlighted as in-progress tool picks (connect's first pick, rail picks). */
   activeJoints: number[];
   /** The element selected in normal/select mode (highlighted, deletable). */
@@ -123,8 +133,9 @@ export interface RenderInput {
   flash: Set<number> | null;
   /** Control-vertex handles to draw for the selected body (draggable to reshape it). */
   editVertices: Vec2[] | null;
-  /** Centres of regular-polygon outlines (draw mode): crosshair markers, pickable as point references. */
-  regularCentres: Vec2[];
+  /** Centres of regular-polygon outlines (draw mode): crosshair markers, pickable as point
+   *  references. The owning body is named so group isolation can fade the ones outside it. */
+  regularCentres: { at: Vec2; bodyId: number }[];
   /** Side-count tags of the selected body's regular outlines (draw mode; double-click edits). */
   regularTags: { at: Vec2; text: string }[];
   /** Per-corner radius handles for the selected body (circle = drag to round that corner). */
@@ -320,7 +331,9 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   const viewRect = visibleWorldRect(view, w, h);
   const { left, top, right, bottom } = viewRect;
 
-  if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
+  // (With a group open the grid is drawn after the isolation veil instead — it is the
+  // paper, not part of the drawing, so it never fades with the surroundings.)
+  if (input.gridVisible && !input.isolate) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
 
   // Reference geometry (draw mode only): polylines / circles / arcs and text labels,
   // dash-dot under the geometry, with crosshair handles on their defining points (drag
@@ -780,6 +793,33 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     ctx.setLineDash([]);
   }
 
+  // Group isolation: veil the geometry drawn so far, then redraw the open group's own
+  // material at full strength — its bodies, the joints on them and its locked free
+  // joints, plus one hull around the lot. The annotation layers (handles, constraint
+  // badges, dimensions) are drawn after this and stay legible for the whole drawing:
+  // they are what the group's parts get aligned and dimensioned against.
+  const isoBodies = input.isolate ? new Set(input.isolate.bodies) : null;
+  if (input.isolate && isoBodies) {
+    const isoJoints = new Set(input.isolate.joints);
+    ctx.save();
+    ctx.globalAlpha = ISOLATE_VEIL_ALPHA;
+    ctx.fillStyle = theme.surface;
+    ctx.fillRect(left, top, right - left, bottom - top);
+    ctx.restore();
+    // The grid belongs to the canvas, not to the drawing: it is drawn here, over the
+    // veil, at its normal strength (and under the group's own material, as always).
+    if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
+    for (const body of scene.bodies) if (isoBodies.has(body.id)) drawBodyShape(body);
+    for (const j of scene.joints) {
+      if (isoJoints.has(j.id) || (j.bodyId !== null && isoBodies.has(j.bodyId))) drawJoint(j);
+    }
+    drawMaterialHull(input.isolate.bodies, input.isolate.joints);
+  }
+  // Everything the annotation layers below draw for an element outside the open group
+  // fades to the same strength the veil left the material at — they are drawn over it.
+  const isoItems = input.isolate ? new Set(input.isolate.items) : null;
+  const itemAlpha = (id: number): number => (isoItems && !isoItems.has(id) ? ISOLATE_FADE : 1);
+
   // Rotate pivot crosshair (drawn over everything while rotating about a point).
   if (input.rotatePivot) {
     const p = input.rotatePivot;
@@ -799,8 +839,10 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   // Regular-polygon centres: a small crosshair (the centre is a point reference).
   if (input.regularCentres.length) {
     ctx.save();
-    ctx.globalAlpha = 0.7;
-    for (const c of input.regularCentres) crosshair(ctx, c, px, theme.ink, false);
+    for (const c of input.regularCentres) {
+      ctx.globalAlpha = 0.7 * (isoBodies && !isoBodies.has(c.bodyId) ? ISOLATE_FADE : 1);
+      crosshair(ctx, c.at, px, theme.ink, false);
+    }
     ctx.restore();
   }
 
@@ -872,7 +914,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   // Sketch-constraint badges (draw mode; annotations, so they sit over the geometry).
   const selectedSketch = input.selection?.kind === "sketch" ? input.selection.id : null;
   for (const g of input.sketchGlyphs) {
-    drawSketchGlyph(ctx, g, view, dpr, theme, g.id === selectedSketch, !!input.flash?.has(g.id));
+    drawSketchGlyph(ctx, g, view, dpr, theme, g.id === selectedSketch, !!input.flash?.has(g.id), itemAlpha(g.id));
   }
   // Badge hover: light up the constraint's elements and, when they sit apart, join them
   // with a dotted line so the relationship reads at a glance.
@@ -945,14 +987,22 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     // CAD convention in draw mode: a driven (reference) dimension shows in parentheses,
     // a driving one plain. Sim-mode values are always plain read-outs.
     const paren = input.mode === "draw" && !info.driving;
+    ctx.save();
+    ctx.globalAlpha = itemAlpha(info.id);
     drawMeasurement(
       ctx, info, view, dpr, theme,
       info.id === selectedMeasure, false, paren, !!input.flash?.has(info.id), input.scene.unit
     );
+    ctx.restore();
   }
   // Live patterns: axis dimension lines with count / spacing labels, or the centre with
   // its labels; handles when selected; members that don't fit ringed in red.
-  for (const pv of input.patterns) drawPattern(ctx, pv, view, dpr, theme);
+  for (const pv of input.patterns) {
+    ctx.save();
+    ctx.globalAlpha = itemAlpha(pv.id);
+    drawPattern(ctx, pv, view, dpr, theme);
+    ctx.restore();
+  }
 
   if (input.measureDraft) {
     const { refs, hover, preview } = input.measureDraft;
@@ -1296,6 +1346,12 @@ function drawViewRotateDial(
 /** Focus pass veil: how far everything outside the highlighted instances fades
  *  towards the background (0.8 leaves ~20% of the original strength). */
 const FOCUS_VEIL_ALPHA = 0.8;
+/** Group isolation veils the surroundings the same way: they drop to ~20% strength, far
+ *  enough back that only the open group's material reads as editable. */
+const ISOLATE_VEIL_ALPHA = 0.8;
+/** What the veil leaves of the surroundings — the alpha the annotation layers, which draw
+ *  over it, have to fade themselves to so they end up at the same strength. */
+const ISOLATE_FADE = 1 - ISOLATE_VEIL_ALPHA;
 
 /**
  * Draw one context-ghost level: every body outline (holes included), every joint as a
@@ -1566,12 +1622,14 @@ function drawSketchGlyph(
   dpr: number,
   theme: Theme,
   selected: boolean,
-  flashed: boolean
+  flashed: boolean,
+  /** Extra fade for a constraint outside an open group (1 = normal). */
+  dim = 1
 ): void {
   const color = flashed || g.violated ? FLASH_COLOR : selected ? theme.ink : SKETCH_COLOR;
   // Faded unless the cursor is on the constrained element — selection / a reject flash /
   // a violated pose constraint always shows at full strength.
-  const alpha = g.faded && !selected && !flashed && !g.violated ? 0.2 : 1;
+  const alpha = (g.faded && !selected && !flashed && !g.violated ? 0.2 : 1) * dim;
   const bold = selected || flashed || !!g.violated;
   for (const b of g.badges) drawSketchBadge(ctx, b, g.kind, view, dpr, theme, color, alpha, bold);
 }

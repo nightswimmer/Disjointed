@@ -299,6 +299,32 @@ motion; actuators / motors animate.
   theme, help-drawer width, grid presets, backup settings and the toolbar group order live in localStorage.
 - Selection kinds: single `selection` vs `multiSel` (groups and instances are selection-atomic)
   vs `featureSel` (vertices + joints of one body). Ctrl+G is a group toggle; plain G is Ground.
+- **Group isolation** (`groupEdit`, main.ts): a double-click opens one group for editing from the
+  inside. It is a *view* over the scene's own material — no context switch, nothing serialized,
+  nothing in history (unlike `editPath`) — and it does exactly two things:
+  - **suspends that one group's selection atomicity**: every site that expanded a group now asks
+    `selGroupOf` / `selGroupOfJoint`, which return undefined for the open group. Keep new
+    atomicity sites on that pair, never on `scene.groupOf`.
+  - **scopes what is live**: `bodyInScope` / `jointInScope` for material, `refsInScope` for
+    annotations (in scope = the item names **any** of the group's material, so a dimension from a
+    member to the outside stays editable; guides belong to no group and are always outside).
+    Faded ⇒ inert is the rule the status bar states — the pickers (`handleSelectClick`,
+    `measurementLabelHitAt`, `sketchGlyphAt`, `patternLabelAt`) drop out-of-scope items, while
+    ref *targets* (object snap, constraint / measure picks) deliberately still reach outside.
+  It is draw-mode only, `leaveGroup()` runs before any mode / context switch, and the frame loop
+  drops it when the group stops existing (ungrouped, deleted, undone, loaded over).
+- The **isolation veil** is one `theme.surface` rectangle at `ISOLATE_VEIL_ALPHA` over the geometry
+  layers, drawn *before* the annotations: they sit above it, so each fades itself by id against
+  `isolate.items` (the ids main computed as in-scope). The **grid** is skipped on its usual pass and
+  redrawn just after the veil — it is the canvas, not the drawing, so it never fades.
+- **A refusal is always explained.** `Scene.sketchConstraintProblem` returns the user-facing reason
+  a constraint can't exist on these references, and `addSketchConstraint` refuses **exactly** when
+  it returns one — keep the pair in step (scripts/sketch.ts asserts it both ways). The UI's three
+  failure shapes: a bad pick (the reason), a click the armed tool can't use at all
+  (`reportUnusablePick` — the kind-aware picker used to swallow these), and an unsatisfiable solve
+  (`describeBreaks` names the flashing items, identical ones collapsed into a count). Repeated
+  identical warnings go through `notifyThrottled`. `SKETCH_FLASH_MS` is long enough (4 s) to find
+  the flashing items after reading the toast that named them.
 - Two-click slider start pair: a press grabs the **rail joint** in draw mode, the **rider** in sim.
 - Text shortcuts: plain letters in `TOOL_KEYS`, Shift+letter shape tools in `SHIFT_TOOL_KEYS`
   (main.ts); plain `L` arms Fixed and `Y` Symmetrical; the whole shortcut map is due for a remap.
@@ -317,7 +343,8 @@ every list invariant (locked ⊆ riders, pattern members exist, mismatched regul
 solver-smoke (slider-crank + end-stops) · free-rail · ground-drag · impossible-assembly ·
 persistence · build-body · shape-edit (fillet, containment, node↔joint link, radii, holes) ·
 edit-utils (rotate/mirror/copy/z-order) · actuators · measurements (incl. diameter/radius) ·
-sketch (constraints, dims, ranks, rigid carry, drift) · fixed-constraint (point / line locks,
+sketch (constraints, dims, ranks, rigid carry, drift, refusal reasons ↔ refusals in step) ·
+fixed-constraint (point / line locks,
 conflict rejects, mirror re-capture) · symmetric-constraint (validation, point / line forms,
 who moves — free / twice-demanded / tied / locked mirror, drag follow — rejects, remaps,
 load, copy/paste, pose route incl. a mirror riding with the moved side) · midpoint (midpoint refs: resolve, validate, solve, who
@@ -358,7 +385,9 @@ it for the exact cases.
   point-on-point implicit constraints with their new toolbar switch, the Fixed constraint,
   line midpoints as snap / implicit-constraint / placement targets, the fixed dimension
   direction with its pill glyph / glyph button / off-line leader, the Symmetrical
-  constraint, and stale what's-this strings. Manual exceptions so far: **text-only**
+  constraint, group isolation (double-click into a group), recolouring a whole selection,
+  the spoken refusals / longer conflict flash, and stale what's-this strings. Manual
+  exceptions so far: **text-only**
   `tool-fixed` and `tool-symmetric` topics had to be written, because `npm run manual`
   hard-fails on a topic the app can ask for and every `data-tool` button implies one —
   both still need the illustration pass like the rest.
@@ -399,6 +428,16 @@ it for the exact cases.
   Intersect in Boolean). **Symmetrical** gaps: no symmetric between a point pair and a line
   pair at once, no "symmetric about a body's own axis" without a reference line, and the
   constraint tools still don't pick midpoints (so a midpoint can't be one of the pair).
+- **Group isolation**: no keyboard way in (double-click only), no way to *add* an outside body to
+  the open group without leaving, and Ctrl+G inside it dissolves the group (the selection is one
+  group, so the toggle ungroups) — defensible, but a "group these members into a sub-group" would
+  need nested groups, which the model doesn't have. Groups can't be named, so the crumb reads
+  "Group (n parts)". An isolated group has no equivalent of the context ghost's eyes (the fade is
+  all-or-nothing), and entering one in sim mode is deliberately impossible.
+- **Refusal feedback**: pose-route failures (`applyPoseConstraint`) report the constraint itself as
+  the conflict, so the toast can only say "the rest of the sketch" — naming the *pose* item that
+  blocked it needs `settlePose` to return which item failed. A refused pose constraint between two
+  rigid instance ends still has nothing to flash (see Components).
 - **Context ghost**: can't switch reference instance; no hotkey for the eyes; ghost drops parent
   guides; temp dims are per session.
 - **Sliders / welds**: Connect tool doesn't create welds; second click of a two-click slider snaps

@@ -1,5 +1,5 @@
 import "./style.css";
-import { notify } from "./notify";
+import { notify, NotifyKind } from "./notify";
 import {
   FSDirectoryHandle,
   FSFileHandle,
@@ -23,6 +23,7 @@ import {
   RoundMode,
   SelectionClip,
   FeatureClip,
+  BodyGroup,
   ComponentInstance,
   ComponentOccurrence,
   InstanceTransform,
@@ -35,11 +36,13 @@ import {
   MeasureRef,
   MeasureAxis,
   ResolvedMeasureRef,
+  SketchConstraint,
   SketchConstraintKind,
   sameMeasureRef,
   refHost,
   sketchRefs,
   isMidpointHost,
+  CONSTRAINT_NAME,
   measureInfoFor,
   measureAxisForPlacement,
   refCenter,
@@ -231,30 +234,62 @@ applyTheme();
 themeBtn.addEventListener("click", toggleTheme);
 
 // --- body colour ---------------------------------------------------------
-// The toolbar colour input does double duty: with a body selected it recolours that body;
-// with nothing selected it sets the colour applied to newly drawn bodies. The swatch is
-// kept in sync with the current selection by `syncColorPicker` (called each frame).
+// The toolbar colour input does double duty: with bodies selected it recolours them (the
+// single selection, or every body of a multi-selection / group at once); with nothing
+// selected it sets the colour applied to newly drawn bodies. The swatch is kept in sync
+// with the current selection by `syncColorPicker` (called each frame).
 let defaultBodyColor = colorInput.value;
+/**
+ * The bodies the colour picker acts on, and how many of the selected ones it had to
+ * leave alone. Component-instance material is skipped: its colour is copied from the
+ * definition on every re-expansion, so recolouring it here would silently revert.
+ */
+function colorTargets(): { ids: number[]; skipped: number } {
+  const sel = multiSel
+    ? [...multiSel.bodies]
+    : selection?.kind === "body"
+      ? [selection.id]
+      : [];
+  const ids = sel.filter((id) => scene.getBody(id) && !scene.instanceOfBody(id));
+  return { ids, skipped: sel.length - ids.length };
+}
+/** Selection signature — the instance warning is shown once per selection, not per event. */
+let colorWarnKey = "";
 colorInput.addEventListener("input", () => {
   const c = colorInput.value;
-  if (selection?.kind === "body") {
-    const body = scene.getBody(selection.id);
-    if (body) {
-      body.color = c;
-      markDirty();
-    }
-  } else {
+  const { ids, skipped } = colorTargets();
+  if (ids.length === 0 && skipped === 0) {
     defaultBodyColor = c;
+    return;
   }
+  for (const id of ids) scene.getBody(id)!.color = c;
+  if (skipped > 0) {
+    const key = `${ids.join(",")}/${skipped}`;
+    if (key !== colorWarnKey) {
+      colorWarnKey = key;
+      notify(
+        ids.length === 0
+          ? "Component instances take their colour from their definition — open the definition to recolour them."
+          : `Recoloured ${ids.length} ${ids.length === 1 ? "body" : "bodies"}; ${skipped} belong to component instances and keep the definition's colour.`,
+        ids.length === 0 ? "warn" : "info"
+      );
+    }
+  }
+  if (ids.length > 0) markDirty();
 });
-/** Reflect the selected body's colour (or the new-body default) in the swatch. */
+/**
+ * Reflect the selection's colour (or the new-body default) in the swatch. A mixed
+ * multi-selection has no one colour to show, so the first member's stands in — dragging
+ * the picker then makes the whole selection that colour, which is what the swatch shows.
+ */
 let colorSyncKey = "";
 function syncColorPicker(): void {
-  const body = selection?.kind === "body" ? scene.getBody(selection.id) : null;
-  const key = body ? `b${body.id}:${body.color}` : `d:${defaultBodyColor}`;
+  const { ids } = colorTargets();
+  const cols = ids.map((id) => scene.getBody(id)!.color);
+  const key = cols.length === 0 ? `d:${defaultBodyColor}` : `b${ids.join(",")}:${cols.join(",")}`;
   if (key === colorSyncKey) return; // avoid clobbering the picker mid-drag
   colorSyncKey = key;
-  colorInput.value = body ? body.color : defaultBodyColor;
+  colorInput.value = cols.length === 0 ? defaultBodyColor : cols[0];
 }
 
 // --- interaction state ---------------------------------------------------
@@ -384,7 +419,9 @@ const LABEL_PICK_RADIUS = 16;
 let constraintPicks: MeasureRef[] = [];
 /** Rejected sketch edit: the conflicting item ids flash red until `until` (ms clock). */
 let sketchFlash: { ids: Set<number>; until: number } | null = null;
-const SKETCH_FLASH_MS = 1200;
+/** Long enough to find the flashing items after reading the toast that names them —
+ *  the flash is what points at *which* constraint / dimension is in the way. */
+const SKETCH_FLASH_MS = 4000;
 /** Last frame's computed constraint badges (world positions) — reused for hit-testing. */
 let sketchGlyphCache: SketchGlyphView[] = [];
 /** How close (screen px) a click must land to a constraint badge to pick it. */
@@ -1378,21 +1415,27 @@ function placeAlignConstraint(d: LeftDrag, al: DragAlign): void {
   if (corr && (corr.x !== 0 || corr.y !== 0)) moveDragged(d, corr);
   let placed = 0;
   const conflicts: SketchBreak[] = [];
-  let impossible = false;
+  const refused: string[] = [];
   for (const { match } of live) {
+    const problem = scene.sketchConstraintProblem(match.kind, match.cand, al.ref);
     const { constraint, breaks } = placeConstraint(scene, match.kind, match.cand, al.ref);
     if (constraint) placed++;
     else if (breaks.length) conflicts.push(...breaks);
-    else impossible = true;
+    else refused.push(problem ?? `${CONSTRAINT_NAME[match.kind]} isn't possible between these elements.`);
   }
   if (placed > 0) setSketchVisible(true); // a constraint placed while the layer is hidden would be invisible
   // A silent no-op would read as "nothing happened": say why.
   if (conflicts.length > 0) {
     flashSketchItems(conflicts);
-    notify("Constraint not applied: it can't be satisfied without breaking an existing dimension or constraint.", "error");
-  } else if (impossible) {
-    notify("Constraint not applied: not possible between these elements.", "error");
+    const what = describeBreaks(conflicts);
+    notify(
+      what
+        ? `Constraint not applied: it conflicts with ${what} (flashing red).`
+        : "Constraint not applied: it can't be satisfied without breaking an existing dimension or constraint (the conflict is flashing red).",
+      "error"
+    );
   }
+  for (const r of new Set(refused)) notifyThrottled(r);
   markDirty(); // the alignment correction above moved the geometry
 }
 
@@ -1432,6 +1475,132 @@ function placeSnap(p: Vec2): Vec2 {
   return snap(p);
 }
 
+// --- group isolation (editing inside a group) -------------------------------
+/**
+ * The permanent group opened for editing "from the inside" (double-click one of its
+ * members). A group is normally selection-atomic — clicking any member selects, drags
+ * and transforms the whole thing — which makes the parts inside it unreachable; opening
+ * it suspends that for **this one group**, so its bodies and joints select, drag and
+ * reshape one at a time, while the rest of the drawing is veiled and inert. The same
+ * idea as opening a component definition, but with no context switch: the material is
+ * the scene's own, so nothing is serialized and undo / save never see this.
+ *
+ * Draw mode only (in sim a group *is* one rigid body), and dropped as soon as the group
+ * stops existing (ungrouped, deleted, undone, or a context switch).
+ */
+let groupEdit: number | null = null;
+
+/** The open group, or null (also null once its id no longer names a group). */
+function editedGroup(): BodyGroup | null {
+  return groupEdit === null ? null : scene.groups.find((g) => g.id === groupEdit) ?? null;
+}
+
+/**
+ * The group a body belongs to **for selection and dragging** — undefined while that
+ * same group is the open one, which is exactly what makes its members individually
+ * editable. Every atomicity site goes through this pair rather than `scene.groupOf`.
+ */
+function selGroupOf(bodyId: number): BodyGroup | undefined {
+  const g = scene.groupOf(bodyId);
+  return g && g.id === groupEdit ? undefined : g;
+}
+function selGroupOfJoint(jointId: number): BodyGroup | undefined {
+  const g = scene.groupOfJoint(jointId);
+  return g && g.id === groupEdit ? undefined : g;
+}
+
+/** Whether a body is material of the open group (always true when none is open). */
+function bodyInScope(id: number): boolean {
+  const g = editedGroup();
+  return !g || g.bodyIds.includes(id);
+}
+/** Whether a joint belongs to the open group — its own free joint, or one on a member. */
+function jointInScope(id: number): boolean {
+  const g = editedGroup();
+  if (!g) return true;
+  const j = scene.getJoint(id);
+  if (!j) return false;
+  return j.bodyId === null ? g.jointIds.includes(j.id) : g.bodyIds.includes(j.bodyId);
+}
+
+/**
+ * Whether a measurement / constraint reference names material of the open group. Guides
+ * (reference geometry) never belong to a group, so they are always outside one.
+ */
+function refInScope(r: MeasureRef): boolean {
+  switch (r.kind) {
+    case "joint":
+      return jointInScope(r.jointId);
+    case "vertex":
+    case "edge":
+    case "bodyPoint":
+    case "centre":
+      return bodyInScope(r.bodyId);
+    case "rail": {
+      const c = scene.constraints.find((cc) => cc.id === r.sliderId);
+      return !!c && c.kind === "slider" && jointInScope(c.railA) && jointInScope(c.railB);
+    }
+    case "midpoint":
+      return refInScope(r.of);
+    case "patternAxis":
+      return patternInScope(r.patternId);
+    default:
+      return false; // guidePoint / guideLine: reference geometry is nobody's group
+  }
+}
+
+/**
+ * Whether an annotation on these references is live inside the open group. It counts as
+ * inside when it names **any** of the group's own material: a dimension or constraint
+ * anchored to a member is part of editing that member, one entirely outside is
+ * surroundings — faded with them, and not pickable until the group is left.
+ */
+function refsInScope(refs: (MeasureRef | null | undefined)[]): boolean {
+  return !editedGroup() || refs.some((r) => !!r && refInScope(r));
+}
+const measurementInScope = (m: Measurement): boolean => refsInScope([m.refA, m.refB]);
+const sketchInScope = (c: SketchConstraint): boolean => refsInScope(sketchRefs(c));
+/** A pattern belongs to the body it was laid out on. */
+function patternInScope(id: number): boolean {
+  const p = scene.getPattern(id);
+  return !editedGroup() || (!!p && bodyInScope(p.bodyId));
+}
+
+/** Ids of the annotations the open group owns — what the renderer keeps at full strength. */
+function isolateItems(): number[] {
+  const out: number[] = [];
+  for (const c of scene.sketch) if (sketchInScope(c)) out.push(c.id);
+  for (const m of scene.measurements) if (measurementInScope(m)) out.push(m.id);
+  for (const p of scene.patterns) if (patternInScope(p.id)) out.push(p.id);
+  return out;
+}
+
+/** Open a group for editing from the inside. */
+function enterGroup(id: number): void {
+  if (mode !== "draw" || !scene.groups.some((g) => g.id === id)) return;
+  groupEdit = id;
+  selection = null;
+  multiSel = null;
+  featureSel = null;
+  updateCrumbBar();
+  updateHint();
+}
+
+/** Leave the open group; it becomes one object again, and is left selected as one. */
+function leaveGroup(): void {
+  if (groupEdit === null) return;
+  const g = editedGroup();
+  groupEdit = null;
+  featureSel = null;
+  if (g) setMulti(new Set(g.bodyIds), new Set(g.jointIds));
+  else {
+    selection = null;
+    multiSel = null;
+  }
+  updateCrumbBar();
+  updateHint();
+}
+
 // --- multi-selection (Ctrl+click / box select) + permanent groups -----------
 /**
  * Commit a multi-selection: expand permanent groups (selection-atomic), drop dead ids,
@@ -1450,12 +1619,13 @@ function addInstanceMembers(inst: ComponentInstance, bodies: Set<number>, joints
 function setMulti(bodies: Set<number>, joints: Set<number>): void {
   // Selection-atomic units expand: groups (bodies + locked free joints) and component
   // instances (everything they expanded). Repeat until stable — an instance member can
-  // pull in a group and vice versa.
+  // pull in a group and vice versa. The group opened for editing doesn't expand: that
+  // suspension is what makes its members individually selectable (see selGroupOf).
   let grew = true;
   while (grew) {
     const before = bodies.size + joints.size;
     for (const id of [...bodies]) {
-      const g = scene.groupOf(id);
+      const g = selGroupOf(id);
       if (g) {
         for (const b of g.bodyIds) bodies.add(b);
         for (const j of g.jointIds) joints.add(j);
@@ -1464,7 +1634,7 @@ function setMulti(bodies: Set<number>, joints: Set<number>): void {
       if (inst) addInstanceMembers(inst, bodies, joints);
     }
     for (const id of [...joints]) {
-      const g = scene.groupOfJoint(id);
+      const g = selGroupOfJoint(id);
       if (g) {
         for (const b of g.bodyIds) bodies.add(b);
         for (const j of g.jointIds) joints.add(j);
@@ -1519,7 +1689,7 @@ function toggleMultiAt(p: Vec2): boolean {
     const uj = new Set<number>();
     const inst = bodyId !== null ? scene.instanceOfBody(bodyId) : jointId !== null ? scene.instanceOfJoint(jointId) : undefined;
     if (inst) addInstanceMembers(inst, ub, uj);
-    const g = bodyId !== null ? scene.groupOf(bodyId) : jointId !== null ? scene.groupOfJoint(jointId) : undefined;
+    const g = bodyId !== null ? selGroupOf(bodyId) : jointId !== null ? selGroupOfJoint(jointId) : undefined;
     if (g) {
       g.bodyIds.forEach((x) => ub.add(x));
       g.jointIds.forEach((x) => uj.add(x));
@@ -1629,7 +1799,7 @@ function startRigidDrag(grab: Vec2): boolean {
   const bodies = new Set<number>();
   const joints = new Set<number>();
   const addBodyWithGroup = (id: number): void => {
-    const g = scene.groupOf(id);
+    const g = selGroupOf(id);
     if (g) {
       g.bodyIds.forEach((b) => bodies.add(b));
       g.jointIds.forEach((jt) => joints.add(jt)); // locked free joints ride the group
@@ -1648,7 +1818,7 @@ function startRigidDrag(grab: Vec2): boolean {
     if (j.bodyId !== null) {
       addBodyWithGroup(j.bodyId);
     } else {
-      const g = scene.groupOfJoint(j.id);
+      const g = selGroupOfJoint(j.id);
       if (g) {
         g.bodyIds.forEach((b) => bodies.add(b));
         g.jointIds.forEach((jt) => joints.add(jt));
@@ -1693,11 +1863,12 @@ function applyBoxSelect(): void {
   const bodies = new Set(boxSelect.additive && multiSel ? multiSel.bodies : []);
   const joints = new Set(boxSelect.additive && multiSel ? multiSel.joints : []);
   if (boxSelect.additive && selection?.kind === "body") bodies.add(selection.id);
+  // Inside an open group the box only catches that group's own material.
   for (const b of scene.bodies) {
-    if (scene.bodyWorldVerts(b).every(inside)) bodies.add(b.id);
+    if (bodyInScope(b.id) && scene.bodyWorldVerts(b).every(inside)) bodies.add(b.id);
   }
   for (const j of scene.joints) {
-    if (j.bodyId === null && inside(scene.jointWorld(j))) joints.add(j.id);
+    if (j.bodyId === null && jointInScope(j.id) && inside(scene.jointWorld(j))) joints.add(j.id);
   }
   setMulti(bodies, joints);
 }
@@ -1999,10 +2170,30 @@ function containmentWarning(): string {
   return `⚠ ${what} (red) — ${fix}, or fix the body / component shape. · `;
 }
 
+/**
+ * A toast that doesn't stack up when the same thing is done twice: clicking the same
+ * wrong element again should re-state the reason, not pile four copies of it up.
+ */
+let lastNotice = { text: "", at: -Infinity };
+function notifyThrottled(text: string, kind: NotifyKind = "warn"): void {
+  const now = performance.now();
+  if (text === lastNotice.text && now - lastNotice.at < NOTICE_REPEAT_MS) return;
+  lastNotice = { text, at: now };
+  notify(text, kind);
+}
+const NOTICE_REPEAT_MS = 3000;
+
 /** Status-bar line; the bar shows one line, so the whole text goes on its tooltip. */
 function setHint(text: string): void {
   hintEl.textContent = text;
   hintEl.title = text;
+}
+
+/** Status-bar prefix while a group is open for editing. */
+function groupScopeNote(): string {
+  return groupEdit === null
+    ? ""
+    : "Inside a group — its parts select, move and reshape one by one; everything faded is out of reach. Esc (or a double-click outside) leaves it. · ";
 }
 
 function updateHint(): void {
@@ -2015,7 +2206,7 @@ function updateHint(): void {
     : isShapeTool(tool) ? shapeHint()
     : tool === "symmetric" ? symmetricHint()
     : HINTS[tool];
-  setHint(containmentWarning() + base);
+  setHint(containmentWarning() + groupScopeNote() + base);
 }
 
 // --- toolbar wiring ------------------------------------------------------
@@ -2272,6 +2463,7 @@ function setMode(next: Mode): void {
   if (next === mode) return;
   resetTransient();
   if (next === "sim") {
+    leaveGroup(); // in simulation a group *is* one rigid body again
     savedPoses = scene.snapshotPoses();
     resetPoseBaselines(); // slider locks + welds capture the drawn relative angles afresh
     timedSolve("settle", null, 40); // settle so pins/grounds/rails are satisfied
@@ -3049,6 +3241,7 @@ function enterComponent(defId: number, via: number | null = null, withGhost = fa
   if (!def) return;
   if (editPath[editPath.length - 1] === defId) return; // already editing this definition
   if (mode === "sim") setMode("draw");
+  leaveGroup(); // an open group belongs to the context being left
   syncComponentContext(); // store whatever definition we're leaving behind
   if (editPath.length === 0) rootData = scene.serializeContext();
   editPath.push(defId);
@@ -3069,6 +3262,7 @@ function enterComponent(defId: number, via: number | null = null, withGhost = fa
 function exitComponent(levels = 1): void {
   if (editPath.length === 0) return;
   if (mode === "sim") setMode("draw");
+  leaveGroup(); // an open group belongs to the context being left
   for (let k = 0; k < levels && editPath.length > 0; k++) {
     syncComponentContext(); // def.data updated + cascaded; rootData refreshed
     editPath.pop();
@@ -3106,9 +3300,10 @@ function exitComponent(levels = 1): void {
  * whose placement is unknown (entered from the browser, no instance to place by).
  */
 function updateCrumbBar(): void {
-  crumbBar.classList.toggle("hidden", editPath.length === 0);
+  const group = editedGroup();
+  crumbBar.classList.toggle("hidden", editPath.length === 0 && !group);
   crumbBar.innerHTML = "";
-  if (editPath.length === 0) return;
+  if (editPath.length === 0 && !group) return;
   const n = editPath.length;
   const names = ["Assembly", ...editPath.map((id) => scene.getComponent(id)?.name ?? `#${id}`)];
   names.forEach((name, i) => {
@@ -3118,7 +3313,9 @@ function updateCrumbBar(): void {
       sep.textContent = "▸";
       crumbBar.appendChild(sep);
     }
-    if (i === names.length - 1) {
+    // With a group open, even the innermost context is a step back out (to the group's
+    // own level), so it gets a button too — only the group itself is "current".
+    if (i === names.length - 1 && !group) {
       const cur = document.createElement("span");
       cur.className = "crumb-current";
       cur.textContent = name;
@@ -3128,8 +3325,12 @@ function updateCrumbBar(): void {
       btn.className = "crumb";
       btn.textContent = name;
       btn.title = `Back to ${name}`;
-      btn.addEventListener("click", () => exitComponent(n - i));
+      btn.addEventListener("click", () => {
+        leaveGroup(); // the group lives in the context being left (a no-op with none open)
+        if (i < n) exitComponent(n - i);
+      });
       crumbBar.appendChild(btn);
+      if (i === names.length - 1) return; // the innermost context has no ghost eye
       // Context i is placeable only if every placement from it inward is known.
       const placeable = viaStack.slice(i, n).every((v) => v !== null);
       const shown = placeable && n - i <= ghostDepth;
@@ -3146,6 +3347,19 @@ function updateCrumbBar(): void {
       crumbBar.appendChild(eye);
     }
   });
+  // The open group is the last crumb: everything outside it is veiled until it's left.
+  if (group) {
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep";
+    sep.textContent = "▸";
+    crumbBar.appendChild(sep);
+    const cur = document.createElement("span");
+    cur.className = "crumb-current";
+    const parts = group.bodyIds.length + group.jointIds.length;
+    cur.textContent = `Group (${parts} ${parts === 1 ? "part" : "parts"})`;
+    cur.title = "Editing inside this group — Esc, a double-click outside, or a crumb leaves it";
+    crumbBar.appendChild(cur);
+  }
 }
 
 // --- context ghost (the enclosing assembly, faded, in the definition's frame) ---------
@@ -3368,7 +3582,7 @@ function moveUnitOfBody(bodyId: number): { bodies: number[]; joints: number[]; i
     addInstanceMembers(inst, bodies, joints);
     return { bodies: [...bodies], joints: [...joints], instanceId: inst.id };
   }
-  const g = scene.groupOf(bodyId);
+  const g = selGroupOf(bodyId);
   if (g) return { bodies: [...g.bodyIds], joints: [...g.jointIds], instanceId: null };
   return { bodies: [bodyId], joints: [], instanceId: null };
 }
@@ -3384,18 +3598,21 @@ function moveUnitOfBody(bodyId: number): { bodies: number[]; joints: number[]; i
  * target the edit is rejected (scene restored, red flash). Returns whether it applied.
  */
 function applyTempDimValue(td: TempDim, target: number): boolean {
-  const reject = (): boolean => {
+  const reject = (why: string): boolean => {
     flashSketchItems([{ id: td.id, kind: "dimension", error: Infinity }]);
+    notify(why, "error");
     return false;
   };
+  const held = "Can't move to that value: this definition's own constraints and driving dimensions hold the geometry where it is.";
   const liveIsA = td.refA.kind !== "ghost";
   const liveIsB = td.refB.kind !== "ghost";
-  if (liveIsA === liveIsB) return reject(); // both ends on the ghost: nothing here can move
+  // Both ends on the ghost: the surroundings never move, so there is nothing to place.
+  if (liveIsA === liveIsB) return reject("Both ends of this dimension are on the surroundings — nothing in the definition can move to meet it.");
   const liveRef = (liveIsA ? td.refA : td.refB) as MeasureRef;
   const a = resolveTemp(td.refA);
   const b = resolveTemp(td.refB);
   const info = tempDimInfo(td);
-  if (!a || !b || !info || info.kind !== "distance") return reject();
+  if (!a || !b || !info || info.kind !== "distance") return reject("This dimension has no distance to set (an angle can't drive yet).");
   const live = liveIsA ? a : b;
   const fixed = liveIsA ? b : a;
   const sgn = (x: number): number => (x < 0 ? -1 : 1);
@@ -3422,8 +3639,8 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
     const n = perp(normalize(sub(fixed.b, fixed.a)));
     const d = dot(sub(refCenter(live), fixed.a), n);
     delta = scale(n, sgn(d) * target - d);
-  } else return reject();
-  if (!Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return reject();
+  } else return reject("Nothing here can be moved to that value.");
+  if (!Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return reject("That value can't be reached from this geometry.");
 
   const before = JSON.stringify(scene.serializeContext());
   const anchors = new Set<string>();
@@ -3454,15 +3671,15 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
       break;
     case "joint": {
       const j = scene.getJoint(moved.jointId);
-      if (!j) return reject();
+      if (!j) return reject("That joint no longer exists.");
       const inst = scene.instanceOfJoint(j.id);
       if (inst) {
         const bodies = new Set<number>();
         const joints = new Set<number>();
         addInstanceMembers(inst, bodies, joints);
         moveUnit({ bodies: [...bodies], joints: [...joints], instanceId: inst.id });
-      } else if (j.bodyId === null && scene.groupOfJoint(j.id)) {
-        const g = scene.groupOfJoint(j.id)!;
+      } else if (j.bodyId === null && selGroupOfJoint(j.id)) {
+        const g = selGroupOfJoint(j.id)!;
         moveUnit({ bodies: [...g.bodyIds], joints: [...g.jointIds], instanceId: null });
       } else {
         scene.moveJoint(j.id, delta);
@@ -3477,7 +3694,7 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
       break;
     case "rail": {
       const c = scene.constraints.find((cc) => cc.id === moved.sliderId);
-      if (!c || c.kind !== "slider") return reject();
+      if (!c || c.kind !== "slider") return reject("That rail no longer exists.");
       const done = new Set<number>();
       for (const jid of [c.railA, c.railB]) {
         const j = scene.getJoint(jid);
@@ -3498,7 +3715,7 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
     case "guidePoint": {
       const g = scene.getGuide(moved.guideId);
       const q = g ? scene.guidePointWorld(g, moved.which) : null;
-      if (!g || !q) return reject();
+      if (!g || !q) return reject("That reference point no longer exists.");
       scene.moveGuidePoint(moved.guideId, moved.which, add(q, delta));
       anchors.add(anchorVarForGuidePoint(moved.guideId, moved.which));
       break;
@@ -3508,7 +3725,7 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
       for (const k of anchorVarsForGuide(scene, moved.guideId)) anchors.add(k);
       break;
     default:
-      return reject(); // a pattern axis is derived geometry — edit the pattern instead
+      return reject("A pattern axis is derived geometry — set the spacing on the pattern instead.");
   }
   // Like a drag: pose partners follow the moved instances, then the anchored sketch
   // solve lets free geometry adapt; if the anchored solve is infeasible the symmetric
@@ -3518,7 +3735,7 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
   const after = tempDimInfo(td);
   if (!after || Math.abs(after.value - target) > TEMP_DIM_TOL) {
     scene.loadContext(JSON.parse(before) as SceneData);
-    return reject();
+    return reject(held);
   }
   markDirty();
   return true;
@@ -4440,16 +4657,44 @@ function constraintRefAt(p: Vec2): MeasureRef | null {
 }
 
 /**
+ * A constraint-tool click that picked nothing the tool can use: say what it wants
+ * instead of ignoring the click. Only speaks when the click landed on *something* —
+ * clicking bare canvas is how you look around while a tool is armed.
+ */
+function reportUnusablePick(kind: SketchConstraintKind, p: Vec2): void {
+  const name = CONSTRAINT_NAME[kind];
+  // `constraintRefAt` already said no, so whichever shape the tool wants isn't here:
+  // whatever the *other* picker finds is what the click actually landed on.
+  if (constraintPointRefAt(p)) {
+    notifyThrottled(`${name} needs a line here — a body edge, a rail or a reference segment.`);
+    return;
+  }
+  if (constraintLineRefAt(p)) {
+    notifyThrottled(`${name} needs a point here — a joint, a body corner, a polygon centre or a reference point.`);
+    return;
+  }
+  if (scene.bodyAt(p)) {
+    notifyThrottled(
+      `${name} attaches to elements, not to material — click a corner, joint, edge or rail (a body's inside isn't one).`
+    );
+  }
+}
+
+/**
  * Constraint tool click. Line-pair and point-pair kinds take two picks; horizontal /
  * vertical on a line — and Fixed, on anything — commit on the first; Symmetrical takes
  * the pair and then the mirror line, three picks. The commit adds the constraint and runs a
  * sketch solve — geometry moves to satisfy it, or (unsatisfiable) the constraint is
- * removed again and the conflicting items flash red (reject semantics).
+ * removed again and the conflicting items flash red (reject semantics). A click that
+ * picks nothing usable says what the tool wants instead of doing nothing.
  */
 function handleConstraintClick(p: Vec2): void {
   const kind = tool as SketchConstraintKind;
   const ref = constraintRefAt(p);
-  if (!ref) return; // empty space — keep waiting for a reference
+  if (!ref) {
+    reportUnusablePick(kind, p); // empty space stays silent; a wrong pick says why
+    return;
+  }
   const isLine = ref.kind === "rail" || ref.kind === "edge" || ref.kind === "guideLine" || ref.kind === "patternAxis";
   if (constraintPicks.length === 0) {
     if (kind === "fixed" || ((kind === "horizontal" || kind === "vertical") && isLine)) {
@@ -4460,7 +4705,10 @@ function handleConstraintClick(p: Vec2): void {
     updateHint();
     return;
   }
-  if (constraintPicks.some((r) => sameMeasureRef(r, ref))) return; // an element picked twice
+  if (constraintPicks.some((r) => sameMeasureRef(r, ref))) {
+    notifyThrottled(`${CONSTRAINT_NAME[kind]} needs two different elements — that one is already picked.`);
+    return;
+  }
   if (kind === "symmetric") {
     if (constraintPicks.length === 1) {
       constraintPicks = [constraintPicks[0], ref];
@@ -4473,14 +4721,70 @@ function handleConstraintClick(p: Vec2): void {
   commitConstraint(kind, constraintPicks[0], ref);
 }
 
+/**
+ * Name the items a rejected sketch edit collided with, for the toast that reports it
+ * ("the Horizontal constraint and the 40 mm dimension"). They flash red at the same
+ * time, so the phrase only has to make them recognisable — at most three, then a count.
+ * `skip` drops an item from the list (the dimension whose own value was being set).
+ */
+function describeBreaks(breaks: SketchBreak[], skip?: number): string {
+  const items = breaks.filter((b) => b.id !== skip);
+  // Identical items collapse into a count ("2 Fixed constraints"): a list that repeats
+  // the same phrase says nothing the count doesn't.
+  const counts = new Map<string, { one: string; many: string; n: number }>();
+  for (const b of items) {
+    let one: string;
+    let many: string;
+    if (b.kind === "constraint") {
+      const c = scene.sketch.find((s) => s.id === b.id);
+      const label = c ? CONSTRAINT_NAME[c.kind] : "";
+      one = label ? `the ${label} constraint` : "a constraint";
+      many = label ? `${label} constraints` : "constraints";
+    } else {
+      const m = scene.getMeasurement(b.id);
+      const info = m ? scene.measureInfo(m) : null;
+      const value = m?.driving && m.target !== undefined ? m.target : info?.value;
+      const text =
+        value === undefined ? "" : info?.kind === "angle" ? `${Math.round(value * 10) / 10}°` : `${Math.round(value * 10) / 10} ${scene.unit}`;
+      one = text ? `the ${text} dimension` : "a dimension";
+      many = "dimensions";
+    }
+    const seen = counts.get(one);
+    if (seen) seen.n++;
+    else counts.set(one, { one, many, n: 1 });
+  }
+  const names = [...counts.values()].slice(0, 3).map((c) => (c.n === 1 ? c.one : `${c.n} ${c.many}`));
+  const extra = counts.size - names.length;
+  if (extra > 0) names.push(extra === 1 ? "1 more" : `${extra} more`);
+  if (names.length === 0) return "";
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
 /** Add + solve a sketch constraint; on an unsatisfiable solve it's removed again and flashes.
  *  Every end on component-instance geometry makes it a pose constraint (rigid parts move
- *  instead of shape — pose.ts routes it). */
+ *  instead of shape — pose.ts routes it). Either way the refusal is explained: the model
+ *  says why a constraint can't exist between these elements, the flashing items say what
+ *  a solvable one collided with. */
 function commitConstraint(kind: SketchConstraintKind, refA: MeasureRef, refB?: MeasureRef, mirror?: MeasureRef): void {
+  // Asked before the placement: the pose route restores a snapshot on failure, and the
+  // reason must describe the scene the user clicked in.
+  const problem = scene.sketchConstraintProblem(kind, refA, refB, mirror);
   const { constraint, breaks } = placeConstraint(scene, kind, refA, refB, mirror);
   disarmTool(); // clears the picks (and, via resetTransient, the selection)
   if (!constraint) {
-    if (breaks.length) flashSketchItems(breaks);
+    if (breaks.length) {
+      flashSketchItems(breaks);
+      const what = describeBreaks(breaks);
+      notify(
+        what
+          ? `${CONSTRAINT_NAME[kind]} can't be applied: it conflicts with ${what} (flashing red).`
+          : `${CONSTRAINT_NAME[kind]} can't be applied: the rest of the sketch leaves no way to satisfy it (the conflict is flashing red).`,
+        "error"
+      );
+    } else {
+      notifyThrottled(problem ?? `${CONSTRAINT_NAME[kind]} can't be applied to these elements.`);
+    }
     return;
   }
   setSketchVisible(true); // placing a constraint while hidden would be invisible
@@ -4673,6 +4977,7 @@ function commitDimEditor(): void {
     const target = Number(raw);
     if (!Number.isFinite(target) || target <= 0) {
       flashSketchItems([{ id: tempId, kind: "dimension", error: Infinity }]);
+      notify("A dimension needs a positive number.");
       return;
     }
     applyTempDimValue(td, target);
@@ -4692,11 +4997,22 @@ function commitDimEditor(): void {
   const target = Number(raw);
   if (!Number.isFinite(target) || target <= 0) {
     flashSketchItems([{ id, kind: "dimension", error: Infinity }]);
+    notify("A dimension needs a positive number.");
     return;
   }
   const breaks = applyDimensionValue(scene, id, target);
-  if (breaks.length) flashSketchItems(breaks);
-  else markDirty();
+  if (breaks.length) {
+    flashSketchItems(breaks);
+    // The edited dimension itself is always among the conflicts — what matters is what
+    // else is holding the geometry, so it's named only when nothing else is.
+    const what = describeBreaks(breaks, id);
+    notify(
+      what
+        ? `Can't set that value: it conflicts with ${what} (flashing red).`
+        : "Can't set that value: the rest of the sketch holds this geometry where it is.",
+      "error"
+    );
+  } else markDirty();
 }
 
 dimEditInput.addEventListener("keydown", (e) => {
@@ -4910,6 +5226,7 @@ function measurementLabelHitAt(p: Vec2): { m: Measurement; hit: LabelHit } | nul
   for (let i = scene.measurements.length - 1; i >= 0; i--) {
     const m = scene.measurements[i];
     if (m.mode !== mm) continue;
+    if (!measurementInScope(m)) continue; // faded with the surroundings of an open group
     const info = scene.measureInfo(m); // null = not drawn this frame, so not clickable either
     const hit = info ? labelHitAt(info, p) : null;
     if (hit) return { m, hit };
@@ -4968,6 +5285,13 @@ function clickDimensionGlyph(p: Vec2): boolean {
     if (breaks.length) {
       scene.setMeasurementAxis(m.id, prev); // the geometry is untouched, so the side re-captures as it was
       flashSketchItems(breaks);
+      const what = describeBreaks(breaks, m.id);
+      notify(
+        what
+          ? `That direction can't drive this value: it conflicts with ${what} (flashing red).`
+          : "That direction can't drive this value — the geometry can't reach it along that axis.",
+        "error"
+      );
       return true;
     }
   }
@@ -5003,8 +5327,11 @@ function keepGlyphPut(before: MeasureInfo, after: MeasureInfo): Vec2 | null {
 function sketchGlyphAt(p: Vec2): number | null {
   const r = GLYPH_PICK_RADIUS / view.scale;
   for (let i = sketchGlyphCache.length - 1; i >= 0; i--) {
+    const id = sketchGlyphCache[i].id;
+    const c = scene.getSketchConstraint(id);
+    if (c && !sketchInScope(c)) continue; // faded with the surroundings of an open group
     for (const b of sketchGlyphCache[i].badges) {
-      if (dist(b, p) <= r) return sketchGlyphCache[i].id;
+      if (dist(b, p) <= r) return id;
     }
   }
   return null;
@@ -5013,6 +5340,7 @@ function sketchGlyphAt(p: Vec2): number | null {
 /** Normal/select mode: pick a measurement label (topmost overlay), then a joint, a slider rail, a body. */
 function handleSelectClick(p: Vec2): void {
   multiSel = null; // a plain click rebuilds the selection from what's under the cursor
+  const inGroup = editedGroup() !== null;
   const tl = tempDimLabelAt(p);
   if (tl) {
     selection = { kind: "tempDim", id: tl.id };
@@ -5044,7 +5372,7 @@ function handleSelectClick(p: Vec2): void {
     return;
   }
   const j = scene.jointAt(p, pickRadius());
-  if (j) {
+  if (j && jointInScope(j.id)) {
     // A joint owned by a component instance selects the whole instance (its material is
     // atomic); a free joint locked to a group selects the whole group.
     const inst = scene.instanceOfJoint(j.id);
@@ -5052,7 +5380,7 @@ function handleSelectClick(p: Vec2): void {
       selectInstance(inst);
       return;
     }
-    const g = j.bodyId === null ? scene.groupOfJoint(j.id) : undefined;
+    const g = j.bodyId === null ? selGroupOfJoint(j.id) : undefined;
     if (g) {
       setMulti(new Set(g.bodyIds), new Set(g.jointIds));
       return;
@@ -5061,18 +5389,20 @@ function handleSelectClick(p: Vec2): void {
     return;
   }
   // A guideline's defining points are small point targets — they beat the line picks.
-  const gp = scene.guidePointAt(p, pickRadius());
+  // (Reference geometry belongs to no group, so inside an open group it is surroundings:
+  // faded and unpickable, though still a snap / constraint target like any outside edge.)
+  const gp = inGroup ? null : scene.guidePointAt(p, pickRadius());
   if (gp) {
     selection = { kind: "guide", id: gp.guide.id };
     return;
   }
   const s = scene.sliderAt(p, pickRadius());
-  if (s) {
+  if (s && jointInScope(s.railA) && jointInScope(s.railB)) {
     selection = { kind: "rail", id: s.id };
     return;
   }
   // Guidelines are thin precise targets, so (like rails) they win over body areas.
-  const gl = scene.guideAt(p, pickRadius());
+  const gl = inGroup ? null : scene.guideAt(p, pickRadius());
   if (gl) {
     selection = { kind: "guide", id: gl.id };
     return;
@@ -5085,20 +5415,22 @@ function handleSelectClick(p: Vec2): void {
   }
   // A pattern's dotted axis line selects the pattern — between its instances only, so a
   // click on a member hole still reaches the body underneath.
+  // (Inside an open group an outside pattern is faded: its axis stays a constraint /
+  // measure target, but selecting it is out of reach — the click falls through.)
   const pax = scene.holeAt(p) ? null : patternAxisRefAt(p);
-  if (pax) {
+  if (pax && patternInScope(pax.patternId)) {
     selection = { kind: "pattern", id: pax.patternId };
     return;
   }
   const body = scene.bodyAt(p);
-  if (body) {
+  if (body && bodyInScope(body.id)) {
     // Instance material is selection-atomic: clicking any member selects the instance.
     const inst = scene.instanceOfBody(body.id);
     if (inst) {
       selectInstance(inst);
       return;
     }
-    const g = scene.groupOf(body.id);
+    const g = selGroupOf(body.id);
     if (g) {
       // A grouped body is selection-atomic: clicking any member selects the whole group.
       setMulti(new Set(g.bodyIds), new Set(g.jointIds));
@@ -5107,6 +5439,8 @@ function handleSelectClick(p: Vec2): void {
     selection = { kind: "body", id: body.id };
     return;
   }
+  // Nothing selectable here — inside an open group, material outside it counts as
+  // nothing: it is veiled and can't be picked until the group is left.
   selection = null;
 }
 
@@ -6616,6 +6950,7 @@ function patternLabelAt(p: Vec2): PatternLabelHit | null {
   const r = LABEL_PICK_RADIUS / view.scale;
   for (let i = patternViewCache.length - 1; i >= 0; i--) {
     const v = patternViewCache[i];
+    if (!patternInScope(v.id)) continue; // faded with the surroundings of an open group
     for (let a = 0; a < v.axes.length; a++) {
       if (dist(v.axes[a].countLabel, p) <= r) return { id: v.id, field: "count", axis: a };
       if (dist(v.axes[a].stepLabel, p) <= r) return { id: v.id, field: "step", axis: a };
@@ -7395,11 +7730,40 @@ canvas.addEventListener("dblclick", (e) => {
     // Double-click a component instance to open its definition for editing — through
     // this instance, so the context ghost can place the surroundings; with Ctrl the
     // whole enclosing assembly shows faded straight away.
-    const b = scene.bodyAt(eventWorld(e));
+    const world = eventWorld(e);
+    const dj = scene.jointAt(world, pickRadius());
+    const b = scene.bodyAt(world);
     const inst = b ? scene.instanceOfBody(b.id) : undefined;
     if (inst) {
       leftDrag = null; // cancel the drag the double-click's mousedowns started
       enterComponent(inst.defId, inst.id, e.ctrlKey || e.metaKey);
+      return;
+    }
+    // Double-click a grouped body / joint to edit *inside* the group: its parts become
+    // individually selectable and everything else fades out. Already inside it, the
+    // double-click falls through to the ordinary node editing below.
+    const dg =
+      dj && dj.bodyId === null
+        ? scene.groupOfJoint(dj.id)
+        : dj
+          ? scene.groupOf(dj.bodyId!)
+          : b
+            ? scene.groupOf(b.id)
+            : undefined;
+    // (A component instance's own group — its chassis — isn't enterable: the instance's
+    // parts belong to the definition, so a double-click there opens *that* instead.)
+    const dgOwned =
+      !!dg && (dg.bodyIds.some((id) => scene.instanceOfBody(id)) || dg.jointIds.some((id) => scene.instanceOfJoint(id)));
+    if (dg && !dgOwned && dg.id !== groupEdit) {
+      leftDrag = null;
+      enterGroup(dg.id);
+      return;
+    }
+    // Inside a group, a double-click on empty space (or on the veiled surroundings)
+    // leaves it — the same gesture that entered it, one level out.
+    if (groupEdit !== null && !dj && !b) {
+      leftDrag = null;
+      leaveGroup();
       return;
     }
   }
@@ -7614,13 +7978,17 @@ window.addEventListener("keydown", (e) => {
       return;
     }
     // Abort the current placement / drag and return to the mode's normal state
-    // (in sim this also disarms the measure tool). With nothing armed or selected
-    // while editing a component definition, Esc steps back out one level.
+    // (in sim this also disarms the measure tool). With nothing armed or selected,
+    // Esc steps out one level: first out of an open group, then out of a component
+    // definition.
     const idle =
       tool === null && selection === null && multiSel === null && pendingInsert === null &&
       draftBody.length === 0 && jointDraftIds.length === 0 && !leftDrag && !rotateDrag;
     disarmTool();
-    if (idle && mode === "draw" && editPath.length > 0) exitComponent(1);
+    if (idle && mode === "draw") {
+      if (groupEdit !== null) leaveGroup();
+      else if (editPath.length > 0) exitComponent(1);
+    }
     return;
   }
   if (e.key === "Enter" && mode === "draw" && tool === "polyline") {
@@ -8039,18 +8407,18 @@ function editVerticesView(): Vec2[] | null {
 
 // --- regular polygons: centres and side-count tags ---------------------------------
 /** Centres of every regular-polygon outline (draw mode): crosshair markers, pickable as point refs. */
-function regularCentresView(): Vec2[] {
+function regularCentresView(): { at: Vec2; bodyId: number }[] {
   if (mode !== "draw") return [];
-  const out: Vec2[] = [];
+  const out: { at: Vec2; bodyId: number }[] = [];
   for (const body of scene.bodies) {
     if (body.regular) {
       const c = scene.regularCentreWorld(body.id);
-      if (c) out.push(c);
+      if (c) out.push({ at: c, bodyId: body.id });
     }
     body.holes?.forEach((h, hi) => {
       if (!h.regular) return;
       const c = scene.regularCentreWorld(body.id, hi);
-      if (c) out.push(c);
+      if (c) out.push({ at: c, bodyId: body.id });
     });
   }
   return out;
@@ -8148,7 +8516,13 @@ function applyRegularSides(bodyId: number, hole: number | null, n: number): void
   if (breaks.length) {
     scene.load(JSON.parse(before));
     flashSketchItems(breaks);
-    notify("That side count breaks a constraint or dimension on the polygon.");
+    const what = describeBreaks(breaks);
+    notify(
+      what
+        ? `That side count conflicts with ${what} (flashing red).`
+        : "That side count breaks a constraint or dimension on the polygon.",
+      "error"
+    );
     return;
   }
   markDirty();
@@ -8302,7 +8676,10 @@ function sketchGlyphsView(): SketchGlyphView[] {
       }
     }
     if (!badges.length) continue;
-    const badgeHot = cursor !== null && badges.some((b) => dist(b, cursor!) <= GLYPH_PICK_RADIUS / view.scale);
+    // A constraint outside an open group is surroundings: faded and unpickable, so it
+    // never lights up under the cursor either.
+    const badgeHot =
+      sketchInScope(c) && cursor !== null && badges.some((b) => dist(b, cursor!) <= GLYPH_PICK_RADIUS / view.scale);
     const hot = badgeHot || (cursor !== null && allRefs.some((ref) => refHovered(ref, cursor!)));
     // A pose constraint that can't currently hold (grounded partner, a def-edit reset,
     // an instance rotated against it) shows in the error style, like a violated dim.
@@ -8443,6 +8820,14 @@ function frame(now?: number): void {
   containmentErrors = mode === "draw" ? new Set(scene.jointsOutsideBody()) : new Set();
   if (containmentErrors.size !== prevOutside) updateHint();
   pruneFeatureSel(); // the feature selection follows the single body selection + live geometry
+  // An open group can vanish under the editor (ungrouped, deleted, undone, loaded over):
+  // isolation ends with it rather than veiling the scene against nothing. The selection
+  // is left alone — whatever removed the group already decided what stays selected.
+  if (groupEdit !== null && !editedGroup()) {
+    groupEdit = null;
+    updateCrumbBar();
+    updateHint();
+  }
   render(ctx, renderInput());
   requestAnimationFrame(frame);
 }
@@ -8454,6 +8839,10 @@ function renderInput(): RenderInput {
     scene,
     view,
     mode,
+    isolate: (() => {
+      const g = mode === "draw" ? editedGroup() : null;
+      return g ? { bodies: g.bodyIds, joints: g.jointIds, items: isolateItems() } : null;
+    })(),
     shapeDraft: shapeDraftView(),
     patternPreview: patternPreviewView(),
     patterns: patternViews(),
@@ -8617,6 +9006,7 @@ if (import.meta.env.DEV || new URLSearchParams(location.search).has("automation"
         selection,
         multiSel: multiSel ? { bodies: [...multiSel.bodies], joints: [...multiSel.joints] } : null,
         editPath: [...editPath],
+        groupEdit,
         theme,
         animating,
         gridVisible,

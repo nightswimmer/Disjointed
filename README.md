@@ -58,7 +58,8 @@ you can then drag and watch move.
 - **Group** — a permanent set of bodies **and free joints** that acts as **one object**:
   selected, moved, rotated, mirrored and copied together in Draw mode, and simulated as a
   **single rigid body** (nothing inside a group can move relative to the rest — locked free
-  joints ride the group like welded points). Made and dissolved with `Ctrl+G` (a toggle).
+  joints ride the group like welded points). Made and dissolved with `Ctrl+G` (a toggle);
+  **double-click it to edit its parts individually**, with the rest of the drawing faded out.
 - **Component** — a reusable sub-mechanism designed in its **own editing context** and placed
   as **instances**. Editing the definition **cascades to every instance**. Grounding something
   *inside* a definition means "fixed to the component's frame": on placement that material
@@ -187,6 +188,18 @@ group, it dissolves it. A group behaves as **one object**: clicking any member s
 group (shown with a dashed outline while selected), it drags, rotates, mirrors and copies as a
 unit — and in **Simulate mode it moves as a single rigid body**.
 
+**Edit inside a group.** **Double-click** a member to work *inside* the group, the way you open a
+component definition: its bodies and joints stop being one object and select, drag and reshape
+**one at a time**, while everything outside drops to 20% strength and goes out of reach — it can't
+be selected or dragged until you leave (it stays a snap and constraint target, so you can still
+align and dimension the group's parts against the rest of the drawing). The dimensions, constraint
+badges and patterns that **touch the group** stay at full strength and stay editable; those that
+don't fade with the surroundings. The grid doesn't fade — it's the paper, not the drawing.
+A breadcrumb bar names what you're inside (`Assembly ▸ Group (2 parts)`); **Esc** (twice if
+something is selected), a **double-click on empty space**, or a click on a crumb leaves the group
+and selects it whole again. It's a draw-mode view of your own document — nothing is saved,
+nothing lands in undo — and it ends by itself if the group is dissolved or undone away.
+
 **Select parts of a body.** With one body selected, **Shift+drag a box from empty space** to
 select several of its *features* at once: corners of the outline, holes (their corner handles —
 a round hole's centre), and the joints sitting on it (**Ctrl+Shift+drag adds** to the set; a
@@ -311,7 +324,11 @@ remove it — all of this works in both modes. Measurements are saved with the m
   nail a single element down where it is; **Symmetrical** relates a pair *and* the mirror line
   between them. The geometry moves to
   satisfy a constraint the moment you place it, and a constraint that *can't* be satisfied is
-  rejected (the conflicting items flash red, nothing moves). Each constraint shows a small
+  rejected — nothing moves, **a toast says why**, and the items it collided with **flash red for
+  a few seconds** so you can find them: *"Coincident can't be applied: it conflicts with the
+  Horizontal constraint and the 40 mm dimension (flashing red)."* A pick the tool can't use is
+  explained the same way instead of being ignored (*"Parallel needs two lines…"*, *"That element
+  is already fixed."*), as is a dimension value the sketch can't reach. Each constraint shows a small
   violet **badge** (◎ H V ∥ ⊥ =, a padlock for Fixed, a dashed mirror with a dot each side for
   Symmetrical — on both elements and on the mirror line) beside its element — faded until you **hover the element**
   (or the badge — hovering a badge also **highlights the elements it constrains**, with a
@@ -329,7 +346,8 @@ remove it — all of this works in both modes. Measurements are saved with the m
   uniformly** (same shape, new size); further dimensions move **only the involved nodes**
   while every constraint and driving dimension holds. A **driven** (reference) dimension
   shows its value **in parentheses**; a driving one shows it plain. Clear the field to turn a
-  driving dimension back into a reference. Impossible targets are rejected with a red flash.
+  driving dimension back into a reference. A value the sketch can't reach is rejected with the
+  same red flash and a toast naming what held the geometry.
 - **Dimensions on components drive poses, never shape**: a dimension between two different
   component instances moves one of them **rigidly** to the value (a grounded instance stays
   put — the other side moves); one between two **mobile parts of the same component**
@@ -457,7 +475,10 @@ finite segment that does everything it did, and takes equal-length and length di
 
 **Body colour.** The swatch in the **Colour** group sets the active colour: with **nothing selected**
 it's the colour given to newly drawn bodies; with a **body selected** it shows that body's colour
-and editing it recolours the body.
+and editing it recolours the body. With a **multi-selection or a group selected it recolours every
+body in it at once** (the swatch shows the first member's colour when they differ). Component
+instances are left out — an instance takes its colour from its definition and would revert on the
+next re-expansion, so open the definition to recolour it; a toast says when some were skipped.
 
 **Actuator / motor speed.** Select an actuator's rider, the rail it rides, or a motor's body
 (or its pivot / crank joint) and a small panel appears in the toolbar's properties strip with a speed field
@@ -733,7 +754,11 @@ members about the combined centroid — so pins, sliders, grounds, drags and mot
 move the group as one body, and constraints *between* members of one group are inert. Groups can
 also lock **free joints** as members (point masses riding the rigid motion): a ground on a locked
 joint pivots the whole group about it, and a rail between two locked joints is a track that moves
-with the group.
+with the group. **Editing inside a group** needs none of that machinery: the material is already
+the scene's own, so opening a group only suspends its selection atomicity for that one group and
+tells the renderer which elements to keep at full strength — nothing is copied, serialized, or
+pushed onto the undo stack, and the veil over the surroundings is one translucent rectangle over
+the geometry layers plus a per-item fade for the annotations drawn above it.
 **Components** are *materialized*: placing an instance expands the definition into real bodies,
 joints and constraints tagged with provenance (def-local id → scene id), so the solver, renderer
 and hit-testing need no hierarchy concept at all. Grounds inside a definition are *converted* on

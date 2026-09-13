@@ -987,6 +987,50 @@ const TOL = sketchConfig.tol;
   s.removeSketchConstraint(bad.id);
 }
 
+// --- refusal reasons ----------------------------------------------------------
+// `sketchConstraintProblem` is what the UI turns into a toast, and `addSketchConstraint`
+// must refuse exactly when it has a reason — otherwise a refusal goes unexplained (or a
+// reason is given for a constraint that was placed anyway).
+{
+  const s = new Scene();
+  const b = s.addBody([
+    { x: 0, y: 0 },
+    { x: 100, y: 0 },
+    { x: 100, y: 60 },
+    { x: 0, y: 60 },
+  ]);
+  const edge = (i: number): MeasureRef => ({ kind: "edge", bodyId: b.id, index: i });
+  const vert = (i: number): MeasureRef => ({ kind: "vertex", bodyId: b.id, index: i });
+  const cases: { label: string; args: [Parameters<Scene["sketchConstraintProblem"]>[0], MeasureRef, MeasureRef?, MeasureRef?] }[] = [
+    { label: "parallel of two lines", args: ["parallel", edge(0), edge(2)] },
+    { label: "parallel with a point", args: ["parallel", vert(0), edge(2)] },
+    { label: "parallel of one line with itself", args: ["parallel", edge(0), edge(0)] },
+    { label: "horizontal on a line", args: ["horizontal", edge(0)] },
+    { label: "horizontal on one point", args: ["horizontal", vert(0)] },
+    { label: "coincident of a point and its own edge", args: ["coincident", vert(0), edge(0)] },
+    { label: "coincident of a point and a far edge", args: ["coincident", vert(0), edge(2)] },
+    { label: "fixed on a point", args: ["fixed", vert(2)] },
+    { label: "fixed on two references", args: ["fixed", vert(2), vert(3)] },
+    { label: "symmetric without a mirror", args: ["symmetric", vert(0), vert(1)] },
+    { label: "symmetric about a point", args: ["symmetric", vert(0), vert(1), vert(2)] },
+    { label: "symmetric about a line", args: ["symmetric", vert(0), vert(1), edge(2)] },
+    { label: "equal of two lines", args: ["equal", edge(1), edge(3)] },
+  ];
+  let mismatch = "";
+  for (const { label, args } of cases) {
+    const reason = s.sketchConstraintProblem(...args);
+    const made = s.addSketchConstraint(...args);
+    if (!!reason === !!made) mismatch = `${label}: reason=${JSON.stringify(reason)} made=${!!made}`;
+    if (made) s.removeSketchConstraint(made.id);
+  }
+  check("a refusal always has a reason, and a reason always refuses", mismatch === "", mismatch);
+  check("the reason names the constraint", (s.sketchConstraintProblem("parallel", vert(0), edge(2)) ?? "").startsWith("Parallel"), s.sketchConstraintProblem("parallel", vert(0), edge(2)) ?? "none");
+  // A second lock on one element restates the first: refused, with a reason of its own.
+  const lock = s.addSketchConstraint("fixed", vert(2))!;
+  check("a second lock on one element is refused by reason", /already fixed/i.test(s.sketchConstraintProblem("fixed", vert(2)) ?? ""), s.sketchConstraintProblem("fixed", vert(2)) ?? "none");
+  s.removeSketchConstraint(lock.id);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

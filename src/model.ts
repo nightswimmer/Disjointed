@@ -569,6 +569,23 @@ export function isMidpointHost(r: MeasureRef): r is MidpointHost {
 }
 
 /**
+ * Whether a reference names a point a sketch constraint can act on — a joint, a body
+ * corner, a regular polygon's centre, a reference point or a line's midpoint.
+ * (`bodyPoint` refs are measurement-only: the solver can't move them on their own.)
+ */
+export function isPointRef(r: MeasureRef | null | undefined): boolean {
+  return (
+    !!r &&
+    (r.kind === "joint" || r.kind === "vertex" || r.kind === "centre" || r.kind === "guidePoint" || r.kind === "midpoint")
+  );
+}
+
+/** Whether a reference names a line a sketch constraint can act on. */
+export function isLineRef(r: MeasureRef | null | undefined): boolean {
+  return !!r && (r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis");
+}
+
+/**
  * A dimension between two references. What it measures follows from the reference kinds:
  * point+point → distance along `axis`; point+line → perpendicular distance to the
  * infinite line; line+line → distance while (near-)parallel, angle otherwise — resolved
@@ -669,6 +686,18 @@ export interface SketchConstraint {
  * ownership-tests a constraint's references goes through this — a reference the loop
  * doesn't know about is a reference that silently goes stale.
  */
+/** User-facing names of the constraint kinds (toasts and hints; the tools share them). */
+export const CONSTRAINT_NAME: Record<SketchConstraintKind, string> = {
+  coincident: "Coincident",
+  horizontal: "Horizontal",
+  vertical: "Vertical",
+  parallel: "Parallel",
+  perpendicular: "Perpendicular",
+  equal: "Equal",
+  fixed: "Fixed",
+  symmetric: "Symmetrical",
+};
+
 export function sketchRefs(c: { refA: MeasureRef; refB: MeasureRef | null; mirror?: MeasureRef }): MeasureRef[] {
   const out = [c.refA];
   if (c.refB) out.push(c.refB);
@@ -3604,6 +3633,83 @@ export class Scene {
   // --- sketch constraints ---------------------------------------------------
 
   /**
+   * Why a constraint can't be placed on these references — one user-facing sentence, or
+   * null when it can. `addSketchConstraint` refuses **exactly** when this returns a
+   * reason, so every refusal can be explained instead of silently doing nothing; keep
+   * the two in step when a rule is added. (The other way a placement fails is a solve
+   * that can't satisfy it — the caller reports that from the conflicting items it gets
+   * back, which are flashed on the canvas.)
+   */
+  sketchConstraintProblem(
+    kind: SketchConstraintKind,
+    refA: MeasureRef,
+    refB?: MeasureRef,
+    mirror?: MeasureRef
+  ): string | null {
+    const name = CONSTRAINT_NAME[kind];
+    let b = refB ?? null;
+    if (kind !== "symmetric" && mirror) return `${name} has no mirror line.`;
+    if (kind === "symmetric") {
+      if (!b || !mirror) return "Symmetrical needs two elements and the mirror line they are reflected across.";
+      if (!isLineRef(mirror)) return "The mirror has to be a line — a body edge, a rail or a reference segment.";
+      if (!((isPointRef(refA) && isPointRef(b)) || (isLineRef(refA) && isLineRef(b))))
+        return "Symmetrical takes two points or two lines — not one of each.";
+      if (sameMeasureRef(refA, mirror) || sameMeasureRef(b, mirror))
+        return "A line is its own image in itself — pick a different mirror line.";
+      if (isPointRef(refA) && (this.pointIsLineEndpoint(refA, mirror) || this.pointIsLineEndpoint(b, mirror)))
+        return "A point that defines the mirror line is already its own image — the pair could only meet by collapsing onto it.";
+      if (!this.resolveMeasureRef(mirror)) return "The mirror line no longer exists.";
+    } else if (kind === "coincident") {
+      if (!b) return "Coincident needs two references: two points, or a point and a line.";
+      if (isLineRef(refA) && isPointRef(b)) [refA, b] = [b, refA];
+      if (!isPointRef(refA) || !(isPointRef(b) || isLineRef(b)))
+        return "Coincident takes two points, or a point and the line to hold it on.";
+      if (isLineRef(b) && this.pointIsLineEndpoint(refA, b))
+        return "That point defines that line, so it lies on it already — the constraint would never do anything.";
+    } else if (kind === "horizontal" || kind === "vertical") {
+      if (b ? !(isPointRef(refA) && isPointRef(b)) : !isLineRef(refA))
+        return `${name} takes one line (a body edge, rail or reference segment) or two points.`;
+    } else if (kind === "fixed") {
+      if (b) return "Fixed locks one element — a single point or a single line.";
+      if (!(isPointRef(refA) || isLineRef(refA)))
+        return "Fixed takes a point (joint, body corner, polygon centre, reference point) or a line.";
+    } else if (!b || !isLineRef(refA) || !isLineRef(b)) {
+      return `${name} needs two lines (body edges, rails or reference segments).`;
+    }
+    const resA = this.resolveMeasureRef(refA);
+    if (!resA || (b && !this.resolveMeasureRef(b))) return "That element no longer exists.";
+    if (b && sameMeasureRef(refA, b)) return `${name} needs two different elements.`;
+    if (kind === "fixed") {
+      // One lock per element: a second `fixed` on the same reference would only restate
+      // the first (and, after the element moved, fight it).
+      if (this.sketch.some((c) => c.kind === "fixed" && sameMeasureRef(c.refA, refA)))
+        return "That element is already fixed.";
+      // A zero-length line names no line at all, so there is nothing to lock.
+      if (resA.kind === "line" && Math.hypot(resA.b.x - resA.a.x, resA.b.y - resA.a.y) < 1e-9)
+        return "That line has no length, so it names no line to lock.";
+    }
+    // Instance geometry is design-locked: its shape belongs to the component definition.
+    // A constraint with ONE end free is shape material for the free side (instance
+    // variables are immovable in the sketch solver — see varRank in sketch.ts). One
+    // whose every end is instance-owned is a *pose constraint* (pose.ts): it moves
+    // rigid parts, so it's rejected only when no pose can satisfy it — two ends rigid
+    // to one another (same body / chassis group), or "equal" (both lengths locked).
+    if (this.refInstanceOwned(refA) && (!b || this.refInstanceOwned(b)) && (!mirror || this.refInstanceOwned(mirror))) {
+      if (kind === "equal")
+        return "Both lengths belong to component instances, and an instance's shape comes from its definition — open the definition to make them equal there.";
+      if (b) {
+        // (A symmetric pair rigid to one another can't be posed either — only the two
+        // objects move, never the mirror, so the mirror's unit is free to be either.)
+        const ka = this.refRigidUnitKey(refA);
+        const kb = this.refRigidUnitKey(b);
+        if (ka === null || kb === null || ka === kb)
+          return "Both elements are rigid to one another inside a component instance — no pose can satisfy it. Open the definition to constrain its geometry.";
+      }
+    }
+    return null;
+  }
+
+  /**
    * Create a sketch constraint. Reference kinds are validated per constraint kind:
    * `coincident` takes two point refs, or a point ref + a line ref (the point is held
    * on the **infinite** line; normalized so the point is stored as `refA`);
@@ -3617,7 +3723,8 @@ export class Scene {
    * body control edges, or reference polyline edges.
    * Returns null on a kind mismatch, an unresolvable ref, or two refs naming the
    * same element (for point-on-line: a point that *is* an endpoint — or the midpoint —
-   * of the line, which would be trivially satisfied forever).
+   * of the line, which would be trivially satisfied forever) — exactly the cases
+   * `sketchConstraintProblem` gives a reason for, so the UI can say why.
    */
   addSketchConstraint(
     kind: SketchConstraintKind,
@@ -3625,56 +3732,12 @@ export class Scene {
     refB?: MeasureRef,
     mirror?: MeasureRef
   ): SketchConstraint | null {
-    const isPoint = (r: MeasureRef) =>
-      r.kind === "joint" || r.kind === "vertex" || r.kind === "centre" || r.kind === "guidePoint" || r.kind === "midpoint";
-    const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
+    if (this.sketchConstraintProblem(kind, refA, refB, mirror)) return null;
     let b = refB ?? null;
-    if (kind !== "symmetric" && mirror) return null; // only a symmetry has a mirror
-    if (kind === "symmetric") {
-      // Two objects of one kind — both points or both lines — reflected across a line.
-      if (!b || !mirror || !isLine(mirror)) return null;
-      if (!((isPoint(refA) && isPoint(b)) || (isLine(refA) && isLine(b)))) return null;
-      if (sameMeasureRef(refA, mirror) || sameMeasureRef(b, mirror)) return null; // a line is trivially its own image
-      // A point that ends the mirror (or is its midpoint) *is* its own image: the pair
-      // could only be met by collapsing the other point onto it.
-      if (isPoint(refA) && (this.pointIsLineEndpoint(refA, mirror) || this.pointIsLineEndpoint(b, mirror))) return null;
-      if (!this.resolveMeasureRef(mirror)) return null;
-    } else if (kind === "coincident") {
-      if (!b) return null;
-      // Normalize point-on-line order: the point is stored as refA (the badge anchors there).
-      if (isLine(refA) && isPoint(b)) [refA, b] = [b, refA];
-      if (!isPoint(refA) || !(isPoint(b) || isLine(b))) return null;
-      if (isLine(b) && this.pointIsLineEndpoint(refA, b)) return null;
-    } else if (kind === "horizontal" || kind === "vertical") {
-      if (b ? !(isPoint(refA) && isPoint(b)) : !isLine(refA)) return null;
-    } else if (kind === "fixed") {
-      // One reference, point or line — a lock has nothing to relate to.
-      if (b || !(isPoint(refA) || isLine(refA))) return null;
-    } else {
-      if (!b || !isLine(refA) || !isLine(b)) return null;
-    }
+    // Normalize point-on-line order: the point is stored as refA (the badge anchors there).
+    if (kind === "coincident" && b && isLineRef(refA) && isPointRef(b)) [refA, b] = [b, refA];
     const resA = this.resolveMeasureRef(refA);
-    if (!resA || (b && !this.resolveMeasureRef(b))) return null;
-    if (b && sameMeasureRef(refA, b)) return null;
-    // One lock per element: a second `fixed` on the same reference would only restate
-    // the first (and, after the element moved, fight it).
-    if (kind === "fixed" && this.sketch.some((c) => c.kind === "fixed" && sameMeasureRef(c.refA, refA))) return null;
-    // Instance geometry is design-locked: its shape belongs to the component definition.
-    // A constraint with ONE end free is shape material for the free side (instance
-    // variables are immovable in the sketch solver — see varRank in sketch.ts). One
-    // whose every end is instance-owned is a *pose constraint* (pose.ts): it moves
-    // rigid parts, so it's rejected only when no pose can satisfy it — two ends rigid
-    // to one another (same body / chassis group), or "equal" (both lengths locked).
-    if (this.refInstanceOwned(refA) && (!b || this.refInstanceOwned(b)) && (!mirror || this.refInstanceOwned(mirror))) {
-      if (kind === "equal") return null;
-      if (b) {
-        // (A symmetric pair rigid to one another can't be posed either — only the two
-        // objects move, never the mirror, so the mirror's unit is free to be either.)
-        const ka = this.refRigidUnitKey(refA);
-        const kb = this.refRigidUnitKey(b);
-        if (ka === null || kb === null || ka === kb) return null;
-      }
-    }
+    if (!resA) return null;
     const c: SketchConstraint = {
       kind,
       id: this.id(),

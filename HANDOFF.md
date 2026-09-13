@@ -248,6 +248,40 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   lists the badge glyphs `◎ H V ∥ ⊥ =` — now seven, with a drawn **padlock** for
   Fixed (vector art, not a character: `drawLockGlyph` in `src/renderer.ts`). README.md is
   already updated.
+- **Editing inside a group (2026-09-13).** Manual (*Multi-select & groups* under Draw, the
+  `el-group` element topic, and the overview's "a group behaves as one object" phrasing):
+  a **double-click on a member** now opens the group for editing from the inside — its
+  bodies and joints select, drag and reshape one at a time, while everything outside drops
+  to 20% strength and goes **inert** (not selectable or draggable; still a snap / constraint
+  target, so the parts can be aligned and dimensioned against it). Dimensions, constraint
+  badges and patterns that **touch** the group stay full strength and stay editable; the
+  rest fades with the surroundings; the **grid never fades**. The breadcrumb bar — until now
+  a component-only thing, so the *Components* topic's "Click a breadcrumb… to go back out"
+  needs rewording — gains an `Assembly ▸ Group (n parts)` crumb. Leaving: **Esc** (twice if
+  something is selected), a double-click on empty space, or a crumb. Draw mode only; it is
+  a view, not a mode: nothing is saved and nothing lands in undo, and it ends by itself if
+  the group is dissolved or undone away. Caveat worth documenting: **Ctrl+G inside a group
+  dissolves it**. Needs an illustration (inside vs outside, the veil + crumb), and the
+  status-bar line is new text. A second illustration candidate: the same group before /
+  after, showing that leaving re-selects it whole. README.md is already updated.
+- **Recolouring a whole selection (2026-09-13).** Manual (*Body colour*, and the Colour
+  group's toolbar entry / what's-this string): the swatch now recolours **every body of a
+  multi-selection or group** at once, not just a single selection; with mixed colours it
+  shows the first member's. **Component-instance bodies are skipped** (their colour comes
+  from the definition and would revert on the next re-expansion) with a toast saying how
+  many. The `#body-color` title attribute in index.html is already reworded; the manual's
+  copy of it is not. README.md is already updated.
+- **Refusals are spoken, conflicts flash longer (2026-09-13).** Manual (*Sketch constraints
+  & driving dimensions*, every constraint tool topic that says an impossible constraint
+  "is rejected / flashes red", and the Dimensions topic): a rejected constraint or
+  dimension value now also **toasts why**, and the flash lasts **4 s** (was 1.2) so the
+  named items can still be found after reading it. Three shapes to document: a pick the
+  tool can't use (*"Parallel needs two lines…"*, *"That element is already fixed."*) —
+  including a click on bare material or on the wrong shape, which used to be **silently
+  ignored**; a conflict, naming the items that flash (*"…conflicts with the Horizontal
+  constraint and the 40 mm dimension"*, identical ones collapsed into a count); and a
+  dimension value the sketch can't reach. Also covers the polygon side-count refusal, the
+  dimension-direction glyph refusal and context dimensions. README.md is already updated.
 - **Symmetrical constraint implemented (2026-09-13).** The dimmed `#symmetric-btn`
   placeholder became a real tool (`data-tool="symmetric"`, key `Y` — S is the slider; fold
   into the planned shortcut remap). A **text-only** `tool-symmetric` topic was written (same
