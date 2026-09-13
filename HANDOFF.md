@@ -149,6 +149,31 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   point on a body, pick the point first, then the line. A pattern axis and a point-first
   pick keep the old behaviour (a click on nothing waits for a reference).
 
+- **Implicit constraints keep two candidates (2026-09-13).** Manual (*Implicit constraints
+  while dragging*, under Grid & snapping, plus the Horizontal / Vertical / Coincident
+  constraint topics that mention being "offered implicitly while dragging"): a drag now keeps
+  **two** armed alignment candidates instead of one, so a single drag can align a point
+  vertically with one reference and horizontally with another and drop both constraints at
+  once. New behaviour to document: hovering a third element drops the **oldest** candidate
+  (not all of them); **Esc** drops the **most recent** one and the drag continues, so two
+  presses clear both; each armed candidate previews its own dotted line + badge and the
+  release places every previewed constraint, landing the geometry exactly on the
+  intersection; two alignments that pull the same way (two horizontals, a horizontal and a
+  horizontal reference line, …) can't both be exact, so only the more recently armed one
+  previews and is placed while the other stays armed silently; a placement that can't be
+  satisfied now only loses *that* constraint — anything else previewed is still placed.
+  Also: a dragged point released **on** an armed candidate point (within the same ~10 px on
+  both axes) now takes a **coincident** instead of nothing — the old "on top of it is a
+  placement, not an alignment" rule is gone, and the ◎ preview already shows while you hold
+  the point there to arm it. A point-on-point coincident spends both degrees of freedom, so it
+  always previews and places alone. (This is the "auto-coincident while dragging" backlog item.)
+  And the feature now has an on/off **switch**: `#autocon-btn`, the first control in the
+  **Constraints** group — `.tb-switch`, a `tb-tall` pill with a slider under its glyph, styled
+  so it can't be read as another constraint tool (`ID_TOPICS` points it at the existing
+  `constraints` topic). Session state, default on, like the snap toggles. The Constraints
+  group's toolbar illustration needs reshooting. README.md is already updated (the manual is
+  the only doc still stale).
+
 - **Toolbar regrouped into draggable sections (2026-09-13).** The flat toolbar became a rack
   of named sections (`#tb-sections > .tb-sec`), each a two-row grid filled column by column
   under a caption that is also its drag handle (`src/toolbar.ts`; order in localStorage

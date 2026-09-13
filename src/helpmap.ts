@@ -27,6 +27,7 @@ export const ID_TOPICS: Record<string, string> = {
   "make-comp-btn": "components",
   "comp-panel-btn": "component-browser",
   "sketch-vis-btn": "constraints",
+  "autocon-btn": "constraints",
   "grid-btn": "grid",
   "snap-btn": "grid",
   "osnap-btn": "object-snap",

@@ -100,6 +100,7 @@ const simErrorEl = document.getElementById("sim-error")!;
 const gridBtn = document.getElementById("grid-btn") as HTMLButtonElement;
 const snapBtn = document.getElementById("snap-btn") as HTMLButtonElement;
 const osnapBtn = document.getElementById("osnap-btn") as HTMLButtonElement;
+const autoConBtn = document.getElementById("autocon-btn") as HTMLButtonElement;
 const gridSizeBtn = document.getElementById("grid-size-btn") as HTMLButtonElement;
 const gridSizeValue = document.getElementById("grid-size-value") as HTMLSpanElement;
 const gridSizeMenu = document.getElementById("grid-size-menu") as HTMLDivElement;
@@ -471,14 +472,44 @@ const OBJ_SNAP_PARALLEL_TOL = (2 * Math.PI) / 180;
  * Implicit constraints while dragging (draw mode; any body / joint / vertex / multi drag
  * whose reference feature can take a sketch constraint — a joint, a control vertex, a
  * guide point or a control edge): holding the dragged reference over another point /
- * line for `ALIGN_HOVER_MS` arms that element as the *alignment candidate* (a later
- * hover over something else replaces it; Esc drops it). Releasing the drag with the
- * reference H/V-aligned with a candidate point, or on the infinite line of a candidate
- * line, within `ALIGN_TOL_PX` creates the matching sketch constraint automatically — a
- * dotted line with the constraint's badge previews it during the drag.
+ * line for `ALIGN_HOVER_MS` arms that element as an *alignment candidate*. Up to
+ * `ALIGN_MAX_CANDS` stay armed at once — arming one more drops the oldest, Esc drops the
+ * newest — so a single drag can pick up two alignments at different references (vertical
+ * to one, horizontal to another). Releasing the drag with the reference H/V-aligned with
+ * a candidate point, or on the infinite line of a candidate line, within `ALIGN_TOL_PX`
+ * creates the matching sketch constraints automatically — a dotted line with the
+ * constraint's badge previews each of them during the drag.
+ *
+ * A dragged point released **on** a candidate point (within `ALIGN_TOL_PX` on both axes)
+ * takes a coincident instead of an axis alignment — the drop says "these two are the same
+ * point", which is what the candidate was armed for.
+ *
+ * Two matches only preview together when their exact corrections are **independent**: the
+ * drag has two degrees of freedom, each alignment spends one along its own normal (a
+ * point-on-point coincident spends both), and two that pull the same way can't both be
+ * met. A redundant second one would leave a gap for the solver to close, which is exactly
+ * what the pre-placement correction exists to avoid; on such a clash the newer candidate's
+ * match wins and the older candidate stays armed but silent.
  */
 const ALIGN_HOVER_MS = 400;
 const ALIGN_TOL_PX = 10;
+/** How many alignment candidates one drag keeps armed at the same time. */
+const ALIGN_MAX_CANDS = 2;
+/** Two corrections count as independent when their unit normals differ by ≥ this (≈3°). */
+const ALIGN_INDEPENDENT_TOL = Math.sin((3 * Math.PI) / 180);
+/**
+ * Whether implicit constraints are offered at all — the switch in the Constraints group.
+ * Off, a drag carries no alignment state: nothing is scanned, previewed or placed (the
+ * auto-constraints applied while *drawing* are a separate thing and stay on). Session
+ * state, like the snap toggles.
+ */
+let autoConstrain = true;
+
+function setAutoConstrain(on: boolean): void {
+  autoConstrain = on;
+  autoConBtn.classList.toggle("active", on);
+  autoConBtn.setAttribute("aria-pressed", String(on));
+}
 
 /** Screen-px capture range for snapping onto reference geometry. */
 const GUIDE_SNAP_PX = 10;
@@ -573,19 +604,21 @@ type DragObjSnap = { ref: MeasureRef; hit: ResolvedMeasureRef | null; hitInfinit
  * Implicit-constraint state carried by a body / joint / vertex / multi drag: `ref` is the
  * dragged reference (the feature object snap would use, when it can take a constraint —
  * independent of the object-snap toggle), `hover` the target it currently sits on and
- * since when, `cand` the armed candidate, `match` the constraint a release right now
- * would create. `slip` is the last snap correction (unsnapped − snapped anchor), so a
+ * since when, `cands` the armed candidates (oldest first, at most `ALIGN_MAX_CANDS`) and
+ * `matches` the constraints a release right now would create — at most one per candidate,
+ * in candidate order. `slip` is the last snap correction (unsnapped − snapped anchor), so a
  * hover is judged where the cursor put the reference, not where the grid moved it.
  */
 type DragAlign = {
   ref: MeasureRef;
   hover: { ref: MeasureRef; since: number } | null;
-  cand: MeasureRef | null;
-  match: AlignMatch | null;
+  cands: MeasureRef[];
+  matches: AlignMatch[];
   slip: Vec2;
 };
-/** A previewed implicit constraint: its kind and the dotted preview line's endpoints. */
-type AlignMatch = { kind: SketchConstraintKind; from: Vec2; to: Vec2 };
+/** A previewed implicit constraint: its kind, the candidate it holds against and the
+ *  dotted preview line's endpoints. */
+type AlignMatch = { kind: SketchConstraintKind; cand: MeasureRef; from: Vec2; to: Vec2 };
 
 /** A drag anchor spec: a fixed offset from a body's centroid, or a joint. */
 type DragAnchorSpec = { bodyId: number; offset: Vec2 } | { jointId: number };
@@ -1078,8 +1111,8 @@ function alignLineRef(r: MeasureRef): boolean {
 /** Fresh implicit-constraint state for a drag whose reference is `ref` — none when the
  *  reference can't take a constraint (a body centre / edge midpoint `bodyPoint`). */
 function newDragAlign(ref: MeasureRef | null | undefined): DragAlign | undefined {
-  if (!ref || !(alignPointRef(ref) || alignLineRef(ref))) return undefined;
-  return { ref, hover: null, cand: null, match: null, slip: vec(0, 0) };
+  if (!autoConstrain || !ref || !(alignPointRef(ref) || alignLineRef(ref))) return undefined;
+  return { ref, hover: null, cands: [], matches: [], slip: vec(0, 0) };
 }
 
 /** Whether an equivalent sketch constraint (same kind, same two refs, either order) exists. */
@@ -1099,22 +1132,26 @@ function sketchConstraintExists(kind: SketchConstraintKind, a: MeasureRef, b: Me
  * Hovering: the nearest constraint-capable target under the dragged reference — a point
  * reference over a target point, else over a target line; a line reference over a target
  * point along its segment — within the object-snap range of where the *cursor* put the
- * reference (`slip` undoes the grid / object snap). Held for `ALIGN_HOVER_MS` it becomes
- * the candidate, replacing any earlier one; leaving it keeps the candidate armed.
+ * reference (`slip` undoes the grid / object snap). Held for `ALIGN_HOVER_MS` it joins the
+ * armed candidates; the oldest drops once there are more than `ALIGN_MAX_CANDS`, and
+ * moving off a target keeps every candidate armed.
  *
- * Matching (needs a candidate): point↔point within `ALIGN_TOL_PX` of the same y →
+ * Matching (one per candidate): point↔point within `ALIGN_TOL_PX` of the same y →
  * horizontal, same x → vertical (sitting right on top of it is a placement, not an
  * alignment — no match); a point on a candidate line's infinite line, or a candidate
  * point on the dragged line's, → point-on-line coincident. Judged on the geometry as
  * placed (snapped, live-solved) — that's what the release commits; the constraint's own
- * solve then closes the residual. A constraint that already exists never re-matches.
+ * solve then closes the residual. A constraint that already exists never re-matches, and
+ * candidates are matched newest first, so of two matches that aren't independent (see
+ * `ALIGN_INDEPENDENT_TOL`) it is the older candidate's that drops.
  */
 function updateDragAlign(d: LeftDrag, al: DragAlign, now: number): void {
-  al.match = null;
-  const cur = scene.resolveMeasureRef(al.ref);
+  al.matches = [];
+  const cur = autoConstrain ? scene.resolveMeasureRef(al.ref) : null;
+  // Switched off mid-drag (or the reference is gone): forget what was armed and stop scanning.
   if (!cur) {
     al.hover = null;
-    al.cand = null;
+    al.cands = [];
     return;
   }
   // --- hover → candidate ---
@@ -1161,37 +1198,67 @@ function updateDragAlign(d: LeftDrag, al: DragAlign, now: number): void {
   }
   if (!over) al.hover = null;
   else if (!al.hover || !sameMeasureRef(al.hover.ref, over)) al.hover = { ref: over, since: now };
-  if (al.hover && now - al.hover.since >= ALIGN_HOVER_MS && !(al.cand && sameMeasureRef(al.cand, al.hover.ref))) {
-    al.cand = al.hover.ref;
+  const held = al.hover;
+  if (held && now - held.since >= ALIGN_HOVER_MS && !al.cands.some((c) => sameMeasureRef(c, held.ref))) {
+    al.cands.push(held.ref);
+    if (al.cands.length > ALIGN_MAX_CANDS) al.cands.shift(); // the oldest makes room
   }
-  // --- candidate → match ---
-  if (!al.cand) return;
-  const cand = scene.resolveMeasureRef(al.cand);
-  if (!cand) {
-    al.cand = null;
-    return;
-  }
+  // --- candidates → matches ---
+  al.cands = al.cands.filter((c) => scene.resolveMeasureRef(c) !== null);
   const tol = ALIGN_TOL_PX / view.scale;
-  let m: AlignMatch | null = null;
+  const kept: AlignMatch[] = [];
+  const eqs: AlignEquation[] = [];
+  // Newest candidate first: when two matches aren't independent, the one just armed is
+  // the live intent and the older candidate stays armed but stops previewing.
+  for (let i = al.cands.length - 1; i >= 0; i--) {
+    const candRef = al.cands[i];
+    const cand = scene.resolveMeasureRef(candRef);
+    if (!cand) continue;
+    const m = alignMatch(cur, cand, candRef, tol);
+    if (!m || sketchConstraintExists(m.kind, candRef, al.ref)) continue;
+    // Keep it only while an exact correction for every kept match still exists: the drag
+    // has two degrees of freedom, and equations that pull the same way can't both be met.
+    const es = alignEquations(m.kind, cur, cand);
+    if (es.length === 0 || eqs.length + es.length > 2) continue;
+    if (es.some((e) => eqs.some((k) => Math.abs(cross(k.n, e.n)) < ALIGN_INDEPENDENT_TOL))) continue;
+    eqs.push(...es);
+    kept.push(m);
+  }
+  kept.reverse(); // back into arm order, so a standing preview keeps its place
+  al.matches = kept;
+}
+
+/** The alignment a release would constrain between the dragged reference `cur` and one
+ *  candidate — null when the two aren't aligned within `tol`, or can't be constrained. */
+function alignMatch(
+  cur: ResolvedMeasureRef,
+  cand: ResolvedMeasureRef,
+  candRef: MeasureRef,
+  tol: number
+): AlignMatch | null {
   if (cur.kind === "point" && cand.kind === "point") {
     const dx = Math.abs(cur.p.x - cand.p.x);
     const dy = Math.abs(cur.p.y - cand.p.y);
-    if (dx <= tol && dy <= tol) m = null; // on top of it: a placement, not an alignment
-    else if (dy <= tol) m = { kind: "horizontal", from: cand.p, to: cur.p };
-    else if (dx <= tol) m = { kind: "vertical", from: cand.p, to: cur.p };
-  } else if (cur.kind === "point" && cand.kind === "line") {
-    m = pointOnLineMatch(cur.p, cand, tol);
-  } else if (cur.kind === "line" && cand.kind === "point") {
-    m = pointOnLineMatch(cand.p, cur, tol);
+    // Dropped on the candidate itself: pin the two together instead of aligning one axis.
+    if (dx <= tol && dy <= tol) return { kind: "coincident", cand: candRef, from: cand.p, to: cur.p };
+    if (dy <= tol) return { kind: "horizontal", cand: candRef, from: cand.p, to: cur.p };
+    if (dx <= tol) return { kind: "vertical", cand: candRef, from: cand.p, to: cur.p };
+    return null;
   }
-  if (m && sketchConstraintExists(m.kind, al.cand, al.ref)) m = null;
-  al.match = m;
+  if (cur.kind === "point" && cand.kind === "line") return pointOnLineMatch(cur.p, cand, candRef, tol);
+  if (cur.kind === "line" && cand.kind === "point") return pointOnLineMatch(cand.p, cur, candRef, tol);
+  return null;
 }
 
 /** Point-on-line match: `p` within `tol` of `line`'s infinite line. The dotted preview
  *  runs from the nearer end of the defining segment out to the point (collapsed to the
  *  point when it lies within the segment's span — the badge alone marks it then). */
-function pointOnLineMatch(p: Vec2, line: Extract<ResolvedMeasureRef, { kind: "line" }>, tol: number): AlignMatch | null {
+function pointOnLineMatch(
+  p: Vec2,
+  line: Extract<ResolvedMeasureRef, { kind: "line" }>,
+  candRef: MeasureRef,
+  tol: number
+): AlignMatch | null {
   const ab = sub(line.b, line.a);
   const L = lenSq(ab);
   if (L < 1e-12) return null;
@@ -1199,41 +1266,70 @@ function pointOnLineMatch(p: Vec2, line: Extract<ResolvedMeasureRef, { kind: "li
   const foot = add(line.a, scale(ab, u));
   if (dist(p, foot) > tol) return null;
   const from = u < 0 ? line.a : u > 1 ? line.b : foot;
-  return { kind: "coincident", from, to: p };
+  return { kind: "coincident", cand: candRef, from, to: p };
 }
 
-/** Perpendicular foot of `p` on the infinite line through `a`–`b` (null when degenerate). */
-function footOnLine(p: Vec2, a: Vec2, b: Vec2): Vec2 | null {
+/** One previewed alignment as a line constraint on the drag's correction: translating the
+ *  dragged geometry by `delta` makes it exact iff `dot(n, delta) === d`, `n` a unit normal. */
+type AlignEquation = { n: Vec2; d: number };
+
+/**
+ * The correction equations of a previewed alignment: the y axis for a horizontal, the x
+ * axis for a vertical, the line's normal for a point-on-line (whichever side the line is
+ * on — moving the dragged point onto it, or the dragged line onto the candidate point),
+ * and **both** axes for a point-on-point coincident, which leaves the drag no freedom.
+ * Empty when that pair can't take that alignment, a degenerate line included.
+ */
+function alignEquations(
+  kind: SketchConstraintKind,
+  cur: ResolvedMeasureRef,
+  cand: ResolvedMeasureRef
+): AlignEquation[] {
+  if (cur.kind === "point" && cand.kind === "point") {
+    const ex = { n: vec(1, 0), d: cand.p.x - cur.p.x };
+    const ey = { n: vec(0, 1), d: cand.p.y - cur.p.y };
+    if (kind === "horizontal") return [ey];
+    if (kind === "vertical") return [ex];
+    if (kind === "coincident") return [ex, ey];
+    return [];
+  }
+  if (kind !== "coincident") return [];
+  if (cur.kind === "point" && cand.kind === "line") {
+    const n = lineNormal(cand.a, cand.b);
+    return n ? [{ n, d: dot(n, sub(cand.a, cur.p)) }] : [];
+  }
+  if (cur.kind === "line" && cand.kind === "point") {
+    const n = lineNormal(cur.a, cur.b);
+    return n ? [{ n, d: dot(n, sub(cand.p, cur.a)) }] : [];
+  }
+  return [];
+}
+
+/** Unit normal of the line through `a`–`b` (null when degenerate). */
+function lineNormal(a: Vec2, b: Vec2): Vec2 | null {
   const ab = sub(b, a);
-  const L = lenSq(ab);
-  if (L < 1e-12) return null;
-  return add(a, scale(ab, dot(sub(p, a), ab) / L));
+  if (lenSq(ab) < 1e-12) return null;
+  return normalize(perp(ab));
 }
 
 /**
- * The translation that makes a previewed alignment exact: the dragged reference onto
- * the candidate's y (horizontal) / x (vertical), a point onto the candidate line, or the
- * dragged line onto the candidate point. Applied before the constraint is placed, so the
- * solver starts from a satisfied constraint — asked to close even a small gap itself it
- * splits the correction with the other side, and when that side is pinned by dimensions
- * (a fully dimensioned part) the solve can fail and the placement gets rejected.
+ * The translation that makes every previewed alignment exact at once: one equation pins
+ * the dragged geometry along its own normal (the shortest such move), two independent
+ * ones pin it outright (Cramer on the 2×2 system) — whether they come from two alignments
+ * or from the two axes of one point-on-point coincident. Applied before the constraints are
+ * placed, so the solver starts from satisfied constraints — asked to close even a small
+ * gap itself it splits the correction with the other side, and when that side is pinned
+ * by dimensions (a fully dimensioned part) the solve can fail and the placement gets
+ * rejected.
  */
-function alignCorrection(kind: SketchConstraintKind, cur: ResolvedMeasureRef, cand: ResolvedMeasureRef): Vec2 | null {
-  if (cur.kind === "point" && cand.kind === "point") {
-    if (kind === "horizontal") return vec(0, cand.p.y - cur.p.y);
-    if (kind === "vertical") return vec(cand.p.x - cur.p.x, 0);
-    return null;
-  }
-  if (kind !== "coincident") return null;
-  if (cur.kind === "point" && cand.kind === "line") {
-    const foot = footOnLine(cur.p, cand.a, cand.b);
-    return foot ? sub(foot, cur.p) : null;
-  }
-  if (cur.kind === "line" && cand.kind === "point") {
-    const foot = footOnLine(cand.p, cur.a, cur.b);
-    return foot ? sub(cand.p, foot) : null;
-  }
-  return null;
+function alignCorrection(eqs: AlignEquation[]): Vec2 | null {
+  if (eqs.length === 0) return null;
+  if (eqs.length === 1) return scale(eqs[0].n, eqs[0].d); // |n| = 1, so this is the foot
+  const [p, q] = eqs;
+  const det = cross(p.n, q.n);
+  // Parallel normals never pair up when matching; if one slips through, honour the first.
+  if (Math.abs(det) < 1e-9) return scale(p.n, p.d);
+  return vec((p.d * q.n.y - p.n.y * q.d) / det, (p.n.x * q.d - p.d * q.n.x) / det);
 }
 
 /** Translate a drag's geometry by `delta` — the same movers the drag itself uses. */
@@ -1248,40 +1344,60 @@ function moveDragged(d: LeftDrag, delta: Vec2): void {
 }
 
 /**
- * Place the constraint an implicit alignment previewed (on drag release). The dragged
- * reference goes second, so a pose constraint (both ends on components) moves the
- * dragged part rather than the candidate's. Selection stays on what was dragged; a
- * rejected solve flashes the conflicts like any constraint placement.
+ * Place the constraints the implicit alignments previewed (on drag release). Every
+ * previewed gap is closed by one correction first, then each constraint is placed in
+ * turn with the dragged reference second, so a pose constraint (both ends on components)
+ * moves the dragged part rather than the candidate's. Selection stays on what was
+ * dragged; a rejected placement flashes the conflicts like any constraint placement and
+ * leaves the other one standing.
  */
 function placeAlignConstraint(d: LeftDrag, al: DragAlign): void {
-  if (!al.match || !al.cand) return;
-  // Close the (sub-tolerance) gap exactly first — see alignCorrection.
+  if (al.matches.length === 0) return;
+  // Close the (sub-tolerance) gaps exactly first — see alignCorrection. The settle solve
+  // has moved the geometry since the matches were found, so read the equations live.
   const cur = scene.resolveMeasureRef(al.ref);
-  const cand = scene.resolveMeasureRef(al.cand);
-  if (!cur || !cand) return;
-  const corr = alignCorrection(al.match.kind, cur, cand);
-  if (corr && (corr.x !== 0 || corr.y !== 0)) moveDragged(d, corr);
-  const { constraint, breaks } = placeConstraint(scene, al.match.kind, al.cand, al.ref);
-  if (!constraint) {
-    // A silent no-op would read as "nothing happened": say why.
-    if (breaks.length) {
-      flashSketchItems(breaks);
-      notify("Constraint not applied: it can't be satisfied without breaking an existing dimension or constraint.", "error");
-    } else notify("Constraint not applied: not possible between these elements.", "error");
-    markDirty(); // the alignment correction above moved the geometry
-    return;
+  if (!cur) return;
+  const live: { match: AlignMatch; eqs: AlignEquation[] }[] = [];
+  for (const match of al.matches) {
+    const cand = scene.resolveMeasureRef(match.cand);
+    const eqs = cand ? alignEquations(match.kind, cur, cand) : [];
+    if (eqs.length > 0) live.push({ match, eqs });
   }
-  setSketchVisible(true); // a constraint placed while the layer is hidden would be invisible
-  markDirty();
+  if (live.length === 0) return;
+  const corr = alignCorrection(live.flatMap((l) => l.eqs));
+  if (corr && (corr.x !== 0 || corr.y !== 0)) moveDragged(d, corr);
+  let placed = 0;
+  const conflicts: SketchBreak[] = [];
+  let impossible = false;
+  for (const { match } of live) {
+    const { constraint, breaks } = placeConstraint(scene, match.kind, match.cand, al.ref);
+    if (constraint) placed++;
+    else if (breaks.length) conflicts.push(...breaks);
+    else impossible = true;
+  }
+  if (placed > 0) setSketchVisible(true); // a constraint placed while the layer is hidden would be invisible
+  // A silent no-op would read as "nothing happened": say why.
+  if (conflicts.length > 0) {
+    flashSketchItems(conflicts);
+    notify("Constraint not applied: it can't be satisfied without breaking an existing dimension or constraint.", "error");
+  } else if (impossible) {
+    notify("Constraint not applied: not possible between these elements.", "error");
+  }
+  markDirty(); // the alignment correction above moved the geometry
 }
 
-/** Implicit-constraint preview for the renderer: the armed candidate, the dragged
- *  reference, and the alignment a release would constrain (none without a candidate). */
+/** Implicit-constraint preview for the renderer: the armed candidates, the dragged
+ *  reference, and the alignments a release would constrain (none while nothing is armed). */
 function dragAlignView(): RenderInput["dragAlign"] {
-  if (mode !== "draw" || !leftDrag || !("align" in leftDrag) || !leftDrag.align?.cand) return null;
+  if (mode !== "draw" || !leftDrag || !("align" in leftDrag) || !leftDrag.align?.cands.length) return null;
   const ref = scene.resolveMeasureRef(leftDrag.align.ref);
-  const cand = scene.resolveMeasureRef(leftDrag.align.cand);
-  return ref && cand ? { ref, cand, match: leftDrag.align.match } : null;
+  if (!ref) return null;
+  const cands: ResolvedMeasureRef[] = [];
+  for (const c of leftDrag.align.cands) {
+    const resolved = scene.resolveMeasureRef(c);
+    if (resolved) cands.push(resolved);
+  }
+  return cands.length > 0 ? { ref, cands, matches: leftDrag.align.matches } : null;
 }
 
 /**
@@ -1995,6 +2111,9 @@ snapBtn.addEventListener("click", () => {
 osnapBtn.addEventListener("click", () => {
   objSnapEnabled = !objSnapEnabled;
   osnapBtn.classList.toggle("active", objSnapEnabled);
+});
+autoConBtn.addEventListener("click", () => {
+  setAutoConstrain(!autoConstrain);
 });
 sketchVisBtn.addEventListener("click", () => setSketchVisible(!sketchVisible));
 measureVisBtn.addEventListener("click", () => setMeasureVisible(!measureVisible));
@@ -7309,13 +7428,15 @@ window.addEventListener("keydown", (e) => {
       setViewRotateOpen(false);
       return;
     }
-    // Mid-drag with an armed alignment candidate: Esc only drops the candidate — the drag
-    // goes on and its release creates nothing. Parking the hover timer at +∞ keeps the
-    // same element from re-arming while the cursor still rests on it.
-    if (leftDrag && "align" in leftDrag && leftDrag.align?.cand) {
-      leftDrag.align.cand = null;
-      leftDrag.align.match = null;
-      if (leftDrag.align.hover) leftDrag.align.hover.since = Infinity;
+    // Mid-drag with armed alignment candidates: Esc only drops the newest one — the drag
+    // goes on, and its release creates whatever is still armed (press Esc again to clear
+    // that too). Parking the hover timer at +∞ keeps the same element from re-arming
+    // while the cursor still rests on it; the re-run re-previews what is left.
+    if (leftDrag && "align" in leftDrag && leftDrag.align?.cands.length) {
+      const al = leftDrag.align;
+      al.cands.pop();
+      if (al.hover) al.hover.since = Infinity;
+      updateDragAlign(leftDrag, al, performance.now());
       return;
     }
     // Abort the current placement / drag and return to the mode's normal state
@@ -8134,8 +8255,9 @@ function frame(now?: number): void {
   if (mode === "draw" && leftDrag && "align" in leftDrag && leftDrag.align) {
     const al = leftDrag.align;
     const now = performance.now();
+    const held = al.hover;
     const due =
-      al.hover !== null && now - al.hover.since >= ALIGN_HOVER_MS && !(al.cand && sameMeasureRef(al.cand, al.hover.ref));
+      held !== null && now - held.since >= ALIGN_HOVER_MS && !al.cands.some((c) => sameMeasureRef(c, held.ref));
     if (due) updateDragAlign(leftDrag, al, now);
   }
   // Containment check (draw mode): flag joints a shape change stranded outside their

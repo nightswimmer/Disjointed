@@ -140,10 +140,26 @@ motion; actuators / motors animate.
   turn it in one step; **a dimension never turns a regular polygon** (that solver item could stall
   and one stalled item fails every solve in the scene). Corner drags respect what the sketch leaves
   free (size driven → turn only; rotation locked → resize radially; both → move whole).
-- Auto-constraints: near-H/V edges (±5°) get H/V; a vertex placed on a joint/corner/guide point
-  gets a coincident. Implicit constraints while dragging arm after a 0.4 s hover and apply an exact
-  alignment correction **before** placing the constraint (letting the solver close even a 0.3 mm gap
-  failed when the other side was dimension-pinned).
+- Auto-constraints **while drawing**: near-H/V edges (±5°) get H/V; a vertex placed on a
+  joint/corner/guide point gets a coincident. Always on (the switch below doesn't reach them).
+- **Implicit constraints while dragging** (`DragAlign`, main.ts) arm after a 0.4 s hover and apply an
+  exact alignment correction **before** placing the constraint — letting the solver close even a
+  0.3 mm gap failed when the other side was dimension-pinned. Design points:
+  - **Two candidates stay armed** (`ALIGN_MAX_CANDS`), so one drag can take a V off one reference
+    and an H off another; a third hover drops the oldest, Esc drops the newest.
+  - The correction is a **2-DOF linear solve**, not a per-kind special case: each match contributes
+    `dot(n, delta) = d` (y axis for H, x for V, the line normal for point-on-line, **both** axes for
+    a point-on-point coincident), one equation gives the perpendicular foot, two independent ones go
+    through Cramer. A release therefore lands exactly on the intersection.
+  - A match is kept only while the kept equations stay solvable: ≤ 2 total, and no two normals within
+    `ALIGN_INDEPENDENT_TOL` (≈3°). Candidates are matched **newest first**, so a clash drops the
+    older candidate's preview (it stays armed and returns when the drag stops matching the newer).
+    A point-on-point coincident spends both DOF and so always previews alone.
+  - Dropping a point **on** a candidate point is a coincident (it used to be "a placement, not an
+    alignment"): you are on the candidate while hovering to arm it, so ◎ shows immediately.
+  - Placement is per match, so one rejection doesn't lose the other.
+  - `autoConstrain` (the Constraints group's switch) gates the whole thing at `newDragAlign` /
+    `updateDragAlign`, so nothing is scanned when it's off.
 
 ### Components
 - **The definition is the pose reference**: any def edit re-expands every instance (fixpoint through
@@ -201,6 +217,10 @@ motion; actuators / motors animate.
   the toggle applies to the whole group, and `.tb-cap .cap-eye` has to outweigh `button.active`
   or it inherits the accent fill. The mode switch is one big button showing the mode it switches
   *to* (the theme button's convention); its caption names the mode you are in.
+- **A setting that lives among tools is a `.tb-switch`** (today: auto-constraints, `#autocon-btn`
+  in the Constraints group): a `tb-tall` pill with a slider under its glyph. The pill stays
+  **neutral when on** — it overrides `button.active`, because an accent-filled button means "this
+  tool is armed" everywhere else — and the accent lives on the slider track instead.
 - Every mutation goes through `markDirty` → snapshot history + autosave + component-context sync +
   pose-baseline reset. `canonicalData()` is the root document without sim poses.
 - Session-only state (grid, snap, osnap, visibility toggles, solver tuning) is not persisted;
@@ -252,7 +272,8 @@ it for the exact cases.
 - A run of **UI-tweak commits**. During it the in-app manual is deliberately **not** updated;
   every manual-relevant change is logged in HANDOFF.md ("pending manual updates") for one later pass.
   Currently pending there: guideline removal, parametric polygons and the "n sides" tag,
-  projected corner-pair size dimensions, single-click line dimensions, and stale what's-this strings.
+  projected corner-pair size dimensions, single-click line dimensions, the two-candidate /
+  point-on-point implicit constraints with their new toolbar switch, and stale what's-this strings.
 - Plain `L` is unbound; a full shortcut remap is planned.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.
 - The toolbar was regrouped into draggable groups for **draw mode**; sim mode inherits the rack
@@ -276,8 +297,9 @@ it for the exact cases.
 - **Components**: no per-instance scaling; no ports; per-instance actuator/motor speed overrides are
   lost on cascade; no thumbnails / drag-to-place in the browser; pose dims between instances aren't
   carried by copy/paste; a refused pose constraint gives no feedback (nothing to flash).
-- **Sketch**: driving angle dimensions; auto-constraint toggle; auto-coincident while dragging
-  (only while drawing today); radius dim on a sharp corner can't be picked.
+- **Sketch**: driving angle dimensions; radius dim on a sharp corner can't be picked. Implicit
+  constraints have no keyboard shortcut for their switch, and no point-on-point coincident between
+  a dragged *line* and a candidate (lines only take point-on-line).
 - **Context ghost**: can't switch reference instance; no hotkey for the eyes; ghost drops parent
   guides; temp dims are per session.
 - **Sliders / welds**: Connect tool doesn't create welds; second click of a two-click slider snaps

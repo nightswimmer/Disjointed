@@ -111,13 +111,13 @@ export interface RenderInput {
    * a drag from the cursor would use.
    */
   dragSnap: { ref: ResolvedMeasureRef; hit: ResolvedMeasureRef | null; hitInfinite: boolean } | null;
-  /** Implicit-constraint preview during a drag: the armed alignment candidate and the
-   *  dragged reference (sketch violet), plus the alignment a release would constrain —
-   *  a dotted line with the constraint's badge. Null while no candidate is armed. */
+  /** Implicit-constraint preview during a drag: the armed alignment candidates and the
+   *  dragged reference (sketch violet), plus the alignments a release would constrain —
+   *  a dotted line with the constraint's badge each. Null while none is armed. */
   dragAlign: {
     ref: ResolvedMeasureRef;
-    cand: ResolvedMeasureRef;
-    match: { kind: SketchConstraintKind; from: Vec2; to: Vec2 } | null;
+    cands: ResolvedMeasureRef[];
+    matches: { kind: SketchConstraintKind; from: Vec2; to: Vec2 }[];
   } | null;
   /** Ids of sketch constraints / dimensions flashing red after a rejected edit. */
   flash: Set<number> | null;
@@ -909,14 +909,15 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
     }
     drawMeasureRefHighlight(ctx, ref, px, false, OSNAP_COLOR);
   }
-  // Implicit constraints: the armed alignment candidate and the dragged reference in the
-  // sketch violet, then the previewed alignment — a dotted line carrying the badge of the
+  // Implicit constraints: the armed alignment candidates and the dragged reference in the
+  // sketch violet, then each previewed alignment — a dotted line carrying the badge of the
   // constraint a release would create.
   if (input.dragAlign) {
-    const { ref, cand, match } = input.dragAlign;
-    drawMeasureRefHighlight(ctx, cand, px, false, SKETCH_COLOR);
+    const { ref, cands, matches } = input.dragAlign;
+    for (const cand of cands) drawMeasureRefHighlight(ctx, cand, px, false, SKETCH_COLOR);
     drawMeasureRefHighlight(ctx, ref, px, false, SKETCH_COLOR);
-    if (match) {
+    let stacked = 0; // badges that fell back beside the point, so two can't land on each other
+    for (const match of matches) {
       const span = dist(match.from, match.to);
       if (span > px(1)) {
         ctx.strokeStyle = SKETCH_COLOR;
@@ -930,7 +931,10 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       }
       // The badge sits at the dotted line's midpoint, or beside the point when the line is
       // too short to host it (a point already within a candidate line's span).
-      const at = span > px(24) ? scale(add(match.from, match.to), 0.5) : add(match.to, vec(px(14), -px(14)));
+      const at =
+        span > px(24)
+          ? scale(add(match.from, match.to), 0.5)
+          : add(match.to, vec(px(14), -px(14) - px(18) * stacked++));
       drawSketchBadge(ctx, at, match.kind, view, dpr, theme, SKETCH_COLOR, 1, true);
     }
   }

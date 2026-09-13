@@ -308,8 +308,11 @@ works in both modes. Measurements are saved with the mechanism.
   **shows/hides all badges** (constraints keep working while hidden), and the eye on the
   **Measure** group shows/hides **all measurements** — in both modes.
 - **Constraints by dragging**: the common cases need no tool — mid-drag, hover a target to arm
-  it, then release aligned with it (or on its line) and the H / V / coincident constraint is
-  created. See *Implicit constraints while dragging* under Grid & snapping.
+  it, then release aligned with it (or on it, or on its line) and the H / V / coincident
+  constraint is created. **Two** targets stay armed at once, so one drag can align a point
+  vertically with one and horizontally with another. The **switch** at the left of the
+  **Constraints** group turns this on and off (a tall pill with a slider, so it doesn't read
+  as another constraint tool). See *Implicit constraints while dragging* under Grid & snapping.
 - **Driving dimensions**: **double-click** a dimension's value, type a number, press Enter.
   The **first** driving dimension on an otherwise-unconstrained body **scales the whole body
   uniformly** (same shape, new size); further dimensions move **only the involved nodes**
@@ -560,17 +563,40 @@ hole being dragged out, lands on the nearest corner / midpoint / centre / joint 
 **Implicit constraints while dragging** let you place the common sketch constraints without
 picking a tool. While dragging a body, joint, corner node or hole centre (with or without
 object snap), **hold** the dragged point or edge over another element — a corner, hole centre,
-joint, reference point, edge, rail or reference edge — for about half a second: it becomes the
-**alignment candidate** and lights up violet (hovering something else later replaces it;
-**Esc** drops it and the drag goes on). Now move on to where you want the object. When the
-dragged point lines up **horizontally or vertically** with a candidate point, or lands on the
-**line** of a candidate edge / rail / reference edge (or a candidate point lands on the dragged
-edge's line), a dotted violet line with the constraint's badge (H, V or ◎) shows the
-alignment. **Release while it shows** and the geometry is nudged exactly into alignment and the
-constraint is created — the same H / V / coincident you'd get from the tools, badge and all.
-Dropping a point right on top of a candidate point is a plain move (no constraint). If a
-placement can't be satisfied, nothing is created and a message says why (the conflicting
-items flash red).
+joint, reference point, edge, rail or reference edge — for about half a second: it becomes an
+**alignment candidate** and lights up violet. **Two candidates stay armed at once**: hover a
+second element and both stay lit (a third one drops the oldest, and **Esc** drops the most
+recent while the drag goes on). Now move on to where you want the object. When the dragged
+point lines up **horizontally or vertically** with a candidate point, lands **on** a candidate
+point, or lands on the **line** of a candidate edge / rail / reference edge (or a candidate
+point lands on the dragged edge's line), a dotted violet line with the constraint's badge
+(H, V or ◎) shows the alignment. **Release while it shows** and the geometry is nudged exactly
+into alignment and the constraint is created — the same H / V / coincident you'd get from the
+tools, badge and all. Dropping a point **right on** a candidate point is a **coincident**: the
+two are pinned together, exactly on each other — which is what you armed the candidate for, so
+the ◎ badge is already showing while you hold the point there.
+
+With two candidates armed you can satisfy **both in one drop** — vertical to one reference and
+horizontal to another, say, or on a reference line and level with a corner: each shows its own
+dotted line and badge, and the release places both constraints and lands the geometry exactly
+on the intersection. Two alignments that pull the same way (two horizontals, or a horizontal
+and a horizontal reference line) can't both be exact, so only the more recently armed one
+previews and is placed; the other candidate stays armed and takes over as soon as the drag no
+longer matches the newer one.
+
+A point-on-point coincident uses up both directions of freedom, so it is always placed on its
+own: while you hold the dragged point on one candidate, another candidate's H or V preview
+steps aside, and comes back as soon as you move off.
+
+The whole thing has an on/off **switch** at the left of the **Constraints** toolbar group — a
+tall pill with a slider under its glyph, deliberately unlike the square constraint tools beside
+it. Switched off, nothing is armed, previewed or created while you drag. (The auto-constraints
+applied while you *draw* — near-horizontal / near-vertical edges, a corner placed on a joint —
+are a separate thing and stay on.) Like the snap toggles it starts on and is not remembered
+between sessions.
+
+If a placement can't be satisfied, that one isn't created and a message says why (the
+conflicting items flash red); anything else previewed is still placed.
 
 ### Navigate
 - **Mouse wheel** — zoom toward the cursor (0.05× to 200×).

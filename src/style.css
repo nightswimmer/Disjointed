@@ -370,6 +370,70 @@ button.active {
   border-color: #ff4d4d;
 }
 
+/* A setting that lives among tools (the Constraints group's auto-constraint switch):
+   a tall pill with a slider under its glyph, so it never reads as one more constraint
+   to click. The pill itself stays neutral when on — the accent belongs to the slider,
+   since an accent-filled button means "this tool is armed" everywhere else. */
+.tb-switch {
+  flex-direction: column;
+  gap: 3px;
+  width: 34px;
+  padding: 4px 0;
+  border-radius: 999px;
+}
+
+.tb-switch.active,
+.tb-switch.active:hover {
+  background: var(--control);
+  border-color: var(--panel-border);
+  color: var(--text);
+}
+
+.tb-switch:hover,
+.tb-switch.active:hover {
+  background: var(--control-hover);
+}
+
+.tb-switch:not(.active) {
+  color: var(--text-dim);
+}
+
+.tb-switch .sw-glyph {
+  width: 20px;
+  height: 20px;
+}
+
+.tb-switch .sw-track {
+  position: relative;
+  width: 20px;
+  height: 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: transparent; /* empty track = off; the accent fill is the on state */
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.tb-switch .sw-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.12s, background 0.12s;
+}
+
+.tb-switch.active .sw-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tb-switch.active .sw-knob {
+  transform: translateX(8px);
+  background: #fff;
+}
+
 /* Theme toggle shows the destination's glyph: a sun in dark mode (click → light),
    a moon in light mode (click → dark). */
 #theme-btn .icon-moon {
