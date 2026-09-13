@@ -539,6 +539,7 @@ function refUnitMembers(
     case "vertex":
     case "edge":
     case "bodyPoint":
+    case "centre":
       return addBody(ref.bodyId) ? out : null;
     case "joint": {
       const j = scene.getJoint(ref.jointId);
@@ -572,7 +573,8 @@ function driverAt(scene: Scene, ref: MeasureRef, p: Vec2): Driver | null {
       return scene.getJoint(ref.jointId) ? { jointId: ref.jointId, target: vec(0, 0) } : null;
     case "vertex":
     case "bodyPoint":
-    case "edge": {
+    case "edge":
+    case "centre": {
       const b = scene.getBody(ref.bodyId);
       if (!b) return null;
       return { bodyId: b.id, local: rotate(sub(p, b.pos), -b.angle), target: p };

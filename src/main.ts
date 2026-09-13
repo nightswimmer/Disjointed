@@ -64,7 +64,7 @@ import { CanvasTopic } from "./helpmap";
 
 type Mode = "draw" | "sim";
 type Tool =
-  | ShapeTool | "split" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate" | "guide"
+  | ShapeTool | "split" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate"
   | "linearActuator" | "motor" | "measure" | "patternLinear" | "patternCircular"
   | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
 /** The shape tools: role-neutral geometry that the armed role turns into a body, a cut or a reference. */
@@ -281,13 +281,11 @@ let shapeTarget: number | null = null;
 let shapePress: { screen: Vec2; at: Vec2; pick: MeasureRef | null; ctrl: boolean; dragging: boolean } | null = null;
 /** Modifier keys as of the last mouse event (Shift squares a rectangle, Alt draws it from the centre, Ctrl flips the role). */
 let mods = { shift: false, alt: false, ctrl: false };
-/** Regular polygon tool: side count (toolbar field, ↑ / ↓). */
+/** Regular polygon tool: side count (↑ / ↓ while the tool is armed; shown beside the cursor badge). */
 let polySides = 6;
 /** Text tool: label height in world units (toolbar field). */
 let textSize = 10;
 const shapePropsGroup = document.getElementById("shape-props") as HTMLDivElement;
-const polySidesLabel = document.getElementById("poly-sides-label") as HTMLLabelElement;
-const polySidesInput = document.getElementById("poly-sides") as HTMLInputElement;
 const textSizeLabel = document.getElementById("text-size-label") as HTMLLabelElement;
 const textSizeInput = document.getElementById("text-size") as HTMLInputElement;
 // --- pattern tools ------------------------------------------------------------
@@ -314,9 +312,6 @@ let railDraftIds: number[] = []; // rail joints picked so far for the rail tool 
 /** Slider tool (v20): the owner body + start point of the travel picked by the first click
  *  (`riderId` when the click landed on one of the owner's existing joints — it becomes the rider). */
 let sliderDraft: { bodyId: number; at: Vec2; riderId: number | null } | null = null;
-let guideDraft: Vec2 | null = null; // guide tool: the first defining point placed
-/** The existing point element the first guide click landed on (→ coincident on commit). */
-let guideDraftPick: MeasureRef | null = null;
 let selection: Selection | null = null; // element selected in normal mode
 /**
  * Draw-mode multi-selection (Ctrl+click toggles; box select replaces/extends): bodies and
@@ -484,15 +479,16 @@ const OBJ_SNAP_PARALLEL_TOL = (2 * Math.PI) / 180;
 const ALIGN_HOVER_MS = 400;
 const ALIGN_TOL_PX = 10;
 
-/** Screen-px capture range for snapping onto a construction guideline. */
+/** Screen-px capture range for snapping onto reference geometry. */
 const GUIDE_SNAP_PX = 10;
 
 /**
- * Snap a world point (identity when snap is off). Construction guidelines take
- * precedence over the grid: within capture range of one guideline the point projects
- * onto its infinite line; within range of two, it lands on their intersection. Away
- * from any guideline it snaps to the nearest grid intersection. `excludeGuide` leaves
- * one guideline out, so dragging a guide never snaps it onto itself.
+ * Snap a world point (identity when snap is off). Reference geometry takes precedence
+ * over the grid: within capture range of one reference edge the point projects onto it
+ * (within its span); within range of two, it lands on their intersection; near a
+ * reference circle / arc it lands on the rim. Away from any reference it snaps to the
+ * nearest grid intersection. `excludeGuide` leaves one guide out, so dragging a guide
+ * never snaps it onto itself.
  */
 function snap(p: Vec2, excludeGuide?: number): Vec2 {
   if (!snapEnabled) return p;
@@ -501,12 +497,12 @@ function snap(p: Vec2, excludeGuide?: number): Vec2 {
   const curved: { dist: number; proj: Vec2 }[] = [];
   for (const g of scene.guides) {
     if (g.id === excludeGuide) continue;
-    // Lines and polyline edges: project onto the line (a finite edge only within its span).
+    // Polyline edges: project onto the edge, within its span.
     for (const l of scene.guideLines(g)) {
       const d = normalize(sub(l.b, l.a));
       if (d.x === 0 && d.y === 0) continue;
       const t = dot(sub(p, l.a), d);
-      if (!l.infinite && (t < 0 || t > dist(l.a, l.b))) continue;
+      if (t < 0 || t > dist(l.a, l.b)) continue;
       const proj = add(l.a, scale(d, t));
       const dd = dist(p, proj);
       if (dd <= r) near.push({ o: l.a, d, dist: dd, proj });
@@ -524,7 +520,7 @@ function snap(p: Vec2, excludeGuide?: number): Vec2 {
   }
   if (near.length > 0) {
     near.sort((x, y) => x.dist - y.dist);
-    // Two (non-parallel) guidelines in range: land exactly on their intersection.
+    // Two (non-parallel) reference edges in range: land exactly on their intersection.
     for (let i = 1; i < near.length; i++) {
       const den = cross(near[0].d, near[i].d);
       if (Math.abs(den) < 1e-6) continue; // (near-)parallel — no usable intersection
@@ -794,6 +790,8 @@ function pickObjSnapRef(bodyIds: number[], jointIds: number[], grab: Vec2): ObjS
   }
   // The centre rides the first body (a plain move only translates, so it stays put).
   const host = bodies[0];
+  // A lone regular polygon is grabbed by its centre — a real point reference (alignments can bind it).
+  if (bodies.length === 1 && joints.length === 0 && host.regular) return bodyRef(host, centre, { kind: "centre", bodyId: host.id }, 0);
   return bodyRef(host, centre, { kind: "bodyPoint", bodyId: host.id, local: rotate(sub(centre, host.pos), -host.angle) }, 0);
 }
 
@@ -844,13 +842,13 @@ function vertKey(hole: number | null, index: number): string {
  *  constraint / measurement element (null for features no sketch constraint can take —
  *  body centres and edge midpoints). */
 type SnapPoint = { p: Vec2; ref: MeasureRef | null };
-type SnapLine = { a: Vec2; b: Vec2; infinite: boolean; ref: MeasureRef | null };
+type SnapLine = { a: Vec2; b: Vec2; ref: MeasureRef | null };
 
 /**
  * Object-snap targets: the same features on everything that isn't being dragged —
  * other bodies' control vertices, edge midpoints, centroids and control edges (outer +
- * holes), joints (not on a dragged body), rails, and guidelines (defining points +
- * the infinite line).
+ * holes), joints (not on a dragged body), rails, and reference geometry (its points +
+ * polyline edges).
  */
 function objSnapTargets(
   excludeBodies: Set<number>,
@@ -876,7 +874,7 @@ function ghostSnapTargets(): { points: SnapPoint[]; lines: SnapLine[] } | null {
     for (const g of levels) {
       const t = objSnapTargetsOf(g, new Set(), new Set());
       for (const p of t.points) points.push({ p: p.p, ref: null });
-      for (const l of t.lines) lines.push({ a: l.a, b: l.b, infinite: l.infinite, ref: null });
+      for (const l of t.lines) lines.push({ a: l.a, b: l.b, ref: null });
     }
     ghostTargets = { points, lines };
   }
@@ -898,10 +896,14 @@ function objSnapTargetsOf(
     // targets (a hole centre onto a corner, say), but not the moving vertices, the edges
     // they end (and their midpoints), or the centroid — all of which move and would stick.
     const ex = excludeVertex?.bodyId === body.id ? excludeVertex.keys : null;
-    if (!ex) points.push({ p: body.pos, ref: null });
+    if (!ex) points.push({ p: body.pos, ref: body.regular ? { kind: "centre", bodyId: body.id } : null });
     for (const { verts, hole } of bodyControlLoops(body, s)) {
       const n = verts.length;
       const exAt = (i: number): boolean => !!ex && ex.has(vertKey(hole, i));
+      if (!ex && hole !== null && s.outlineRegular(body, hole) !== null) {
+        const c = scale(verts.reduce((acc, q) => add(acc, q), vec(0, 0)), 1 / n);
+        points.push({ p: c, ref: { kind: "centre", bodyId: body.id, hole } });
+      }
       for (let i = 0; i < n; i++) {
         const v = verts[i];
         if (!exAt(i)) {
@@ -917,7 +919,6 @@ function objSnapTargetsOf(
         lines.push({
           a: v,
           b: w,
-          infinite: false,
           ref: hole === null ? { kind: "edge", bodyId: body.id, index: i } : { kind: "edge", bodyId: body.id, index: i, hole },
         });
       }
@@ -935,7 +936,6 @@ function objSnapTargetsOf(
     lines.push({
       a: s.jointWorld(s.getJoint(c.railA)!),
       b: s.jointWorld(s.getJoint(c.railB)!),
-      infinite: false,
       ref: { kind: "rail", sliderId: c.id },
     });
   }
@@ -944,7 +944,7 @@ function objSnapTargetsOf(
       const q = s.guidePointWorld(g, which);
       if (q) points.push({ p: q, ref: { kind: "guidePoint", guideId: g.id, which } });
     }
-    for (const l of s.guideLines(g)) lines.push({ a: l.a, b: l.b, infinite: l.infinite, ref: guideLineRef(g.id, l.edge) });
+    for (const l of s.guideLines(g)) lines.push({ a: l.a, b: l.b, ref: guideLineRef(g.id, l.edge) });
   }
   return { points, lines };
 }
@@ -952,8 +952,8 @@ function objSnapTargetsOf(
 /**
  * Object-snap a drag: `raw` is where the drag anchor (the reference point, or a line
  * reference's midpoint) would land unsnapped. A point reference lands on the nearest
- * target point within range, else projects onto the nearest target line (segments
- * clamped, guidelines infinite). A line reference translates perpendicular onto the
+ * target point within range, else projects onto the nearest target segment (clamped
+ * to its span). A line reference translates perpendicular onto the
  * nearest (near-)parallel target line so the two become collinear — motion along the
  * line stays free. Records the hit for the highlight; null (hit cleared) when nothing
  * is within range, so the caller falls back to the grid/guide snap.
@@ -980,15 +980,14 @@ function objSnapTarget(d: LeftDrag, os: DragObjSnap, raw: Vec2): Vec2 | null {
       os.hit = { kind: "point", p: bestP };
       return bestP;
     }
-    let bestL: { a: Vec2; b: Vec2; infinite: boolean } | null = null;
+    let bestL: { a: Vec2; b: Vec2 } | null = null;
     let proj: Vec2 | null = null;
     bd = r;
     for (const l of targets.lines) {
       const ab = sub(l.b, l.a);
       const L = lenSq(ab);
       if (L < 1e-12) continue;
-      let t = dot(sub(raw, l.a), ab) / L;
-      if (!l.infinite) t = Math.max(0, Math.min(1, t));
+      const t = Math.max(0, Math.min(1, dot(sub(raw, l.a), ab) / L));
       const q = add(l.a, scale(ab, t));
       const dd = dist(raw, q);
       if (dd <= bd) {
@@ -999,7 +998,6 @@ function objSnapTarget(d: LeftDrag, os: DragObjSnap, raw: Vec2): Vec2 | null {
     }
     if (bestL && proj) {
       os.hit = { kind: "line", a: bestL.a, b: bestL.b };
-      os.hitInfinite = bestL.infinite;
       return proj;
     }
     return null;
@@ -1140,8 +1138,7 @@ function updateDragAlign(d: LeftDrag, al: DragAlign, now: number): void {
         const ab = sub(t.b, t.a);
         const L = lenSq(ab);
         if (L < 1e-12) continue;
-        let u = dot(sub(at, t.a), ab) / L;
-        if (!t.infinite) u = Math.max(0, Math.min(1, u));
+        const u = Math.max(0, Math.min(1, dot(sub(at, t.a), ab) / L));
         const dd = dist(at, add(t.a, scale(ab, u)));
         if (dd <= bd) {
           bd = dd;
@@ -1831,7 +1828,6 @@ const HINTS: Record<Mode | Tool | "select" | "viewRotate", string> = {
   ground: "Click a joint to lock its position (it can still rotate), or a body / group to fix it entirely; click again to unground.",
   rail: "Click two joints on the same body (a moving rail) — or two free joints (a fixed track) — to create a rail that joints and sliders can ride along (a pin-in-slot: riders placed on it slide and rotate).",
   slider: "Click a body where the slider starts (that body is the part that moves), then click where the travel ends — over another body the track rides that body, otherwise it is fixed in the world. On an existing rail: click it to add a slider there, or click a rider to toggle its rotation lock.",
-  guide: "Click two points to place an infinite construction guideline — clicks land on joints, body corners and edges (points get a coincident constraint). Drag the line to move it (angle kept), or drag one of its two points to re-aim it. With snap on, placements prefer guidelines over the grid.",
   rotate: "Drag a body to rotate it about its centroid, or drag a selected body's node to rotate about that node. A multi-selection or group rotates as one about its centre. Snaps to 45°.",
   linearActuator: "Click a slider or rail to make it self-driving — its carriage travels back and forth when animation runs (a rail with no rider gets a free one).",
   motor: "Click a joint to set the pivot, then another joint on the same body for the crank pin.",
@@ -1882,10 +1878,6 @@ document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((btn) => {
 });
 document.querySelectorAll<HTMLButtonElement>(".role-btn").forEach((btn) => {
   btn.addEventListener("click", () => setRole(btn.dataset.role as ShapeRole));
-});
-polySidesInput.addEventListener("change", () => {
-  const n = parseInt(polySidesInput.value, 10);
-  setPolySides(Number.isFinite(n) ? n : polySides);
 });
 textSizeInput.addEventListener("change", () => {
   const v = Number(textSizeInput.value);
@@ -2205,8 +2197,6 @@ function resetTransient(): void {
   selectedJoint = null;
   railDraftIds = [];
   sliderDraft = null;
-  guideDraft = null;
-  guideDraftPick = null;
   motorPivotDraft = null;
   measurePicks = [];
   selection = null;
@@ -3305,6 +3295,7 @@ function applyTempDimValue(td: TempDim, target: number): boolean {
     }
     case "edge":
     case "bodyPoint":
+    case "centre":
       moveUnit(moveUnitOfBody(liveRef.bodyId));
       break;
     case "rail": {
@@ -4040,34 +4031,6 @@ function handleDrawClick(p: Vec2): void {
       placed = true;
       break;
     }
-    case "guide": {
-      // Two clicks define an infinite construction guideline. Each click lands exactly
-      // on an existing point element (joint / body corner / guide point — recorded for
-      // an auto-coincident), projects onto a rail / body edge, or grid/guide-snaps.
-      const { at, pick } = guidePlacementAt(p);
-      if (guideDraft === null) {
-        guideDraft = at;
-        guideDraftPick = pick;
-        return; // nothing committed yet
-      }
-      if (dist(at, guideDraft) < 1e-6) return; // same point — wait for a distinct second one
-      const g = scene.addGuide(guideDraft, at);
-      const firstPick = guideDraftPick;
-      disarmTool(); // clears the draft (and, via resetTransient, the selection)
-      if (g) {
-        // CAD-style auto-constraints: a defining point placed on an existing point
-        // sticks to it with a coincident (skipped if the sketch can't take it).
-        if (firstPick) {
-          tryAddConstraint(scene, "coincident", { kind: "guidePoint", guideId: g.id, which: "a" }, firstPick);
-        }
-        if (pick) {
-          tryAddConstraint(scene, "coincident", { kind: "guidePoint", guideId: g.id, which: "b" }, pick);
-        }
-        selection = { kind: "guide", id: g.id };
-        markDirty();
-      }
-      return;
-    }
     case "linearActuator": {
       // Single click on a rail: make it self-driving. The rail's own rider nearest the
       // click (a two-click slider's carriage, or any rider not yet driven) becomes the
@@ -4136,21 +4099,38 @@ function handleDrawClick(p: Vec2): void {
 
 // --- sketch-constraint tools -------------------------------------------------
 /** The point reference a constraint click would pick: a joint, then a body control
- *  vertex, then a guideline defining point. `excludeGuide` leaves one guideline out
+ *  vertex, then a reference-geometry point. `excludeGuide` leaves one guide out
  *  (so a dragged guide point never picks itself). */
 function constraintPointRefAt(p: Vec2, excludeGuide?: number): MeasureRef | null {
   const j = scene.jointAt(p, pickRadius());
   if (j) return { kind: "joint", jointId: j.id };
   const v = bodyVertexRefAt(p);
   if (v) return v;
+  const rc = regularCentreRefAt(p);
+  if (rc) return rc;
   const gp = scene.guidePointAt(p, pickRadius(), excludeGuide);
   if (gp && scene.guidePointIsRef(gp.guide, gp.which)) return { kind: "guidePoint", guideId: gp.guide.id, which: gp.which };
   return null;
 }
 
-/** A line reference onto a guide: the infinite line (edge null) or a polyline edge. */
-function guideLineRef(guideId: number, edge: number | null): MeasureRef {
-  return edge === null ? { kind: "guideLine", guideId } : { kind: "guideLine", guideId, edge };
+/** A line reference onto a guide: a reference polyline's edge. */
+function guideLineRef(guideId: number, edge: number): MeasureRef {
+  return { kind: "guideLine", guideId, edge };
+}
+
+/** The centre of a regular-polygon outline (outer or hole) within pick range of `p`, topmost body first. */
+function regularCentreRefAt(p: Vec2, s: Scene = scene): MeasureRef | null {
+  const r = pickRadius();
+  for (let i = s.bodies.length - 1; i >= 0; i--) {
+    const body = s.bodies[i];
+    const c = s.regularCentreWorld(body.id);
+    if (c && dist(c, p) <= r) return { kind: "centre", bodyId: body.id };
+    for (let hi = 0; hi < (body.holes?.length ?? 0); hi++) {
+      const hc = s.regularCentreWorld(body.id, hi);
+      if (hc && dist(hc, p) <= r) return { kind: "centre", bodyId: body.id, hole: hi };
+    }
+  }
+  return null;
 }
 
 /** Topmost body control vertex — outer outline or hole — within pick range, as a ref. */
@@ -4198,7 +4178,7 @@ function bodyEdgeRefAt(p: Vec2, s: Scene = scene): MeasureRef | null {
 }
 
 /** The line reference a constraint click would pick: a slider rail, then a body control
- *  edge, then a guideline (its infinite line). */
+ *  edge, then a reference polyline edge. */
 function constraintLineRefAt(p: Vec2): MeasureRef | null {
   const s = scene.sliderAt(p, pickRadius());
   if (s) return { kind: "rail", sliderId: s.id };
@@ -4461,6 +4441,7 @@ function closeDimEditor(): void {
   dimEditId = null;
   dimEditTemp = null;
   patternEdit = null;
+  sidesEdit = null;
   dimEditInput.classList.add("hidden");
   dimEditInput.blur();
 }
@@ -4468,6 +4449,10 @@ function closeDimEditor(): void {
 function commitDimEditor(): void {
   if (patternEdit) {
     commitPatternEditor();
+    return;
+  }
+  if (sidesEdit) {
+    commitSidesEditor();
     return;
   }
   const id = dimEditId;
@@ -4514,7 +4499,7 @@ dimEditInput.addEventListener("keydown", (e) => {
   else if (e.key === "Escape") closeDimEditor();
 });
 dimEditInput.addEventListener("blur", () => {
-  if (dimEditId !== null || dimEditTemp !== null || patternEdit) commitDimEditor();
+  if (dimEditId !== null || dimEditTemp !== null || patternEdit || sidesEdit) commitDimEditor();
 });
 
 // --- measure tool ----------------------------------------------------------
@@ -4584,6 +4569,8 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   if (j) return { kind: "joint", jointId: j.id };
   const v = bodyVertexRefAt(p);
   if (v) return v;
+  const rc = regularCentreRefAt(p);
+  if (rc) return rc;
   // A disk rim (circular hole / disk body) picks the disk's centre as a point ref —
   // and, as the *first* pick, a diameter dimension (see handleMeasureClick).
   const rim = diskRimAt(p);
@@ -4692,6 +4679,11 @@ function handleSelectClick(p: Vec2): void {
   const tl = tempDimLabelAt(p);
   if (tl) {
     selection = { kind: "tempDim", id: tl.id };
+    return;
+  }
+  const rt = regularTagAt(p);
+  if (rt) {
+    selection = { kind: "body", id: rt.bodyId }; // the tag belongs to the selected body (double-click edits)
     return;
   }
   const ml = measurementLabelAt(p);
@@ -5196,13 +5188,27 @@ function startFeatureDrag(grab: Vec2, ref: MeasureRef): void {
 function moveFeatures(d: Extract<LeftDrag, { kind: "features" }>, delta: Vec2): void {
   const body = scene.getBody(d.bodyId);
   if (!body) return;
-  const worlds = d.verts.map((v) => outlineControlWorld(body, v.hole)[v.index]).filter((p): p is Vec2 => !!p);
+  // A regular outline is one rigid shape: any of its corners in the selection moves the
+  // whole outline (corner by corner it would re-fit about its centre and wobble).
+  const regularOutlines = new Set(
+    d.verts.filter((v) => scene.outlineRegular(body, v.hole) !== null).map((v) => v.hole ?? "o")
+  );
+  const worlds: Vec2[] = [];
+  for (const v of d.verts) {
+    if (regularOutlines.has(v.hole ?? "o")) continue;
+    const w = outlineControlWorld(body, v.hole)[v.index];
+    if (w) worlds.push(w);
+  }
+  for (const key of regularOutlines) worlds.push(...outlineControlWorld(body, key === "o" ? null : key));
   const carried = new Set(
     scene.joints
       .filter((j) => j.bodyId === body.id && worlds.some((w) => dist(w, scene.jointWorld(j)) < VERTEX_LINK_EPS))
       .map((j) => j.id)
   );
-  for (const v of d.verts) scene.moveBodyVertex(d.bodyId, v.index, delta, v.hole);
+  for (const key of regularOutlines) scene.moveOutline(d.bodyId, key === "o" ? null : key, delta);
+  for (const v of d.verts) {
+    if (!regularOutlines.has(v.hole ?? "o")) scene.moveBodyVertex(d.bodyId, v.index, delta, v.hole);
+  }
   for (const id of d.joints) if (!carried.has(id)) scene.moveJoint(id, delta);
 }
 
@@ -5525,14 +5531,12 @@ function syncRoleButtons(): void {
     b.classList.toggle("active", b.dataset.role === eff);
     b.classList.toggle("forced", forced);
   });
-  shapePropsGroup.classList.toggle("hidden", tool !== "polygon" && tool !== "text");
-  polySidesLabel.classList.toggle("hidden", tool !== "polygon");
+  shapePropsGroup.classList.toggle("hidden", tool !== "text");
   textSizeLabel.classList.toggle("hidden", tool !== "text");
 }
 
 function setPolySides(n: number): void {
-  polySides = Math.max(3, Math.min(64, Math.round(n)));
-  polySidesInput.value = String(polySides);
+  polySides = Math.max(3, Math.min(Scene.REGULAR_MAX_SIDES, Math.round(n)));
 }
 
 /** Hint for the armed shape tool, prefixed by the role it will apply. */
@@ -5567,7 +5571,7 @@ function shapePointAt(p: Vec2): { at: Vec2; pick: MeasureRef | null } {
 }
 
 /** A closed material shape as the Body / Cut roles consume it (a `HoleSpec`-shaped control polygon). */
-type ShapeSpec = { control: Vec2[]; radius: number; round: RoundMode };
+type ShapeSpec = { control: Vec2[]; radius: number; round: RoundMode; regular?: number };
 
 /**
  * Finish a closed shape in a material role. Body: a new body (freehand colour, clicked
@@ -5575,15 +5579,17 @@ type ShapeSpec = { control: Vec2[]; radius: number; round: RoundMode };
  * shape is subtracted from the target body (see `Scene.cutBody`). Returns whether the
  * shape was consumed — a refused cut explains why and leaves the tool armed.
  */
-function commitMaterial(spec: ShapeSpec, snaps: (MeasureRef | null)[] = [], hv = true): boolean {
+function commitMaterial(spec: ShapeSpec, snaps: (MeasureRef | null)[] = [], hv = true, centrePick: MeasureRef | null = null): boolean {
   const r = effectiveRole();
   if (r === "body") {
-    const body = scene.addBody(spec.control, spec.radius, spec.round);
+    const body = scene.addBody(spec.control, spec.radius, spec.round, undefined, undefined, spec.regular);
     body.color = defaultBodyColor;
     for (let i = 0; i < snaps.length && i < spec.control.length; i++) {
       const ref = snaps[i];
       if (ref) tryAddConstraint(scene, "coincident", { kind: "vertex", bodyId: body.id, index: i }, ref);
     }
+    // A regular polygon whose centre click landed on a point element sticks to it by the centre.
+    if (spec.regular && centrePick) tryAddConstraint(scene, "coincident", { kind: "centre", bodyId: body.id }, centrePick);
     if (hv && spec.round === "fillet") autoConstrainBody(scene, body.id);
     markDirty();
     disarmTool();
@@ -5604,6 +5610,9 @@ function commitMaterial(spec: ShapeSpec, snaps: (MeasureRef | null)[] = [], hv =
   if (!res.ok) {
     notify(res.reason);
     return false;
+  }
+  if (spec.regular && centrePick && res.hole !== null) {
+    tryAddConstraint(scene, "coincident", { kind: "centre", bodyId: target.id, hole: res.hole }, centrePick);
   }
   markDirty();
   disarmTool();
@@ -5829,8 +5838,9 @@ function handleShapeClick(p: Vec2): void {
     case "polygon": {
       if (dist(a, at) < tiny) return;
       const pts = regularPolygon(a, at, polySides);
-      if (effectiveRole() === "reference") commitReferencePoly(pts, true, [shapeSnaps[0]]);
-      else commitMaterial({ control: pts, radius: 0, round: "fillet" }, [shapeSnaps[0]]);
+      // (The first click is the centre, not a corner: no corner takes its pick.)
+      if (effectiveRole() === "reference") commitReferencePoly(pts, true, []);
+      else commitMaterial({ control: pts, radius: 0, round: "fillet", regular: pts.length }, [], false, shapeSnaps[0]);
       return;
     }
     case "line": {
@@ -5887,6 +5897,7 @@ function shapeDraftView(): RenderInput["shapeDraft"] {
     aux: [],
     text: null,
     target: shapeTarget,
+    hint: null,
   };
   const cur = cursor ? shapePointAt(cursor).at : null;
   const a = shapePts[0];
@@ -5913,6 +5924,7 @@ function shapeDraftView(): RenderInput["shapeDraft"] {
       }
       break;
     case "polygon":
+      d.hint = `${polySides} sides`;
       if (a && cur) {
         d.outline = regularPolygon(a, cur, polySides);
         d.closed = true;
@@ -7001,6 +7013,12 @@ canvas.addEventListener("dblclick", (e) => {
   // Select mode: double-click a draw-mode dimension label to edit its value inline
   // (typing a number makes it a driving dimension; clearing it makes it driven again).
   if (mode === "draw" && tool === null) {
+    const rt = regularTagAt(eventWorld(e));
+    if (rt) {
+      leftDrag = null;
+      openSidesEditor(rt);
+      return;
+    }
     const pl = patternLabelAt(eventWorld(e));
     if (pl && pl.field !== "rotate") {
       leftDrag = null;
@@ -7053,6 +7071,16 @@ canvas.addEventListener("dblclick", (e) => {
       markDirty();
       return;
     }
+    {
+      // A regular polygon keeps its corner count: nodes can't be added or removed.
+      const rBody = scene.getBody(selection.id);
+      const rEdge = node ? null : selectedBodyEdgeAt(world);
+      const rHole = node ? node.hole : rEdge ? rEdge.hole : undefined;
+      if (rBody && rHole !== undefined && scene.outlineRegular(rBody, rHole === null ? null : scene.patternSeedHole(selection.id, rHole)) !== null) {
+        notify("A regular polygon keeps its corners — change its side count instead (double-click the count tag, or ↑ / ↓).");
+        return;
+      }
+    }
     if (node) {
       // Removing the last removable node of a hole deletes the hole itself (a fillet
       // hole keeps ≥ 3 vertices, a disk keeps its 1 — so a no-op removal means "the
@@ -7084,9 +7112,10 @@ canvas.addEventListener("dblclick", (e) => {
   }
 });
 
-/** Draw-tool shortcuts: mostly the first letter of the tool's name (L = guideLine —
- *  G is Ground; the actuator moved to A when L was given to guidelines). B and U are
- *  presets handled in the key handler: the polyline tool in the Body / Cut role. */
+/** Draw-tool shortcuts: mostly the first letter of the tool's name (G is Ground; L is
+ *  free since the infinite guideline tool was retired — the whole map is due for a
+ *  remap). B and U are presets handled in the key handler: the polyline tool in the
+ *  Body / Cut role. */
 const TOOL_KEYS: Record<string, Tool> = {
   i: "patternLinear", // repeat a hole / joint along one or two directions (Instances)
   q: "patternCircular", // ...or around a centre
@@ -7098,7 +7127,6 @@ const TOOL_KEYS: Record<string, Tool> = {
   s: "slider", // S is the slider itself (the prismatic carriage that rides a rail)
   k: "rail", // the tracK the sliders ride along (S belongs to the slider)
   r: "rotate",
-  l: "guide",
   a: "linearActuator",
   m: "motor",
   d: "measure",
@@ -7115,7 +7143,7 @@ const SHIFT_TOOL_KEYS: Record<string, Tool> = {
   c: "circle",
   p: "polygon",
   s: "slot",
-  l: "line", // a finite segment (plain L is the infinite guideline)
+  l: "line", // a finite reference segment
   a: "arc",
   t: "text",
 };
@@ -7259,6 +7287,17 @@ window.addEventListener("keydown", (e) => {
     setPolySides(polySides + (e.key === "ArrowUp" ? 1 : -1));
     e.preventDefault();
     return;
+  }
+  // A selected regular polygon (or its one selected regular hole): ↑ / ↓ change its side count.
+  if (mode === "draw" && tool === null && selection?.kind === "body" && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    const body = scene.getBody(selection.id);
+    const target = regularEditTarget(body);
+    if (body && target) {
+      const n = scene.outlineRegular(body, target.hole)!;
+      applyRegularSides(body.id, target.hole, n + (e.key === "ArrowUp" ? 1 : -1));
+      e.preventDefault();
+      return;
+    }
   }
   if (e.key === "Enter" && mode === "draw" && isPatternTool(tool)) {
     finishPatternTool();
@@ -7635,13 +7674,6 @@ function guideAnchorWorld(g: Guide): Vec2 {
   return scene.guidePointWorld(g, scene.guideHandleKeys(g)[0]) ?? vec(0, 0);
 }
 
-/** Guide tool: the first defining point placed, with the live cursor (line preview,
- *  landing where the click would — on elements, projections, or the grid). */
-function guideDraftView(): { a: Vec2; cursor: Vec2 } | null {
-  if (mode !== "draw" || tool !== "guide" || guideDraft === null || !cursor) return null;
-  return { a: guideDraft, cursor: guidePlacementAt(cursor).at };
-}
-
 /** Control-vertex handles to show for the body selected in select / rotate mode (else
  *  null) — the outer outline's plus every hole's. */
 function editVerticesView(): Vec2[] | null {
@@ -7652,6 +7684,123 @@ function editVerticesView(): Vec2[] | null {
   const out = [...scene.bodyControlWorld(body)];
   body.holes?.forEach((_, hi) => out.push(...scene.bodyHoleControlWorld(body, hi)));
   return out;
+}
+
+// --- regular polygons: centres and side-count tags ---------------------------------
+/** Centres of every regular-polygon outline (draw mode): crosshair markers, pickable as point refs. */
+function regularCentresView(): Vec2[] {
+  if (mode !== "draw") return [];
+  const out: Vec2[] = [];
+  for (const body of scene.bodies) {
+    if (body.regular) {
+      const c = scene.regularCentreWorld(body.id);
+      if (c) out.push(c);
+    }
+    body.holes?.forEach((h, hi) => {
+      if (!h.regular) return;
+      const c = scene.regularCentreWorld(body.id, hi);
+      if (c) out.push(c);
+    });
+  }
+  return out;
+}
+
+/** Side-count tags of the selected body's regular outlines (last frame's layout, for picking). */
+let regularTagCache: { bodyId: number; hole: number | null; at: Vec2 }[] = [];
+
+/** One "n sides" tag per regular outline of the selected body, just above the outline. */
+function regularTagsView(): { at: Vec2; text: string }[] {
+  regularTagCache = [];
+  if (mode !== "draw" || (tool !== null && tool !== "rotate") || selection?.kind !== "body") return [];
+  const body = scene.getBody(selection.id);
+  if (!body) return [];
+  const out: { at: Vec2; text: string }[] = [];
+  const place = (pts: Vec2[], hole: number | null, n: number): void => {
+    let top = Infinity;
+    for (const p of pts) top = Math.min(top, worldToScreen(view, p).y);
+    const c = scale(pts.reduce((acc, q) => add(acc, q), vec(0, 0)), 1 / pts.length);
+    const at = screenToWorld(view, vec(worldToScreen(view, c).x, top - 16));
+    regularTagCache.push({ bodyId: body.id, hole, at });
+    out.push({ at, text: `${n} sides` });
+  };
+  if (body.regular) place(scene.bodyControlWorld(body), null, body.regular);
+  body.holes?.forEach((h, hi) => {
+    if (h.regular) place(scene.bodyHoleControlWorld(body, hi), hi, h.regular);
+  });
+  return out;
+}
+
+/** The side-count tag under `p` (last frame's layout), or null. */
+function regularTagAt(p: Vec2): { bodyId: number; hole: number | null } | null {
+  const r = LABEL_PICK_RADIUS / view.scale;
+  for (let i = regularTagCache.length - 1; i >= 0; i--) {
+    if (dist(regularTagCache[i].at, p) <= r) return regularTagCache[i];
+  }
+  return null;
+}
+
+/** Which regular outline of `body` the keyboard edits: its outer outline, else the one
+ *  regular hole the feature selection is on. */
+function regularEditTarget(body: Body | undefined): { hole: number | null } | null {
+  if (!body) return null;
+  if (body.regular) return { hole: null };
+  if (featureSel?.bodyId === body.id && featureSel.verts.length) {
+    const h = featureSel.verts[0].hole;
+    if (h !== null && featureSel.verts.every((v) => v.hole === h) && scene.outlineRegular(body, h) !== null) return { hole: h };
+  }
+  return null;
+}
+
+/** The side-count editor (shares the dimension editor's input). */
+let sidesEdit: { bodyId: number; hole: number | null } | null = null;
+
+/** Open the floating input over a regular outline's side-count tag (double-click). */
+function openSidesEditor(tag: { bodyId: number; hole: number | null }): void {
+  const body = scene.getBody(tag.bodyId);
+  const n = body ? scene.outlineRegular(body, tag.hole) : null;
+  const at = regularTagCache.find((t) => t.bodyId === tag.bodyId && t.hole === tag.hole)?.at;
+  if (n === null || !at) return;
+  closeDimEditor();
+  sidesEdit = { bodyId: tag.bodyId, hole: tag.hole };
+  const sp = worldToScreen(view, at);
+  dimEditInput.style.left = `${sp.x}px`;
+  dimEditInput.style.top = `${sp.y}px`;
+  dimEditInput.value = String(n);
+  dimEditInput.classList.remove("hidden");
+  dimEditInput.focus();
+  dimEditInput.select();
+}
+
+/** Commit the side-count editor: a whole number of sides (3 … REGULAR_MAX_SIDES). */
+function commitSidesEditor(): void {
+  const edit = sidesEdit;
+  const raw = dimEditInput.value.trim();
+  closeDimEditor(); // clears sidesEdit first, so the blur listener doesn't re-commit
+  if (!edit || raw === "") return;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 3 || n > Scene.REGULAR_MAX_SIDES) {
+    notify(`The side count must be a whole number from 3 to ${Scene.REGULAR_MAX_SIDES}.`);
+    return;
+  }
+  applyRegularSides(edit.bodyId, edit.hole, n);
+}
+
+/**
+ * Change a regular outline's side count (a pattern member's edit goes to its seed) and
+ * re-solve the sketch; a result the constraints can't take is reverted and reported.
+ */
+function applyRegularSides(bodyId: number, hole: number | null, n: number): void {
+  const seedHole = hole === null ? null : scene.patternSeedHole(bodyId, hole);
+  const before = JSON.stringify(scene.serialize());
+  if (!scene.setRegularSides(bodyId, seedHole, n)) return;
+  const breaks = solveSketch(scene);
+  if (breaks.length) {
+    scene.load(JSON.parse(before));
+    flashSketchItems(breaks);
+    notify("That side count breaks a constraint or dimension on the polygon.");
+    return;
+  }
+  markDirty();
 }
 
 /** Resolved measurements of the current mode (a ref that can't resolve just isn't drawn). */
@@ -7716,10 +7865,11 @@ function sketchRefKey(ref: MeasureRef): string {
   switch (ref.kind) {
     case "joint": return `j:${ref.jointId}`;
     case "vertex": return `v:${ref.bodyId}:${ref.index}${ref.hole !== undefined ? `:${ref.hole}` : ""}`;
+    case "centre": return `c:${ref.bodyId}${ref.hole !== undefined ? `:${ref.hole}` : ""}`;
     case "edge": return `e:${ref.bodyId}:${ref.index}${ref.hole !== undefined ? `:${ref.hole}` : ""}`;
     case "rail": return `r:${ref.sliderId}`;
     case "guidePoint": return `gp:${ref.guideId}:${ref.which}`;
-    case "guideLine": return `gl:${ref.guideId}${ref.edge !== undefined ? `:${ref.edge}` : ""}`;
+    case "guideLine": return `gl:${ref.guideId}:${ref.edge}`;
     case "patternAxis": return `px:${ref.patternId}:${ref.axis}`;
     default: return "?";
   }
@@ -7738,8 +7888,7 @@ function refHovered(ref: MeasureRef, p: Vec2): boolean {
   if (res.kind === "point" && dist(res.p, p) <= r) return true;
   if (res.kind === "line" && distToSegment(p, res.a, res.b) <= r) return true;
   if (ref.kind === "vertex" || ref.kind === "edge") return scene.bodyAt(p)?.id === ref.bodyId;
-  // A guideline is infinite: hovering anywhere along it (not just the defining
-  // segment) reveals its constraints; so does hovering either defining point.
+  // Hovering anywhere on a reference element (or one of its points) reveals its constraints.
   if (ref.kind === "guideLine" || ref.kind === "guidePoint") {
     const g = scene.getGuide(ref.guideId);
     if (!g) return false;
@@ -7818,14 +7967,13 @@ function sketchGlyphsView(): SketchGlyphView[] {
   return out;
 }
 
-/** Closest point to `p` on a resolved reference (a guide extends without end). */
+/** Closest point to `p` on a resolved reference. */
 function closestOnRef(p: Vec2, r: ResolvedMeasureRef): Vec2 {
   if (r.kind === "point") return r.p;
   const ab = sub(r.b, r.a);
   const l2 = lenSq(ab);
   if (l2 < 1e-12) return r.a;
-  let t = dot(sub(p, r.a), ab) / l2;
-  if (!r.infinite) t = Math.max(0, Math.min(1, t));
+  const t = Math.max(0, Math.min(1, dot(sub(p, r.a), ab) / l2));
   return add(r.a, scale(ab, t));
 }
 
@@ -7843,8 +7991,8 @@ function sketchLink(a: ResolvedMeasureRef, b: ResolvedMeasureRef): [Vec2, Vec2] 
       const w = sub(b.a, a.a);
       const t = cross(w, db) / den;
       const u = cross(w, da) / den;
-      const inA = a.infinite || (t >= -1e-9 && t <= 1 + 1e-9);
-      const inB = b.infinite || (u >= -1e-9 && u <= 1 + 1e-9);
+      const inA = t >= -1e-9 && t <= 1 + 1e-9;
+      const inB = u >= -1e-9 && u <= 1 + 1e-9;
       if (inA && inB) return null;
     }
   }
@@ -7974,9 +8122,10 @@ function renderInput(): RenderInput {
       : null,
     featureSelected: featureSelectedView(),
     editVertices: editVerticesView(),
+    regularCentres: regularCentresView(),
+    regularTags: regularTagsView(),
     filletHandles: filletHandlesView(),
     railDraft: railDraftView(),
-    guideDraft: guideDraftView(),
     bodyJointDraft: bodyJointDraftView(),
     driverJoint: driver?.jointId ?? null,
     rotatePivot: rotateDrag?.pivot ?? null,

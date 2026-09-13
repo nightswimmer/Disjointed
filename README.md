@@ -4,8 +4,8 @@ A simple web app for creating and simulating **2D planar mechanisms** — bodies
 round-able shapes) coupled by joints (pins, welds, grounds, rails with riders and sliders) that
 you can then drag and watch move.
 
-> Status: working. Draw a mechanism with the shape tools (polyline, rectangle, circle, polygon,
-> slot — each as a **body**, a **cut** or **reference** geometry), edit it, switch to simulate,
+> Status: working. Draw a mechanism with the shape tools (polyline, rectangle, circle, regular
+> polygon, slot — each as a **body**, a **cut** or **reference** geometry), edit it, switch to simulate,
 > and drag any part of it to drive it. The solver and shape/edit logic are covered by headless tests.
 > A built-in manual opens beside the canvas (the `?` button): click any button or anything on
 > the canvas to read what it is and does.
@@ -68,10 +68,10 @@ you can then drag and watch move.
   instance can be placed at any rotation. Non-grounded parts keep moving relative to each
   other: components can contain working mechanisms (pins, rails, sliders, actuators, motors),
   and definitions can nest instances of other components.
-- **Guideline** — an **infinite construction line** through two points (Draw mode only; it
-  never takes part in simulation). Placement, dragging and drawing snap onto guidelines in
-  preference to the grid, and guidelines participate in sketch constraints and measurements
-  like any other line — see *Construction guidelines* below.
+- **Reference geometry** — finite construction geometry (lines, polylines and polygons,
+  circles, arcs, text labels; Draw mode only, never simulated). Placement, dragging and drawing
+  snap onto it in preference to the grid, and its points and edges take sketch constraints and
+  measurements like any body corner or edge — see *Reference geometry* below.
 - **Pattern** — a **live array** of one hole or one joint on a body: a linear row, a two-direction
   **grid**, or a circular arrangement around a centre. The instances are real holes / joints, but
   they are **derived from the seed** — move or reshape the seed and every instance follows; edit
@@ -97,7 +97,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Polyline** | `B` body · `U` cut | Click each corner, then close (first vertex / double-click / Enter). Clicks that land on joints, corners or edges are kept there by a coincident constraint; near-H/V edges are straightened. `B` arms it in the Body role, `U` in the Cut role. In the Reference role a closed polyline is a reference polygon, two points a segment. **Body role, on a joint:** build a body *from joints* — click joints to outline, click a placed joint to finish, then move the cursor out to set the thickness and click. Joints on other bodies (and *grounded* free joints) get a coincident pinned joint so they stay put — including a **rider that belongs to another body**, which pins the two bodies together at that point so they ride the slider as one. A **slider rail node**, or a click on a bare **slider rail**, instead makes the new body its own **rider** of that slider. **Clicking on another body mid-draft** mints a fresh joint on that body and adds it to the outline (the two bodies get pinned together at that point); **clicking empty space mid-draft** mints a free joint and adds it to the outline (absorbed into the new body). |
 | **Rectangle** | `Shift+B` | Click one corner, then the opposite corner — or **press and drag**. **Shift** for a square, **Alt** to draw from the centre. Edges get H/V constraints. |
 | **Circle** | `Shift+C` | Click the centre, then a point on the rim — or press and drag the radius out. As a body: a **disk** (a one-point rounded outline — move it by its centre node, resize by its rim handle). As a cut: a **round hole** (parametric, dimensionable by diameter, patternable). As a reference: a circle whose centre snaps and measures. |
-| **Regular polygon** | `Shift+P` | Click the centre, then one corner — or press and drag. Sides from the toolbar field that appears while the tool is armed, or `↑` / `↓`. |
+| **Regular polygon** | `Shift+P` | Click the centre, then one corner — or press and drag; the side count shows beside the cursor (`↑` / `↓` change it). The result **stays a regular polygon**: drag a corner to grow or spin it about its centre; double-click the **"n sides" tag** above the selected polygon (or press `↑` / `↓`) to change the count; its **centre** (a small crosshair) is a snap and constraint point. In the sketch it is a rigid shape — dimension its **size** (an edge, across corners, centre → corner, centre → edge, or across flats) and every other dimension or constraint moves or turns it whole; a corner drag then only does what the constraints leave free. As a cut: a regular hole (a nut trap) with the same behaviour. |
 | **Slot** | `Shift+S` | Click where the slot starts and where it ends — or press and drag — then move out to set its **width** and click. A two-point rounded outline (a capsule): a link with rounded ends as a body, a slotted hole as a cut, the axis segment as a reference. |
 | **Line** | `Shift+L` | A **reference segment**: two points, or press and drag. Endpoints that land on joints / corners / reference points are held there by a coincident; the segment takes H / V / parallel / perpendicular / **equal** constraints like a body edge. Reference only. |
 | **Arc** | `Shift+A` | A **reference arc**: click its start and end, then a point it passes through. Its three points are handles and references; placements snap onto the arc. Reference only. |
@@ -111,14 +111,13 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Ground** | `G` | Click a joint to lock its position (it can still rotate). Ground a free joint to make an anchor. Click a **body** (away from its joints) to ground the whole body — fixed position *and* rotation in Simulate; a grouped body grounds its **whole group**. Click an **already-grounded** joint or body to remove the ground (a free joint anchoring a world-fixed rail keeps its ground — the track must stay anchored). |
 | **Rail** | `K` | Click two joints on the **same body** (a moving rail), or **two free joints** (a world-fixed track — they get grounded automatically), to create a bare rail for **pin-in-slot** riders (joints that slide *and* rotate). Attach riders with Connect / the Joint tool. Rails are drawn as **double-headed arrows** spanning the travel. |
 | **Slider** | `S` | **Two clicks.** Click a **body** where the slider starts — that body is the part that will move — then click where the travel **ends**. The body gets a joint at the start that rides a new arrow from start to end **without rotating** (it keeps its drawn angle relative to the track). If the second click lands on **another body** that covers both points, the arrow rides *that* body (a moving track — e.g. a block in a slot); otherwise the arrow is fixed in the world. Clicking one of the body's **existing joints** starts the slider there (that joint becomes the rider). A world-fixed arrow ridden only by this body is **its own**: dragging, rotating, mirroring or copy/pasting the body carries the arrow along (an arrow shared by two bodies, or riding another body, stays put). Both endpoints are ordinary joints: drag them, snap them, snap other things to them — dragging the **start** endpoint in Draw mode re-places the body's riding joint under it wherever the start lies inside the body (take it outside and the joint stays behind; bring it back and it snaps home). On an **existing** arrow: click it to add another slider there, or click a **rider** to toggle its rotation lock on/off. |
-| **Guideline** | `L` | Click **two points** to place an **infinite construction line**. Each click lands exactly on a joint / body corner / another guide's point (with an automatic **coincident** constraint), projects onto a rail or body edge, or snaps to the grid. See *Construction guidelines* below (finite reference geometry comes from the Line / Arc tools and the shape tools in the Reference role). |
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `A` | Click a **slider arrow** (or rail) to make it self-driving: the slider's own carriage — the body — travels back and forth along the arrow when animation runs in Simulate mode. A bare rail with no rider gets a free self-driving rider instead. Off-animation the rider is just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
-| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a guideline). Click the **rim of a round hole** (or disk body) as the first pick for a **diameter** dimension — it needs no second reference, the next click places the label. Likewise, click a **rounded corner's arc** as the first pick for a **radius** dimension. Works in **both modes** — see *Measurements* below. |
-| **Coincident** | `O` | Click **two points** (joints, body corners, or guide points) to make them share a position — or a **point and a line** (body edge, rail or guideline, either order) to hold the point on the **infinite** line. |
-| **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, rail or guideline** (one click), or **two points**, to make it horizontal / vertical. |
-| **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails, guidelines or reference segments) to constrain their directions — or, for Equal, their lengths (Equal doesn't take infinite guidelines: they have no length; reference segments do). |
+| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a reference edge). Click the **rim of a round hole** (or disk body) as the first pick for a **diameter** dimension — it needs no second reference, the next click places the label. Likewise, click a **rounded corner's arc** as the first pick for a **radius** dimension. Works in **both modes** — see *Measurements* below. |
+| **Coincident** | `O` | Click **two points** (joints, body corners, reference points or a regular polygon's centre) to make them share a position — or a **point and a line** (body edge, rail or reference edge, either order) to hold the point on that line. |
+| **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, rail or reference edge** (one click), or **two points**, to make it horizontal / vertical. |
+| **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails or reference edges) to constrain their directions — or, for Equal, their lengths. |
 
 **Select mode** (no tool active, the default): click a body, joint, or rail to select it.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
@@ -315,45 +314,34 @@ works in both modes. Measurements are saved with the mechanism.
   vertical snaps straight and gets the H/V constraint; a vertex clicked **on an existing
   joint or corner** lands exactly there and gets a coincident constraint.
 
-**Construction guidelines & reference geometry** (Draw mode). The Guideline tool (`L`) places **infinite lines**
-through two points — CAD-style scaffolding for laying out a mechanism. The Line and Arc tools,
-and any shape tool in the **Reference** role, add finite reference geometry (segments,
-polylines and polygons, circles, arcs, text labels) that behaves the same way: dash-dot,
-crosshair handles on the defining points (drag one to reshape, drag elsewhere to move it whole;
-a selected circle shows a rim handle to resize it), snappable, measurable, constrainable
-(a polyline's edges take line constraints, equal length included), hidden in Simulate, never
-exported, Delete to remove. For infinite guidelines in particular:
+**Reference geometry** (Draw mode). The Line and Arc tools, and any shape tool in the
+**Reference** role, add finite construction geometry — segments, polylines and polygons,
+circles, arcs, text labels — CAD-style scaffolding for laying out a mechanism. It draws
+dash-dot with crosshair handles on the defining points (drag one to reshape, drag elsewhere
+to move it whole; a selected circle shows a rim handle to resize it), is hidden in Simulate,
+never exported, Delete to remove. (The old infinite guideline is gone: a reference line is a
+finite segment that does everything it did, and takes equal-length and length dimensions too.)
 
 - **Placement snaps to existing elements**: a click lands exactly on a joint, body corner or
-  another guide's defining point (and records an automatic **coincident** constraint so the
-  guide stays attached when that point later moves), projects onto a rail or body
+  another reference point (and records an automatic **coincident** constraint so the
+  geometry stays attached when that point later moves), projects onto a rail or body
   edge, or falls back to the grid.
-- **Snapping prefers guidelines over the grid**: with Snap on, anything you place or drag
-  lands *on* a nearby guideline (projected onto it) — and where two guidelines cross, on
-  their **intersection**. Great for laying out joints along a line or at a crossing.
-- **Editing**: click to select (its two defining points show as small **crosshairs**, so they
-  never look like joints); drag the **line** to
-  move it whole (angle preserved), drag a **defining point** to re-aim it, **Delete** to
-  remove it (its constraints and measurements go with it).
-- **Constraints on guidelines** (H / V / parallel / perpendicular / coincident — a guide
-  point onto another point, or a point held **on** the guide's infinite line — and
-  measurements, including driving dimensions): a guide with a **single** demand on it yields
-  — it is satisfied by moving **only its free points, never joints or body nodes**. A guide
-  that is **attached to geometry** (coincident with a corner or joint) or carries **several**
-  demands (two driving dimensions, an attachment plus a dimension…) acts as a **reference**
-  instead: the geometry moves to satisfy the dimension while the guide stays. So you can
-  dimension any number of bodies to one guide, and dragging one of them pulls the guide and
-  the others along. Likewise you can hold **any number of points on one guideline** (a quick
-  way to align corners / joints): the first coincident brings the guide to the point, every
-  further point moves straight onto the line, and dragging one aligned point across the line
-  — or dragging the guide — carries all of them. Genuinely over-constrained edits are still rejected with a red flash
-  (e.g. Horizontal on a guide whose both points are bound to joints at different heights).
-  Constraints hold **during** drags too: dragging the free point of a joint-bound vertical
-  guide slides it vertically — it can't be pulled off-axis even momentarily.
-- **Picking a guideline** (Measure / constraint tools, object snap) highlights the **whole
-  infinite line** and rings its two defining points.
-- Guidelines are drawing aids only: they're invisible (and unpickable) in Simulate mode,
-  never affect the simulation, and don't travel with copy/paste.
+- **Snapping prefers reference geometry over the grid**: with Snap on, anything you place or
+  drag lands *on* a nearby reference edge (projected onto it, within its span) or rim — and
+  where two reference edges cross, on their **intersection**.
+- **Constraints and measurements** work on reference points and edges like on body corners
+  and edges (H / V / parallel / perpendicular / equal / coincident — a point onto another
+  point, or a point held **on** a reference edge's line — and dimensions, driving ones
+  included). Reference geometry is *construction*: a demand on it is satisfied by moving
+  **only its free points, never joints or body nodes**. Geometry that is **attached** to a
+  reference element (a corner or joint coincident with one of its points) or carries
+  **several** demands makes that element a **reference** instead: the geometry moves to it,
+  so you can dimension any number of bodies to one reference line, or hold **any number of
+  points on one line** (a quick way to align corners / joints) and drag them together.
+  Over-constrained edits are still rejected with a red flash, and constraints hold **during**
+  drags.
+- Reference geometry is a drawing aid only: invisible (and unpickable) in Simulate mode, never
+  affecting the simulation, and it doesn't travel with copy/paste.
 
 **Components** (Draw mode). Design once, place many:
 
@@ -527,11 +515,12 @@ it nearest the grab becomes the **reference** — a **corner**, then an **edge m
 **edge**, or the object's **centre** if nothing is close (holes count too). It's highlighted in
 orange (and previewed while you hover, so you can see what you're about to grab). While dragging,
 that reference snaps onto the same features of everything else — other bodies' corners, midpoints,
-centres and edges, joints, rails and guidelines — with the target highlighted dashed. A corner or
-midpoint can also land on another edge or guideline; an edge snaps onto **parallel** edges and
-guidelines only, sliding sideways until the two are flush (it can't rotate the body), and the
+centres and edges, joints, rails and reference geometry (a regular polygon's centre included) —
+with the target highlighted dashed. A corner or
+midpoint can also land on another edge or reference edge; an edge snaps onto **parallel** edges
+only, sliding sideways until the two are flush (it can't rotate the body), and the
 target line is shown extended so you can line up bodies that don't overlap. With nothing in
-range the drag falls back to the grid/guideline snap (or moves freely when Snap is off).
+range the drag falls back to the grid / reference snap (or moves freely when Snap is off).
 Object snap also applies to **reshaping**: a dragged corner node or hole centre is its own
 reference and snaps onto the other features (its own body's other corners included, but not
 the features that move with it), and to **placement**: a new joint, or the centre of a round
@@ -540,11 +529,11 @@ hole being dragged out, lands on the nearest corner / midpoint / centre / joint 
 **Implicit constraints while dragging** let you place the common sketch constraints without
 picking a tool. While dragging a body, joint, corner node or hole centre (with or without
 object snap), **hold** the dragged point or edge over another element — a corner, hole centre,
-joint, guide point, edge, rail or guideline — for about half a second: it becomes the
+joint, reference point, edge, rail or reference edge — for about half a second: it becomes the
 **alignment candidate** and lights up violet (hovering something else later replaces it;
 **Esc** drops it and the drag goes on). Now move on to where you want the object. When the
 dragged point lines up **horizontally or vertically** with a candidate point, or lands on the
-**line** of a candidate edge / rail / guideline (or a candidate point lands on the dragged
+**line** of a candidate edge / rail / reference edge (or a candidate point lands on the dragged
 edge's line), a dotted violet line with the constraint's badge (H, V or ◎) shows the
 alignment. **Release while it shows** and the geometry is nudged exactly into alignment and the
 constraint is created — the same H / V / coincident you'd get from the tools, badge and all.
@@ -564,7 +553,7 @@ items flash red).
 - **Help** (the `?` button next to the theme toggle, or the `?` key) opens the manual in a
   drawer beside the canvas. While it is open the pointer becomes a question mark and every
   click is a question: click a **toolbar button** to read about that tool, or click **anything
-  on the canvas** — a body, a hole, a joint, a pin, a ground, a rail, a slider, a guideline, a
+  on the canvas** — a body, a hole, a joint, a pin, a ground, a rail, a slider, a reference element, a
   dimension label, a constraint badge (each constraint kind has its own page), a pattern, a
   component instance — to read what that element is and does. Nothing is activated while the
   drawer is open; close it (the button, `?`, Esc or the ✕) to get back to work.
@@ -601,7 +590,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, construction guidelines, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed), the context ghost (the enclosing assembly mapped into a definition's frame)
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, reference geometry, regular polygons, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed), the context ghost (the enclosing assembly mapped into a definition's frame)
 npm run manual   # regenerate the manual's illustrations (public/help/img) and toolbar glyph tables, and check that every help topic exists
 ```
 
@@ -687,11 +676,12 @@ coordinates) and re-resolve them to world geometry every frame, which is why the
 the running simulation for free.
 **Sketch constraints** get their own solver (`sketch.ts`): the same Gauss-Seidel projection
 idea, but over *shape* — the world positions of body corner nodes (outer and hole outlines
-alike), joints and guideline
-defining points — rather than rigid poses. After a converged solve, bodies rebuild from
+alike), joints, reference-geometry points and regular-polygon centres — rather than rigid poses.
+A regular polygon is a rigid shape in this solver (one projection keeps its corners and
+centre a regular polygon of fixed size; size dimensions set the size directly). After a converged solve, bodies rebuild from
 their new control polygons; an unsatisfiable solve never touches the scene (edits are
 rejected, not approximated). Every solver variable carries a **mobility rank** —
-construction (guide points) < geometry (nodes, joints) < actively-dragged <
+construction (reference points) < geometry (nodes, joints) < actively-dragged <
 **component-instance geometry** (immovable: its shape belongs to the definition) — and each
 correction flows entirely to the more mobile side (equals split evenly). That one rule
 gives the CAD feel: guide constraints move guides rather than geometry, dragged geometry

@@ -69,3 +69,44 @@ pick the next phase up without re-doing the brainstorm.
 - Manual: the new tool topics are text-only; gesture illustrations (before / mid / after)
   for the shape tools would fit the existing `scripts/manual/shots.ts` pipeline (the
   role-styled preview is exposed through `RenderInput.shapeDraft`).
+
+## In-app manual — pending updates (UI-tweak batch, started 2026-09-13)
+
+The in-app help (manual generator in `scripts/manual/`, what's-this drawer, shortcut list) is
+**deliberately not updated** during the current run of UI-tweak commits. Every UI change that
+touches something the manual describes gets a line here instead; a later session will apply
+them all in one go. Add to this list as you go — one bullet per change, say which manual topic
+/ illustration / shortcut entry is affected and what the new behaviour is.
+
+- **Infinite construction guidelines removed (2026-09-13).** The Guideline tool (toolbar
+  button, key `L`, `guide` tool id) is gone; the finite **reference line** (Shift+L, `line`
+  tool) replaces it. Manual: drop the "Guideline" tool topic / its what's-this entry and the
+  `L` row of the shortcut list; rewrite every mention of "guideline" / "infinite construction
+  line" (snap text, coincident / H / V / parallel / perpendicular / measure topics, the
+  overview illustration caption "Bottom row: a guideline, …") to say reference line / reference
+  geometry. Behaviour changes to document: snapping and hit-testing on a reference line are
+  limited to its span (no more catching the cursor anywhere along an infinite line); `equal`
+  and driving length dimensions now work on a reference line; dragging a reference-polyline
+  point onto its neighbour is refused (the edge keeps a direction). The what's-this strings
+  in `src/main.ts` (`measure`, `coincident`, `horizontal`, `vertical`, `parallel`,
+  `perpendicular`) still say "guideline" — reword them in the same pass.
+- Plain **`L` is unbound** for now (whole shortcut map to be redone later).
+- **Regular polygons are now parametric (2026-09-13, format v21).** Manual: rewrite the
+  Polygon tool topic — the side count is no longer a toolbar field: it shows beside the
+  cursor badge while the tool is armed (↑ / ↓ change it) and, once the polygon exists, as
+  an "n sides" tag above the selected polygon (double-click the tag to type a count, ↑ / ↓
+  step it; `#poly-sides` and its label are gone from the toolbar). New behaviour to
+  document: a polygon (or a polygon hole cut with the Cut role) stays regular — dragging a
+  corner grows / spins it about its centre, nodes can't be added or removed by double-click
+  (a toast says to change the count instead), the centre is drawn as a small crosshair and
+  is a point reference for coincident / measure / object snap, and in the sketch the polygon
+  is a rigid shape: its size is set by a *size dimension* (a chord between any two corners — the edge
+  length included — centre → corner, centre → edge, or across flats between opposite
+  edges); while such a dimension drives it, a corner drag only turns it; a line constraint on the
+  polygon (H / V / parallel / perpendicular, or two of its points tied elsewhere) pins its
+  rotation, so a corner drag then only resizes along that corner's radial line; with both
+  pinned the polygon is a rigid object and a corner drag moves it whole. Other dimensions
+  and constraints move or turn it whole (H / V / parallel on an edge turn it in one step,
+  a 90° turn included). Split / combine turn it into a free polygon. The
+  Polygon what's-this string in `src/main.ts` still says "Sides: the toolbar field" — reword
+  in the same pass. A "convert to free polygon" action is planned later (not built).

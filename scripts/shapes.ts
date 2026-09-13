@@ -150,7 +150,7 @@ const near = (a: number, b: number, tol = 1e-6) => Math.abs(a - b) <= tol;
   // Resolving refs.
   const edgeRef: MeasureRef = { kind: "guideLine", guideId: poly.id, edge: 1 };
   const r = s.resolveMeasureRef(edgeRef);
-  check("polyline edge resolves as a finite line", r?.kind === "line" && !r.infinite && near(r.a.x, 100) && near(r.b.y, 250));
+  check("polyline edge resolves as a finite line", r?.kind === "line" && near(r.a.x, 100) && near(r.b.y, 250));
   check("rim handle is not a reference", s.resolveMeasureRef({ kind: "guidePoint", guideId: circle.id, which: "r" }) === null);
   check("centre is a reference", s.resolveMeasureRef({ kind: "guidePoint", guideId: circle.id, which: "c" })?.kind === "point");
   // Moves.
@@ -158,15 +158,13 @@ const near = (a: number, b: number, tol = 1e-6) => Math.abs(a - b) <= tol;
   check("dragging the rim handle resizes the circle", circle.kind === "circle" && near(circle.r, 40));
   s.moveGuide(poly.id, vec(1, 1));
   check("moveGuide translates every polygon point", poly.kind === "poly" && near(poly.pts[0].x, 1) && near(poly.pts[3].y, 251));
-  // Constraints: a tie pulls the (construction) guide onto geometry; equal works on a finite edge, not on an infinite line.
+  // Constraints: a tie pulls the (construction) guide onto geometry; equal works on a finite edge.
   const j = s.addFreeJoint(vec(150, 150));
   const tie = tryAddConstraint(s, "coincident", { kind: "guidePoint", guideId: poly.id, which: "0" }, { kind: "joint", jointId: j.id });
   check("polygon vertex ties to a joint (guide moves)", tie.constraint !== null && poly.kind === "poly" && near(poly.pts[0].x, 150) && near(poly.pts[0].y, 150));
   check("joint did not move for the tie", near(s.jointWorld(j).x, 150) && near(s.jointWorld(j).y, 150));
   const eq = s.addSketchConstraint("equal", { kind: "guideLine", guideId: seg.id, edge: 0 }, { kind: "edge", bodyId: body.id, index: 0 });
   check("equal accepted on a reference segment", eq !== null);
-  const line = s.addGuide(vec(0, -50), vec(100, -50))!;
-  check("equal still rejected on an infinite guideline", s.addSketchConstraint("equal", { kind: "guideLine", guideId: line.id }, { kind: "edge", bodyId: body.id, index: 0 }) === null);
   const breaks = solveSketch(s);
   check("sketch with mixed guides solves", breaks.length === 0, `${breaks.length} breaks`);
   // Deleting the body drops its label, nothing else.
@@ -179,23 +177,22 @@ const near = (a: number, b: number, tol = 1e-6) => Math.abs(a - b) <= tol;
 {
   const s = new Scene();
   const b = s.addBody(sq(0, 0, 50, 50));
-  s.addGuide(vec(0, 0), vec(10, 0));
   s.addGuidePoly([vec(0, 0), vec(10, 0), vec(10, 10)], true);
   s.addGuidePoly([vec(0, 100), vec(10, 100)], false);
   s.addGuideCircle(vec(50, 50), 7);
   s.addGuideArc(vec(0, 0), vec(5, 5), vec(10, 0));
   s.addGuideText(vec(5, 5), "hi", 4, b.id);
   const data = JSON.parse(JSON.stringify(s.serialize()));
-  check("format v20", data.version === 20);
+  check("format v21", data.version === 21);
   const t = new Scene();
   t.load(data);
-  check("all six guide kinds round-trip", t.guides.length === 6 && t.guides.map((g) => g.kind).join(",") === "line,poly,poly,circle,arc,text");
+  check("all guide kinds round-trip", t.guides.length === 5 && t.guides.map((g) => g.kind).join(",") === "poly,poly,circle,arc,text");
   const txt = t.guides.find((g) => g.kind === "text");
   check("text keeps its body anchor", !!txt && txt.kind === "text" && txt.bodyId === b.id && txt.size === 4);
-  // Legacy (≤ v19) guides carry no kind: they load as infinite lines.
+  // A kind-less record (the retired infinite guideline of v11–v20 files) is dropped.
   const legacy = new Scene();
   legacy.load({ version: 19, bodies: [], joints: [], constraints: [], guides: [{ id: 1, a: { x: 0, y: 0 }, b: { x: 5, y: 5 } } as never] });
-  check("legacy guide loads as an infinite line", legacy.guides.length === 1 && legacy.guides[0].kind === "line");
+  check("retired infinite guideline record is dropped", legacy.guides.length === 0);
   // Corrupt records are dropped, a label whose body is gone too.
   const junk = new Scene();
   junk.load({ version: 20, bodies: [], joints: [], constraints: [], guides: [

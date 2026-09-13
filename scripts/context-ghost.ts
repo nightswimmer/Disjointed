@@ -93,7 +93,7 @@ const fmt = (p: Vec2) => `(${p.x.toFixed(3)}, ${p.y.toFixed(3)})`;
   // A sibling instance of the same def, elsewhere.
   const sib = root.instantiateComponent(made.def.id, { pos: vec(-200, -50), angle: 0 })!;
   // Drawing aids in the root that must not reach the ghost.
-  root.addGuide(vec(0, 0), vec(1, 1));
+  root.addGuidePoly([vec(0, 0), vec(1, 1)], false);
   root.addMeasurement("draw", { kind: "joint", jointId: freeJ.id }, { kind: "vertex", bodyId: frame.id, index: 0 }, vec(0, 0));
 
   const rootData: SceneData = JSON.parse(JSON.stringify(root.serializeContext()));

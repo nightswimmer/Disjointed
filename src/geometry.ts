@@ -410,3 +410,140 @@ export function regularPolygon(c: Vec2, first: Vec2, n: number): Vec2[] {
   }
   return out;
 }
+
+/**
+ * Least-squares fit of a regular `n`-gon to `pts` (n = pts.length ≥ 3), keeping the
+ * polygon's winding. The model p_i = c + A·u_i — `u_i` the unit vertex directions of a
+ * canonical n-gon, `A = r·R(φ)` a similarity — is **linear** in (c, a = r cos φ,
+ * b = r sin φ), so the weighted fit is one 4×4 normal-equation solve. `weights` (one
+ * per point, default 1) make a point count more (a very large weight pins it); `centre`
+ * adds the polygon centre itself as a fitted point with its own weight. Returns the
+ * fitted centre, circumradius, phase (angle of vertex 0) and vertices, or null when the
+ * fit collapses to a point.
+ */
+export function fitRegularPolygon(
+  pts: Vec2[],
+  weights?: number[],
+  centre?: { p: Vec2; w: number }
+): { c: Vec2; r: number; phase: number; pts: Vec2[] } | null {
+  const n = pts.length;
+  if (n < 3) return null;
+  const s = polygonArea(pts) >= 0 ? 1 : -1; // keep the polygon's winding
+  const step = (s * 2 * Math.PI) / n;
+  // Normal equations M x = t for x = [cx, cy, a, b].
+  const M = [
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+  ];
+  const t = [0, 0, 0, 0];
+  const addRow = (row: number[], value: number, w: number): void => {
+    for (let i = 0; i < 4; i++) {
+      if (row[i] === 0) continue;
+      t[i] += w * row[i] * value;
+      for (let j = 0; j < 4; j++) if (row[j] !== 0) M[i][j] += w * row[i] * row[j];
+    }
+  };
+  for (let i = 0; i < n; i++) {
+    const w = weights?.[i] ?? 1;
+    const ux = Math.cos(i * step);
+    const uy = Math.sin(i * step);
+    addRow([1, 0, ux, -uy], pts[i].x, w);
+    addRow([0, 1, uy, ux], pts[i].y, w);
+  }
+  if (centre && centre.w > 0) {
+    addRow([1, 0, 0, 0], centre.p.x, centre.w);
+    addRow([0, 1, 0, 0], centre.p.y, centre.w);
+  }
+  // Gaussian elimination with partial pivoting.
+  const x = [0, 0, 0, 0];
+  const A = M.map((row, i) => [...row, t[i]]);
+  for (let col = 0; col < 4; col++) {
+    let piv = col;
+    for (let r = col + 1; r < 4; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+    if (Math.abs(A[piv][col]) < 1e-18) return null;
+    [A[col], A[piv]] = [A[piv], A[col]];
+    for (let r = 0; r < 4; r++) {
+      if (r === col) continue;
+      const f = A[r][col] / A[col][col];
+      if (f === 0) continue;
+      for (let k = col; k <= 4; k++) A[r][k] -= f * A[col][k];
+    }
+  }
+  for (let i = 0; i < 4; i++) x[i] = A[i][4] / A[i][i];
+  const [cx, cy, a, b] = x;
+  const r = Math.hypot(a, b);
+  if (!(r > 1e-12)) return null;
+  const c = vec(cx, cy);
+  const out: Vec2[] = [];
+  for (let i = 0; i < n; i++) {
+    const ux = Math.cos(i * step);
+    const uy = Math.sin(i * step);
+    out.push(vec(cx + a * ux - b * uy, cy + b * ux + a * uy));
+  }
+  return { c, r, phase: Math.atan2(b, a), pts: out };
+}
+
+/** The `n` vertices of a regular polygon from its centre, circumradius and vertex-0 angle;
+ *  `winding` +1 for increasing angles, −1 for decreasing. */
+export function regularPolygonFrom(c: Vec2, r: number, phase: number, n: number, winding: 1 | -1 = 1): Vec2[] {
+  const out: Vec2[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = phase + (winding * i * 2 * Math.PI) / n;
+    out.push(vec(c.x + r * Math.cos(t), c.y + r * Math.sin(t)));
+  }
+  return out;
+}
+
+/**
+ * Rigid (translation + rotation) weighted fit of a regular `n`-gon of **fixed**
+ * circumradius `r` to `pts` — weighted Procrustes with the polygon's winding kept.
+ * Same weighting as `fitRegularPolygon`; the size never changes, so an off-shape
+ * perturbation (two corners pinched together by a constraint) turns the polygon
+ * instead of shrinking it. Returns the fitted centre, phase and vertices.
+ */
+export function fitRegularPolygonRigid(
+  pts: Vec2[],
+  r: number,
+  weights?: number[],
+  centre?: { p: Vec2; w: number }
+): { c: Vec2; phase: number; pts: Vec2[] } | null {
+  const n = pts.length;
+  if (n < 3 || !(r > 0)) return null;
+  const s = polygonArea(pts) >= 0 ? 1 : -1;
+  const step = (s * 2 * Math.PI) / n;
+  const u = pts.map((_, i) => vec(Math.cos(i * step), Math.sin(i * step)));
+  let W = 0, vx = 0, vy = 0, ux = 0, uy = 0;
+  for (let i = 0; i < n; i++) {
+    const w = weights?.[i] ?? 1;
+    W += w;
+    vx += w * pts[i].x;
+    vy += w * pts[i].y;
+    ux += w * u[i].x;
+    uy += w * u[i].y;
+  }
+  if (centre && centre.w > 0) {
+    W += centre.w;
+    vx += centre.w * centre.p.x;
+    vy += centre.w * centre.p.y;
+  }
+  if (!(W > 0)) return null;
+  const vm = vec(vx / W, vy / W);
+  const um = vec(ux / W, uy / W);
+  let sc = 0, sd = 0;
+  const accumulate = (uu: Vec2, vv: Vec2, w: number): void => {
+    const ax = uu.x - um.x, ay = uu.y - um.y;
+    const bx = vv.x - vm.x, by = vv.y - vm.y;
+    sc += w * (ax * by - ay * bx);
+    sd += w * (ax * bx + ay * by);
+  };
+  for (let i = 0; i < n; i++) accumulate(u[i], pts[i], weights?.[i] ?? 1);
+  if (centre && centre.w > 0) accumulate(vec(0, 0), centre.p, centre.w);
+  const phase = Math.hypot(sc, sd) > 1e-18 ? Math.atan2(sc, sd) : 0;
+  const cos = Math.cos(phase), sin = Math.sin(phase);
+  const R = (q: Vec2): Vec2 => vec(r * (cos * q.x - sin * q.y), r * (sin * q.x + cos * q.y));
+  const ru = R(um);
+  const c = vec(vm.x - ru.x, vm.y - ru.y);
+  return { c, phase, pts: u.map((q) => add(c, R(q))) };
+}

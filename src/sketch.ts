@@ -18,7 +18,7 @@ import {
   MeasureRef,
   VERTEX_LINK_EPS,
 } from "./model";
-import { Vec2, vec, add, sub, scale, dist, len, dot, perp, rotate } from "./geometry";
+import { Vec2, vec, add, sub, scale, dist, len, dot, perp, rotate, fitRegularPolygon, fitRegularPolygonRigid } from "./geometry";
 
 /** An unsatisfied sketch item after a failed solve: a constraint or a driving dimension. */
 export interface SketchBreak {
@@ -40,7 +40,7 @@ export const sketchConfig = {
 
 /**
  * A solver variable is one movable world point: a body control vertex (`v:body:index`),
- * a joint (`j:id`), or a guideline defining point (`g:id:a` / `g:id:b`). A joint
+ * a joint (`j:id`), or a reference-geometry point (`g:id:0`, `g:id:c`, …). A joint
  * coincident with one of its body's control vertices is *linked* to it (see
  * VERTEX_LINK_EPS in model.ts), so its refs map onto the vertex variable — the
  * constraint then drives the shape, exactly like dragging the joint does.
@@ -50,7 +50,7 @@ interface System {
   pos: Vec2[];
   index: Map<string, number>;
   /**
-   * Per-variable mobility rank: 0 = construction (guideline defining points),
+   * Per-variable mobility rank: 0 = construction (reference-geometry points),
    * 1 = geometry (body control vertices, joints), 2 = pinned by the active drag,
    * 3 = component-instance geometry (immovable — the shape belongs to the definition,
    * so it outranks even the drag: dragging against it yields instead). Pattern members
@@ -163,7 +163,7 @@ function varRank(scene: Scene, key: string, anchored: boolean): number {
   if (!key.startsWith("g:")) {
     // v:bodyId:… or j:jointId — instance-owned geometry never moves in a sketch solve.
     const id = Number(key.split(":")[1]);
-    const owned = key.startsWith("v:")
+    const owned = key.startsWith("v:") || key.startsWith("c:")
       ? scene.instanceOfBody(id) !== undefined
       : scene.instanceOfJoint(id) !== undefined;
     if (owned) return 3;
@@ -184,6 +184,11 @@ interface SolveItem {
 
 function vertexKey(bodyId: number, index: number, hole: number | null = null): string {
   return hole === null ? `v:${bodyId}:${index}` : `v:${bodyId}:${index}:${hole}`;
+}
+
+/** Variable key of a regular-polygon outline's centre (`c:body` / `c:body:hole`). */
+function centreKey(bodyId: number, hole: number | null = null): string {
+  return hole === null ? `c:${bodyId}` : `c:${bodyId}:${hole}`;
 }
 
 /** The control polygon a vertex/edge ref names: a hole's, or the body's outer one. */
@@ -226,6 +231,12 @@ function pointVarKey(scene: Scene, ref: MeasureRef): string | null {
     const g = scene.getGuide(ref.guideId);
     return g && scene.guidePointIsRef(g, ref.which) ? `g:${ref.guideId}:${ref.which}` : null;
   }
+  if (ref.kind === "centre") {
+    // A regular outline's centre: its own variable, tied to the corners by the outline's
+    // regular-polygon item (addRegularCouplings) — the solver may move it, and the
+    // whole polygon follows.
+    return scene.regularCentreWorld(ref.bodyId, ref.hole ?? null) ? centreKey(ref.bodyId, ref.hole ?? null) : null;
+  }
   return null; // bodyPoint refs are measurement-only; line refs aren't points
 }
 
@@ -248,12 +259,9 @@ function lineVarKeys(scene: Scene, ref: MeasureRef): [string, string] | null {
     return a && b ? [a, b] : null;
   }
   if (ref.kind === "guideLine") {
-    // An infinite guideline: its two defining points. A reference polyline's edge `i`:
-    // its two vertices (wrapping on a closed polyline).
+    // A reference polyline's edge `i`: its two vertices (wrapping on a closed polyline).
     const g = scene.getGuide(ref.guideId);
-    if (!g) return null;
-    if (g.kind === "line") return ref.edge === undefined ? [`g:${g.id}:a`, `g:${g.id}:b`] : null;
-    if (g.kind !== "poly" || ref.edge === undefined) return null;
+    if (!g || g.kind !== "poly") return null;
     const n = g.pts.length;
     const last = g.closed ? n : n - 1;
     if (ref.edge < 0 || ref.edge >= last) return null;
@@ -283,6 +291,12 @@ function memberSeedKey(scene: Scene, key: string): string | null {
     if (ph?.role !== "member" || ph.pattern.seed.kind !== "hole") return null;
     return vertexKey(bodyId, Number(parts[2]), ph.pattern.seed.hole);
   }
+  if (parts[0] === "c" && parts.length > 2) {
+    const bodyId = Number(parts[1]);
+    const ph = scene.patternOfHole(bodyId, Number(parts[2]));
+    if (ph?.role !== "member" || ph.pattern.seed.kind !== "hole") return null;
+    return centreKey(bodyId, ph.pattern.seed.hole);
+  }
   if (parts[0] === "j") {
     const pj = scene.patternOfJoint(Number(parts[1]));
     if (pj?.role !== "member" || pj.pattern.seed.kind !== "joint") return null;
@@ -305,6 +319,7 @@ function varWorld(scene: Scene, key: string): Vec2 | null {
       ? scene.bodyControlWorld(body)[index]
       : scene.bodyHoleControlWorld(body, hole)[index];
   }
+  if (parts[0] === "c") return scene.regularCentreWorld(Number(parts[1]), parts.length > 2 ? Number(parts[2]) : null);
   if (parts[0] === "g") {
     const g = scene.getGuide(Number(parts[1]));
     return g ? scene.guidePointWorld(g, parts[2]) : null;
@@ -753,6 +768,7 @@ function buildSystem(
     // Diameter / radius dimensions set a disk's or corner's radius directly (no vertex
     // moves) — see `enforceSizeDims`; they have no place in the vertex/joint system.
     .filter((m) => m.axis !== "diameter" && m.axis !== "radius")
+    .filter((m) => scene.regularSizeOfDim(m) === null) // a regular polygon's size is its own parameter
     .filter((m) => !override || m.id !== override.m.id)
     .map((m) => ({ m, target: m.target! }));
   if (override) dims.push(override);
@@ -762,7 +778,120 @@ function buildSystem(
     else items.push(item);
   }
   addPatternCouplings(scene, sys, items);
+  addRegularCouplings(scene, sys, items);
   return { sys, items, invalid };
+}
+
+/**
+ * Keep every regular-polygon outline the solver touches regular. Whenever one of an
+ * outline's corners (or its centre) is a variable, all of its corners and its centre
+ * join the system, coupled by one projection item: each sweep it fits the regular
+ * polygon to the current positions and moves the points onto it. Mobility follows the
+ * rank rule — points above the lowest rank present (a drag-anchored corner, an
+ * instance) are pinned (huge weight) and only the lowest-rank points are moved — so a
+ * dimension on one edge resizes the whole polygon, a tie on the centre translates it,
+ * and a dragged corner grows / spins it about the centre (the centre counts as much as
+ * all the corners together, so a demand on it translates the polygon rather than
+ * dragging one point). Instance-owned outlines are skipped (immovable anyway).
+ * Couplings carry id -1: internal items, never user-facing.
+ */
+function addRegularCouplings(scene: Scene, sys: System, items: SolveItem[]): void {
+  const outlines = new Map<string, { bodyId: number; hole: number | null }>();
+  for (const key of [...sys.keys]) {
+    const parts = key.split(":");
+    if (parts[0] !== "v" && parts[0] !== "c") continue;
+    const bodyId = Number(parts[1]);
+    const hole = parts[0] === "v" ? (parts.length > 3 ? Number(parts[3]) : null) : parts.length > 2 ? Number(parts[2]) : null;
+    const body = scene.getBody(bodyId);
+    if (!body || scene.outlineRegular(body, hole) === null || scene.instanceOfBody(bodyId)) continue;
+    outlines.set(`${bodyId}:${hole ?? "o"}`, { bodyId, hole });
+  }
+  for (const { bodyId, hole } of outlines.values()) {
+    const body = scene.getBody(bodyId)!;
+    const n = (hole === null ? body.controlLocal : body.holes![hole].controlLocal).length;
+    const vIdx: number[] = [];
+    for (let k = 0; k < n; k++) {
+      const i = acquire(scene, sys, vertexKey(bodyId, k, hole));
+      if (i === null) break;
+      vIdx.push(i);
+    }
+    const cIdx = acquire(scene, sys, centreKey(bodyId, hole));
+    if (vIdx.length !== n || cIdx === null) continue;
+    // The size is fixed for the solve (a rigid fit): a regular polygon is a rigid shape
+    // in the sketch, its size a parameter set by size dimensions (see regularSizeDim).
+    // A similarity fit would let a pinching correction shrink the polygon sweep after
+    // sweep instead of turning it.
+    const size = fitRegularPolygon(vIdx.map((i) => sys.pos[i]));
+    if (!size) continue;
+    const all = vIdx.concat(cIdx);
+    // Where every point sat after this item last applied: a point found elsewhere has been
+    // *pushed* by another item since — the fit follows pushed points (heavy weight) rather
+    // than averaging their correction away over the whole polygon, and two pushed
+    // adjacent corners are read as a demand on that edge's direction.
+    let last = all.map((i) => vec(sys.pos[i].x, sys.pos[i].y));
+    items.push({
+      id: -1,
+      kind: "constraint",
+      run(pos, apply) {
+        const low = Math.min(...all.map((i) => sys.rank[i]));
+        const pushed = all.map((i, k) => dist(pos[i], last[k]) > 1e-9);
+        const weight = (k: number, base: number): number =>
+          sys.rank[all[k]] > low ? 1e6 : pushed[k] ? 1e3 * base : base;
+        const fit = fitRegularPolygonRigid(
+          vIdx.map((i) => pos[i]),
+          size.r,
+          vIdx.map((_, k) => weight(k, 1)),
+          { p: pos[cIdx], w: weight(n, n) }
+        );
+        if (!fit) return 0;
+        let target = fit.pts;
+        // Two pushed adjacent corners (a line constraint / dimension acting on that edge):
+        // the pushed chord says which way the edge should point — turn the polygon to it
+        // in one step (a symmetric pinch has no turning moment, so the plain fit would
+        // stall; a chord pinched to a point wants the perpendicular direction).
+        const pv = vIdx.map((_, k) => k).filter((k) => pushed[k] && sys.rank[vIdx[k]] === low);
+        if (pv.length === 2 && (pv[1] - pv[0] === 1 || (pv[0] === 0 && pv[1] === n - 1))) {
+          const [ka, kb] = pv[0] === 0 && pv[1] === n - 1 ? [n - 1, 0] : [pv[0], pv[1]];
+          const chord = sub(pos[vIdx[kb]], pos[vIdx[ka]]);
+          const edge = sub(fit.pts[kb], fit.pts[ka]);
+          const want = len(chord) > 1e-9 * size.r ? Math.atan2(chord.y, chord.x) : Math.atan2(edge.y, edge.x) + Math.PI / 2;
+          let turn = want - Math.atan2(edge.y, edge.x);
+          while (turn > Math.PI) turn -= 2 * Math.PI;
+          while (turn < -Math.PI) turn += 2 * Math.PI;
+          if (Math.abs(turn) > 1e-12) target = fit.pts.map((p) => add(fit.c, rotate(sub(p, fit.c), turn)));
+        }
+        let err = dist(pos[cIdx], fit.c);
+        vIdx.forEach((i, k) => (err = Math.max(err, dist(pos[i], target[k]))));
+        if (apply) {
+          vIdx.forEach((i, k) => {
+            if (sys.rank[i] === low) pos[i] = target[k];
+          });
+          if (sys.rank[cIdx] === low) pos[cIdx] = fit.c;
+          last = all.map((i) => vec(pos[i].x, pos[i].y));
+        }
+        return err;
+      },
+    });
+  }
+}
+
+/**
+ * Move an outline's corners to `target` (world, same count): a regular outline through
+ * its fit (one bulk write, so a translation stays a translation), any other corner by
+ * corner.
+ */
+function setOutlineWorld(scene: Scene, bodyId: number, hole: number | null, target: Vec2[]): void {
+  const body = scene.getBody(bodyId);
+  if (!body) return;
+  if (scene.outlineRegular(body, hole) !== null) {
+    scene.setRegularOutlineWorld(bodyId, hole, target);
+    return;
+  }
+  const cur = hole === null ? scene.bodyControlWorld(body) : scene.bodyHoleControlWorld(body, hole);
+  cur.forEach((p, k) => {
+    const d = sub(target[k], p);
+    if (len(d) >= EPS) scene.moveBodyVertex(bodyId, k, d, hole);
+  });
 }
 
 /**
@@ -830,6 +959,7 @@ function residualBreaks(sys: System, items: SolveItem[]): SketchBreak[] {
  */
 function applySystem(scene: Scene, sys: System): void {
   applyRigidParts(scene, sys);
+  const regularDone = new Set<string>(); // regular outlines already written as a whole
   const order = sys.keys
     .map((key, i) => ({ key, i }))
     .sort((a, b) => Number(b.key.startsWith("v")) - Number(a.key.startsWith("v")));
@@ -840,6 +970,7 @@ function applySystem(scene: Scene, sys: System): void {
     if (len(delta) < EPS) continue;
     const parts = key.split(":");
     if (parts[0] === "pa") continue; // derived from the seed: never written back
+    if (parts[0] === "c") continue; // a regular outline's centre: written with its corners below
     // Pattern members are re-laid out from the seed when the seed is written back.
     if (memberSeedKey(scene, key) !== null) continue;
     if (parts[0] === "pb") {
@@ -851,12 +982,26 @@ function applySystem(scene: Scene, sys: System): void {
       continue;
     }
     if (parts[0] === "v") {
-      scene.moveBodyVertex(
-        Number(parts[1]),
-        Number(parts[2]),
-        delta,
-        parts.length > 3 ? Number(parts[3]) : null
-      );
+      const bodyId = Number(parts[1]);
+      const hole = parts.length > 3 ? Number(parts[3]) : null;
+      const body = scene.getBody(bodyId);
+      if (body && scene.outlineRegular(body, hole) !== null) {
+        // A regular outline is written as a whole: every corner is in the system (see
+        // addRegularCouplings) and the fit puts the solved corners back onto the invariant.
+        const rk = `${bodyId}:${hole ?? "o"}`;
+        if (regularDone.has(rk)) continue;
+        regularDone.add(rk);
+        const n = (hole === null ? body.controlLocal : body.holes![hole].controlLocal).length;
+        const solved: Vec2[] = [];
+        for (let k = 0; k < n; k++) {
+          const idx = sys.index.get(vertexKey(bodyId, k, hole));
+          const w = idx === undefined ? varWorld(scene, vertexKey(bodyId, k, hole)) : sys.pos[idx];
+          if (w) solved.push(w);
+        }
+        if (solved.length === n) scene.setRegularOutlineWorld(bodyId, hole, solved);
+        continue;
+      }
+      scene.moveBodyVertex(bodyId, Number(parts[2]), delta, hole);
     } else if (parts[0] === "g") {
       scene.moveGuidePoint(Number(parts[1]), parts[2], sys.pos[i]);
     } else scene.moveJoint(Number(parts[1]), delta);
@@ -924,9 +1069,10 @@ function applyRigidParts(scene: Scene, sys: System): void {
     sys.keys.forEach((key, i) => {
       const parts = key.split(":");
       const holeVar = parts[0] === "v" && parts.length > 3 && Number(parts[1]) === bodyId;
+      const centreVar = parts[0] === "c" && Number(parts[1]) === bodyId && (whole || parts.length > 2);
       const jointVar = whole && parts[0] === "j" && scene.getJoint(Number(parts[1]))?.bodyId === bodyId;
       const p0 = init[i];
-      if ((!holeVar && !jointVar) || !p0 || dist(sys.pos[i], p0) >= sketchConfig.tol) return;
+      if ((!holeVar && !centreVar && !jointVar) || !p0 || dist(sys.pos[i], p0) >= sketchConfig.tol) return;
       sys.pos[i] = carry(sys.pos[i]);
     });
     if (whole) {
@@ -939,10 +1085,7 @@ function applyRigidParts(scene: Scene, sys: System): void {
     // pass (deltas are re-read live), so moving them here is harmless.
     for (let hi = 0; hi < body.holes!.length; hi++) {
       const hw = scene.bodyHoleControlWorld(body, hi);
-      hw.forEach((p, k) => {
-        const d = sub(carry(p), p);
-        if (len(d) >= EPS) scene.moveBodyVertex(bodyId, k, d, hi);
-      });
+      setOutlineWorld(scene, bodyId, hi, hw.map(carry));
     }
   }
 }
@@ -1039,9 +1182,16 @@ export function enforceSizeDims(scene: Scene): void {
       const corner = scene.cornerOfRef(m.refA);
       if (!corner || Math.abs(corner.r - m.target) <= sketchConfig.tol) continue;
       scene.setCornerRadiusDriven(corner.bodyId, corner.index, m.target, corner.hole);
+    } else {
+      const size = scene.regularSizeOfDim(m);
+      if (!size) continue;
+      const cur = scene.regularSize(size.bodyId, size.hole, size.size);
+      if (cur === null || Math.abs(cur - m.target) <= sketchConfig.tol) continue;
+      scene.setRegularSize(size.bodyId, size.hole, size.size, m.target);
     }
   }
 }
+
 
 // --- drag anchoring ------------------------------------------------------------
 
@@ -1051,8 +1201,10 @@ export function anchorVarsForBody(scene: Scene, bodyId: number): string[] {
   const body = scene.getBody(bodyId);
   if (!body) return [];
   const keys = body.controlLocal.map((_, i) => vertexKey(bodyId, i));
+  if (body.regular) keys.push(centreKey(bodyId));
   body.holes?.forEach((h, hi) => {
     for (let i = 0; i < h.controlLocal.length; i++) keys.push(vertexKey(bodyId, i, hi));
+    if (h.regular) keys.push(centreKey(bodyId, hi));
   });
   for (const j of scene.joints) {
     if (j.bodyId !== bodyId) continue;
@@ -1124,7 +1276,7 @@ export function autoConstrainBody(
   tol = AUTO_HV_TOL
 ): SketchConstraint[] {
   const body = scene.getBody(bodyId);
-  if (!body) return [];
+  if (!body || body.regular) return []; // a regular polygon keeps its shape by itself
   const out: SketchConstraint[] = [];
   for (let i = 0; i < body.controlLocal.length; i++) {
     const verts = scene.bodyControlWorld(body); // re-read: earlier edges may have snapped
@@ -1203,6 +1355,20 @@ export function applyDrivingDimension(
     scene.setMeasurementDriving(m.id, target);
     return [];
   }
+  const size = scene.regularSizeOfDim(m);
+  if (size) {
+    // A regular polygon's size is its own parameter (like a disk's diameter): resize it
+    // about its centre, then re-solve whatever else the sketch says about it.
+    const snap = snapshot(scene);
+    scene.setRegularSize(size.bodyId, size.hole, size.size, target);
+    const breaks = solveAndApply(scene);
+    if (breaks.length) {
+      restore(scene, snap);
+      return breaks;
+    }
+    scene.setMeasurementDriving(m.id, target);
+    return [];
+  }
   const body = scaleEligibleBody(scene, m);
   if (body !== null && info.value > EPS) {
     const snap = snapshot(scene);
@@ -1230,6 +1396,7 @@ function refOwnerBody(scene: Scene, ref: MeasureRef): number | null {
     case "vertex":
     case "edge":
     case "bodyPoint":
+    case "centre":
       return scene.getBody(ref.bodyId) ? ref.bodyId : null;
     case "joint": {
       const j = scene.getJoint(ref.jointId);

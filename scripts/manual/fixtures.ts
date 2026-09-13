@@ -134,7 +134,7 @@ export function legend(): Fixture {
   scene.addPin(w1.id, w2.id, true);
   // Second row: a guideline through two points, a dimension between two free joints, and
   // a horizontal constraint badge on a block's top edge.
-  scene.addGuide(v(0, 45), v(120, 45));
+  scene.addGuidePoly([v(0, 45), v(120, 45)], false);
   const dA = scene.addFreeJoint(v(200, 80));
   const dB = scene.addFreeJoint(v(300, 80));
   scene.addMeasurement("draw", { kind: "joint", jointId: dA.id }, { kind: "joint", jointId: dB.id }, v(250, 60));

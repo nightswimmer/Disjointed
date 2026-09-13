@@ -18,8 +18,10 @@ import {
   lenSq,
   normalize,
   perp,
-  distToLine,
   distToSegment,
+  fitRegularPolygon,
+  fitRegularPolygonRigid,
+  regularPolygonFrom,
   filletPolygon,
   roundedConvexBody,
   polygonCentroid,
@@ -69,6 +71,11 @@ export interface BodyHole {
    * a perfect circular hole); default "fillet" rounds the polygon's corners in place.
    */
   round?: RoundMode;
+  /**
+   * Regular-polygon hole (v21): the side count, present iff the control polygon is kept
+   * a regular polygon (see `Body.regular`).
+   */
+  regular?: number;
 }
 
 /**
@@ -77,7 +84,7 @@ export interface BodyHole {
  */
 export type HoleSpec =
   | Vec2[]
-  | { control: Vec2[]; radius?: number; radii?: (number | null)[]; round?: RoundMode };
+  | { control: Vec2[]; radius?: number; radii?: (number | null)[]; round?: RoundMode; regular?: number };
 
 /** What a pattern replicates, as the UI picks it: one hole of a body, or one attached joint. */
 export type PatternSeed =
@@ -221,6 +228,14 @@ export type SplitResult = { ok: true; a: Body; b: Body } | { ok: false; reason: 
 
 /** Outcome of `Scene.combineBodies`: the surviving (first) body, or why it was refused. */
 export type CombineResult = { ok: true; body: Body } | { ok: false; reason: string };
+/**
+ * The size measures of a regular-polygon outline a driving dimension can set directly:
+ * a chord between corners `k` apart (k = 1 the edge length, k = n/2 across corners), the
+ * circumradius (centre → corner), the apothem (centre → edge) or across flats (opposite
+ * edges of an even polygon).
+ */
+export type RegularSize = { kind: "chord"; k: number } | { kind: "radius" } | { kind: "apothem" } | { kind: "flats" };
+
 /** Outcome of `Scene.cutBody`: `hole` is the new hole's index when the cut became a plain hole, else null. */
 export type CutResult = { ok: true; hole: number | null } | { ok: false; reason: string };
 
@@ -255,6 +270,7 @@ function cloneBodyHoles(holes: BodyHole[]): BodyHole[] {
     };
     if (h.radii) out.radii = [...h.radii];
     if (h.round) out.round = h.round;
+    if (h.regular) out.regular = h.regular;
     return out;
   });
 }
@@ -272,6 +288,17 @@ export interface Body {
    */
   radii?: (number | null)[];
   round: RoundMode;
+  /**
+   * Regular-polygon outline (v21): the side count, present iff `controlLocal` is kept a
+   * **regular polygon** — an invariant, not a set of constraints. The corners stay the
+   * stored geometry (everything that reads the control polygon is unaffected), but every
+   * reshape goes through a regular-polygon fit: dragging a corner grows / spins the whole
+   * polygon about its centre, the sketch solver projects the corners back onto the
+   * fitted polygon each sweep, and nodes can't be added or removed — the side count is
+   * edited instead (`setRegularSides`). The centre is a point reference
+   * (`MeasureRef.centre`). Split / combine yield free polygons (the flag is dropped).
+   */
+  regular?: number;
   /** Derived render/physics polygon, relative to the centroid — rebuilt from control + radius. */
   local: Vec2[];
   /**
@@ -440,11 +467,11 @@ export interface BodyGroup {
  * (`MeasureRef.guideLine`). With snapping enabled, placements and drags snap onto
  * guide lines / edges in preference to the grid.
  *
- * - `line`: an **infinite** line through `a` and `b` (the original guideline; files
- *   up to v19 carry it without a `kind`). Points "a" / "b".
- * - `poly`: a finite polyline through `pts` — a segment (2 points), an open chain, or a
- *   closed polygon (`closed`: a reference rectangle / regular polygon / outline).
- *   Points "0" … "n−1"; edge `i` runs pts[i] → pts[i+1] (wrapping when closed).
+ * - `poly`: a finite polyline through `pts` — a segment (2 points: the reference line),
+ *   an open chain, or a closed polygon (`closed`: a reference rectangle / regular
+ *   polygon / outline). Points "0" … "n−1"; edge `i` runs pts[i] → pts[i+1] (wrapping
+ *   when closed). Every line reference is finite: the old infinite construction
+ *   guideline (`kind: "line"`, v11–v20) was retired; files that carried one are gone.
  * - `circle`: centre `c`, radius `r`. Point "c" (the centre); "r" is the rim handle
  *   (drag to resize — not a reference).
  * - `arc`: the arc from `a` through `m` to `b`. Points "a" / "m" / "b".
@@ -452,19 +479,17 @@ export interface BodyGroup {
  *   is set, so it rides with that body) in `size` world units. Point "p" (drag only).
  */
 export type Guide =
-  | { id: number; kind: "line"; a: Vec2; b: Vec2 }
   | { id: number; kind: "poly"; pts: Vec2[]; closed: boolean }
   | { id: number; kind: "circle"; c: Vec2; r: number }
   | { id: number; kind: "arc"; a: Vec2; m: Vec2; b: Vec2 }
   | { id: number; kind: "text"; p: Vec2; text: string; size: number; bodyId?: number };
 
-/** One line-like part of a guide: the infinite line, or a finite polyline edge. */
+/** One line-like part of a guide: a finite polyline edge. */
 export interface GuideLine {
-  /** Polyline edge index, or null for an infinite `line` guide. */
-  edge: number | null;
+  /** Polyline edge index. */
+  edge: number;
   a: Vec2;
   b: Vec2;
-  infinite: boolean;
 }
 
 // --- measurements ---------------------------------------------------------
@@ -492,11 +517,12 @@ export type MeasureAxis = "direct" | "h" | "v" | "diameter" | "radius";
 export type MeasureRef =
   | { kind: "joint"; jointId: number } // point: a joint
   | { kind: "vertex"; bodyId: number; index: number; hole?: number } // point: a control vertex (of hole `hole`, or the outer outline)
+  | { kind: "centre"; bodyId: number; hole?: number } // point: the centre of a regular-polygon outline (of hole `hole`, or the outer one)
   | { kind: "bodyPoint"; bodyId: number; local: Vec2 } // point: fixed in a body's frame
   | { kind: "rail"; sliderId: number } // line: a slider rail
   | { kind: "edge"; bodyId: number; index: number; hole?: number } // line: control edge index → index+1 (of hole `hole`, or the outer)
   | { kind: "guidePoint"; guideId: number; which: string } // point: a guide's defining point (see `Guide` for the names)
-  | { kind: "guideLine"; guideId: number; edge?: number } // line: an infinite guideline, or edge `edge` of a reference polyline (finite)
+  | { kind: "guideLine"; guideId: number; edge: number } // line: edge `edge` of a reference polyline (finite)
   | { kind: "patternAxis"; patternId: number; axis: number }; // line: a linear pattern's direction (seed anchor → last instance)
 
 /**
@@ -569,9 +595,7 @@ export interface SketchConstraint {
 /** A reference resolved to current world geometry. */
 export type ResolvedMeasureRef =
   | { kind: "point"; p: Vec2 }
-  /** `infinite` marks a construction line (a guide): `a`–`b` are its defining points, but
-   *  the element itself extends without end (highlights draw it across the view). */
-  | { kind: "line"; a: Vec2; b: Vec2; infinite?: boolean };
+  | { kind: "line"; a: Vec2; b: Vec2 };
 
 /**
  * A measure-tool highlight: a resolved reference, or a whole disk outline (the rim of
@@ -742,7 +766,7 @@ export interface SceneData {
   sketch?: SketchConstraint[];
   /** Permanent body groups. Absent pre-v9. */
   groups?: BodyGroup[];
-  /** Construction guidelines. Absent pre-v11. */
+  /** Reference geometry (guides). Absent pre-v11. */
   guides?: Guide[];
   /** Component definitions (v14) — document-level, present only in the root snapshot. */
   components?: ComponentDef[];
@@ -772,10 +796,12 @@ export interface SelectionClip {
     tmp: number;
     controlWorld: Vec2[];
     /** Hole shapes in world coords (control polygon + rounding each). */
-    holes: { control: Vec2[]; radius: number; radii?: (number | null)[]; round?: RoundMode }[];
+    holes: { control: Vec2[]; radius: number; radii?: (number | null)[]; round?: RoundMode; regular?: number }[];
     radius: number;
     radii?: (number | null)[];
     round: RoundMode;
+    /** Regular-polygon side count (see `Body.regular`). */
+    regular?: number;
     color: string;
     grounded: boolean;
   }[];
@@ -822,7 +848,7 @@ export interface SelectionClip {
 export interface FeatureClip {
   /** Paste reference: the centre of the copied features' bounding box. */
   center: Vec2;
-  holes: { tmp: number; control: Vec2[]; radius: number; radii?: (number | null)[]; round?: RoundMode }[];
+  holes: { tmp: number; control: Vec2[]; radius: number; radii?: (number | null)[]; round?: RoundMode; regular?: number }[];
   joints: { tmp: number; world: Vec2 }[];
   grounds: { joint: number; anchor: Vec2 }[];
   sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[]; startRiders?: number[] }[];
@@ -837,7 +863,7 @@ export interface FeatureClip {
     members: number[];
   }[];
 }
-const FORMAT_VERSION = 20;
+const FORMAT_VERSION = 21;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -897,7 +923,8 @@ export class Scene {
     radius = 0,
     round: RoundMode = "fillet",
     holesWorld?: HoleSpec[],
-    radii?: (number | null)[]
+    radii?: (number | null)[],
+    regular?: number
   ): Body {
     const body: Body = {
       id: this.id(),
@@ -927,12 +954,238 @@ export class Scene {
         if (h.radii && h.radii.length === h.control.length && h.radii.some((r) => r !== null)) {
           hole.radii = h.radii.map((r) => (typeof r === "number" ? Math.max(0, r) : null));
         }
+        if (Scene.regularCountValid(h.regular, hole.controlLocal.length, h.round)) hole.regular = h.regular;
         return hole;
       });
     }
+    if (Scene.regularCountValid(regular, worldVerts.length, round)) body.regular = regular;
     this.bodies.push(body);
     this.rebuildBody(body);
     return body;
+  }
+
+  /** Whether `n` is a usable regular-polygon side count for an outline of `count` control
+   *  points in `round` mode (a regular polygon is a fillet-mode polygon of ≥ 3 corners). */
+  static regularCountValid(n: unknown, count: number, round?: RoundMode): n is number {
+    return typeof n === "number" && Number.isInteger(n) && n >= 3 && n === count && round !== "offset";
+  }
+
+  /** The regular-polygon side count of an outline (a hole's, or the outer when null), or null. */
+  outlineRegular(body: Body, hole: number | null = null): number | null {
+    const shape = hole === null ? body : body.holes?.[hole];
+    return shape?.regular ?? null;
+  }
+
+  /** World centre of a regular-polygon outline (the mean of its corners), or null when the
+   *  outline isn't regular. */
+  regularCentreWorld(bodyId: number, hole: number | null = null): Vec2 | null {
+    const body = this.getBody(bodyId);
+    if (!body || this.outlineRegular(body, hole) === null) return null;
+    const pts = hole === null ? this.bodyControlWorld(body) : this.bodyHoleControlWorld(body, hole);
+    return scale(pts.reduce((a, p) => add(a, p), vec(0, 0)), 1 / pts.length);
+  }
+
+  /**
+   * Move a regular outline rigidly onto `worldPts` (the sketch solver's write-back: the
+   * solved corners, projected back onto the invariant). The **size never changes** here
+   * — a regular polygon is a rigid shape in the sketch; its size is a parameter set by
+   * `setRegularSize` (size dimensions), `moveBodyVertex` (a corner drag) or a body
+   * scale. Joints stuck to moved corners are carried like `moveBodyVertex` does.
+   */
+  setRegularOutlineWorld(bodyId: number, hole: number | null, worldPts: Vec2[]): void {
+    const body = this.getBody(bodyId);
+    const ctrl = body ? this.controlListOf(body, hole) : null;
+    if (!body || !ctrl || this.outlineRegular(body, hole) === null || worldPts.length !== ctrl.length) return;
+    const cur = fitRegularPolygon(ctrl);
+    const fit = cur ? fitRegularPolygonRigid(worldPts, cur.r) : null;
+    if (fit) this.applyOutlineWorld(body, hole, fit.pts);
+  }
+
+  /**
+   * A regular outline's size as one of its measures: the edge length, the circumradius
+   * (centre → corner), the across-corners distance (even counts) or the apothem (centre →
+   * edge). Null when the outline isn't regular.
+   */
+  regularSize(bodyId: number, hole: number | null, size: RegularSize): number | null {
+    const body = this.getBody(bodyId);
+    const ctrl = body ? this.controlListOf(body, hole) : null;
+    const n = body ? this.outlineRegular(body, hole) : null;
+    if (!body || !ctrl || n === null) return null;
+    const fit = fitRegularPolygon(ctrl);
+    if (!fit) return null;
+    return Scene.regularMeasure(fit.r, n, size);
+  }
+
+  /** Resize a regular outline about its centre so that measure `size` equals `value`
+   *  (phase and centre kept; joints stuck to corners ride along). */
+  setRegularSize(bodyId: number, hole: number | null, size: RegularSize, value: number): void {
+    const body = this.getBody(bodyId);
+    const ctrl = body ? this.controlListOf(body, hole) : null;
+    const n = body ? this.outlineRegular(body, hole) : null;
+    if (!body || !ctrl || n === null || !(value > 0)) return;
+    const world = ctrl.map((p) => add(body.pos, rotate(p, body.angle)));
+    const fit = fitRegularPolygon(world);
+    if (!fit) return;
+    const r = value / Scene.regularMeasure(1, n, size);
+    const winding: 1 | -1 = polygonArea(ctrl) >= 0 ? 1 : -1;
+    this.applyOutlineWorld(body, hole, regularPolygonFrom(fit.c, r, fit.phase, n, winding));
+  }
+
+  /** Measure `size` of a regular `n`-gon of circumradius `r`. */
+  static regularMeasure(r: number, n: number, size: RegularSize): number {
+    switch (size.kind) {
+      case "chord": return 2 * r * Math.sin((size.k * Math.PI) / n);
+      case "radius": return r;
+      case "apothem": return r * Math.cos(Math.PI / n);
+      case "flats": return 2 * r * Math.cos(Math.PI / n);
+    }
+  }
+
+  /**
+   * The regular-polygon size a dimension sets, when both of its ends sit on one regular
+   * outline: two corners measured directly (a chord — adjacent corners give the edge
+   * length), the centre to a corner (the circumradius), the centre to an edge (the
+   * apothem), or two opposite edges of an even polygon (across flats). Such a dimension
+   * is the outline's size parameter — set directly, never through the vertex system
+   * (where the outline is rigid). A corner pair dimensioned horizontally / vertically is
+   * not a size: it turns the polygon instead.
+   */
+  regularSizeOfDim(m: Measurement): { bodyId: number; hole: number | null; size: RegularSize } | null {
+    const a = m.refA, b = m.refB;
+    const on = (r: MeasureRef) => (r.kind === "vertex" || r.kind === "centre" || r.kind === "edge" ? { bodyId: r.bodyId, hole: r.hole ?? null } : null);
+    const oa = on(a), ob = on(b);
+    if (!oa || !ob || oa.bodyId !== ob.bodyId || oa.hole !== ob.hole) return null;
+    const body = this.getBody(oa.bodyId);
+    const n = body ? this.outlineRegular(body, oa.hole) : null;
+    if (!body || n === null) return null;
+    const at = { bodyId: oa.bodyId, hole: oa.hole };
+    const apart = (i: number, j: number): number => {
+      const d = (((i - j) % n) + n) % n;
+      return Math.min(d, n - d);
+    };
+    if (a.kind === "vertex" && b.kind === "vertex") {
+      const k = apart(a.index, b.index);
+      return m.axis === "direct" && k >= 1 ? { ...at, size: { kind: "chord", k } } : null;
+    }
+    if ((a.kind === "centre" && b.kind === "vertex") || (a.kind === "vertex" && b.kind === "centre")) {
+      return m.axis === "direct" ? { ...at, size: { kind: "radius" } } : null;
+    }
+    if ((a.kind === "centre" && b.kind === "edge") || (a.kind === "edge" && b.kind === "centre")) return { ...at, size: { kind: "apothem" } };
+    if (a.kind === "edge" && b.kind === "edge") return n % 2 === 0 && apart(a.index, b.index) === n / 2 ? { ...at, size: { kind: "flats" } } : null;
+    return null;
+  }
+
+  /**
+   * Whether the sketch pins a regular outline's rotation: a horizontal / vertical /
+   * parallel / perpendicular on one of its edges (or between two of its corners), or
+   * two of its points tied to other geometry (coincident / aligned) — a structural
+   * reading of the common cases; the live solve still has the last word.
+   */
+  regularRotationLocked(bodyId: number, hole: number | null): boolean {
+    const onOutline = (r: MeasureRef | null): r is MeasureRef & { kind: "edge" | "vertex" | "centre" } =>
+      !!r && (r.kind === "edge" || r.kind === "vertex" || r.kind === "centre") && r.bodyId === bodyId && (r.hole ?? null) === hole;
+    const pointKey = (r: MeasureRef): string => (r.kind === "vertex" ? `v${r.index}` : "c");
+    const tied = new Set<string>();
+    for (const c of this.sketch) {
+      const a = onOutline(c.refA);
+      const b = onOutline(c.refB);
+      if (!a && !b) continue;
+      const line = c.kind === "horizontal" || c.kind === "vertical" || c.kind === "parallel" || c.kind === "perpendicular";
+      if (line) {
+        if (c.refB === null) return true; // H / V on one of its edges
+        if (a && b) return c.refA.kind === "vertex" && c.refB.kind === "vertex"; // two corners aligned; two own edges say nothing
+        if (c.refA.kind === "edge" || c.refB?.kind === "edge") return true; // an edge against an outside line
+        if (a) tied.add(pointKey(c.refA)); // one corner aligned with something outside
+        if (b && c.refB) tied.add(pointKey(c.refB));
+        continue;
+      }
+      if (c.kind === "coincident") {
+        if (a && b) continue;
+        if (a && (c.refA.kind === "vertex" || c.refA.kind === "centre")) tied.add(pointKey(c.refA));
+        if (b && c.refB && (c.refB.kind === "vertex" || c.refB.kind === "centre")) tied.add(pointKey(c.refB));
+      }
+    }
+    return tied.size >= 2;
+  }
+
+  /** Whether a driving dimension sets the size of a regular outline (then a corner drag may only turn it). */
+  regularSizeDriven(bodyId: number, hole: number | null): boolean {
+    return this.measurements.some((m) => {
+      if (m.mode !== "draw" || m.driving !== true || m.target === undefined) return false;
+      const s = this.regularSizeOfDim(m);
+      return s !== null && s.bodyId === bodyId && s.hole === hole;
+    });
+  }
+
+  /**
+   * Change a regular outline's side count: the polygon keeps its centre, circumradius
+   * and first corner's angle. Per-corner radius overrides are dropped (they no longer
+   * line up); references to corners / edges past the new count cascade away; a pattern
+   * seeded by the hole re-lays its members. Returns false when refused (not a regular
+   * outline, or `n` out of range).
+   */
+  setRegularSides(bodyId: number, hole: number | null, n: number): boolean {
+    const body = this.getBody(bodyId);
+    const ctrl = body ? this.controlListOf(body, hole) : null;
+    if (!body || !ctrl || this.outlineRegular(body, hole) === null) return false;
+    if (!Number.isInteger(n) || n < 3 || n > Scene.REGULAR_MAX_SIDES) return false;
+    const shape: { regular?: number; radii?: (number | null)[] } = hole === null ? body : body.holes![hole];
+    if (n === ctrl.length) return true;
+    const fit = fitRegularPolygon(ctrl);
+    if (!fit) return false;
+    const winding: 1 | -1 = polygonArea(ctrl) >= 0 ? 1 : -1;
+    const next = regularPolygonFrom(fit.c, fit.r, fit.phase, n, winding);
+    for (let i = ctrl.length - 1; i >= n; i--) this.shiftMeasureIndices(bodyId, i, -1, hole);
+    delete shape.radii;
+    ctrl.splice(0, ctrl.length, ...next);
+    shape.regular = n;
+    this.rebuildBody(body);
+    for (const p of this.patterns) {
+      if (p.bodyId === bodyId && p.seed.kind === "hole" && p.seed.hole === hole) this.syncPattern(p);
+    }
+    return true;
+  }
+
+  /** Largest side count a regular polygon may have. */
+  static readonly REGULAR_MAX_SIDES = 64;
+
+  /**
+   * Translate one outline by a world delta: the whole body for the outer outline, a
+   * hole's corners together (joints stuck to them ride along). A regular outline can
+   * only ever move as a whole — its corners are one rigid shape.
+   */
+  moveOutline(bodyId: number, hole: number | null, delta: Vec2): void {
+    const body = this.getBody(bodyId);
+    const ctrl = body ? this.controlListOf(body, hole) : null;
+    if (!body || !ctrl) return;
+    if (hole === null) {
+      this.moveBody(bodyId, delta);
+      return;
+    }
+    this.applyOutlineWorld(body, hole, ctrl.map((p) => add(add(body.pos, rotate(p, body.angle)), delta)));
+  }
+
+  /**
+   * Set every corner of an outline to `worldPts` (same count), carrying the joints stuck
+   * to corners that moved, then rebuild. The shared tail of `moveBodyVertex` and
+   * `setRegularOutlineWorld`.
+   */
+  private applyOutlineWorld(body: Body, hole: number | null, worldPts: Vec2[]): void {
+    const ctrl = this.controlListOf(body, hole);
+    if (!ctrl || worldPts.length !== ctrl.length) return;
+    const before = ctrl.map((p) => add(body.pos, rotate(p, body.angle)));
+    const moves: { linked: Joint[]; delta: Vec2 }[] = [];
+    for (let i = 0; i < ctrl.length; i++) {
+      const delta = sub(worldPts[i], before[i]);
+      if (len(delta) < 1e-12) continue;
+      const linked = this.joints.filter(
+        (j) => j.bodyId === body.id && dist(this.jointWorld(j), before[i]) < VERTEX_LINK_EPS
+      );
+      if (linked.length) moves.push({ linked, delta });
+      ctrl[i] = rotate(sub(worldPts[i], body.pos), -body.angle);
+    }
+    this.rebuildBody(body); // keeps every joint anchored...
+    for (const m of moves) for (const j of m.linked) this.shiftJoint(j, m.delta); // ...then the stuck ones follow
   }
 
   /**
@@ -1018,6 +1271,43 @@ export class Scene {
     const body = this.getBody(bodyId);
     const ctrl = body ? this.controlListOf(body, hole) : null;
     if (!body || !ctrl || index < 0 || index >= ctrl.length) return;
+    if (this.outlineRegular(body, hole ?? null) !== null) {
+      // A regular polygon: the moved corner sets the circumradius and the phase about
+      // the (kept) centre; every other corner follows — as far as the sketch leaves
+      // those free. A size dimension owns the size (the drag only turns it); a line
+      // constraint on the polygon pins its rotation (the drag only resizes it, along
+      // the corner's radial line); with both pinned the polygon is a rigid object and
+      // the drag moves it whole. Deciding here keeps the live solve consistent — a
+      // drag the constraints must undo would jitter between the two.
+      const h = hole ?? null;
+      const sizeDriven = this.regularSizeDriven(bodyId, h);
+      const rotLocked = this.regularRotationLocked(bodyId, h);
+      if (sizeDriven && rotLocked) {
+        this.moveOutline(bodyId, h, delta);
+        return;
+      }
+      const world = ctrl.map((p) => add(body.pos, rotate(p, body.angle)));
+      const n = world.length;
+      const c = scale(world.reduce((a, p) => add(a, p), vec(0, 0)), 1 / n);
+      const v = add(world[index], delta);
+      const winding: 1 | -1 = polygonArea(ctrl) >= 0 ? 1 : -1;
+      const cur = sub(world[index], c);
+      const r0 = len(cur);
+      if (r0 < 1e-6) return;
+      let r: number;
+      let phase: number;
+      if (rotLocked) {
+        r = dot(sub(v, c), scale(cur, 1 / r0)); // the cursor's radial component
+        phase = Math.atan2(cur.y, cur.x) - (winding * index * 2 * Math.PI) / n;
+      } else {
+        if (dist(v, c) < 1e-6) return;
+        r = sizeDriven ? r0 : dist(v, c);
+        phase = Math.atan2(v.y - c.y, v.x - c.x) - (winding * index * 2 * Math.PI) / n;
+      }
+      if (r < 1e-6) return;
+      this.applyOutlineWorld(body, h, regularPolygonFrom(c, r, phase, n, winding));
+      return;
+    }
     const vw = add(body.pos, rotate(ctrl[index], body.angle));
     const linked = this.joints.filter(
       (j) => j.bodyId === bodyId && dist(this.jointWorld(j), vw) < VERTEX_LINK_EPS
@@ -1041,7 +1331,7 @@ export class Scene {
   insertBodyVertex(bodyId: number, index: number, worldPos: Vec2, hole?: number | null): void {
     const body = this.getBody(bodyId);
     const ctrl = body ? this.controlListOf(body, hole) : null;
-    if (!body || !ctrl) return;
+    if (!body || !ctrl || this.outlineRegular(body, hole ?? null) !== null) return; // a regular polygon keeps its count
     const clamped = Math.min(Math.max(index, 0), ctrl.length);
     ctrl.splice(clamped, 0, rotate(sub(worldPos, body.pos), -body.angle));
     const radii = hole === null || hole === undefined ? body.radii : body.holes![hole].radii;
@@ -1058,7 +1348,7 @@ export class Scene {
   removeBodyVertex(bodyId: number, index: number, hole?: number | null): void {
     const body = this.getBody(bodyId);
     const ctrl = body ? this.controlListOf(body, hole) : null;
-    if (!body || !ctrl) return;
+    if (!body || !ctrl || this.outlineRegular(body, hole ?? null) !== null) return; // a regular polygon keeps its count
     const holeShape = hole === null || hole === undefined ? null : body.holes![hole];
     const min = holeShape?.round === "offset" ? 1 : 3;
     if (ctrl.length <= min || index < 0 || index >= ctrl.length) return;
@@ -1094,6 +1384,7 @@ export class Scene {
         spec.radii.some((r) => r !== null)) {
       hole.radii = spec.radii.map((r) => (typeof r === "number" ? Math.max(0, r) : null));
     }
+    if (!Array.isArray(spec) && Scene.regularCountValid(spec.regular, control.length, round)) hole.regular = spec.regular;
     body.holes = [...(body.holes ?? []), hole];
     this.rebuildBody(body);
     return body.holes.length - 1;
@@ -1145,7 +1436,7 @@ export class Scene {
   /** Whether a measurement reference names a pattern **member** (derived geometry). */
   refPatternMember(ref: MeasureRef): boolean {
     if (ref.kind === "joint") return this.patternOfJoint(ref.jointId)?.role === "member";
-    if ((ref.kind === "vertex" || ref.kind === "edge") && ref.hole !== undefined) {
+    if ((ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre") && ref.hole !== undefined) {
       return this.patternOfHole(ref.bodyId, ref.hole)?.role === "member";
     }
     return false;
@@ -1154,7 +1445,7 @@ export class Scene {
   /** The pattern a reference's element belongs to (as seed or member), or undefined. */
   patternOfRef(ref: MeasureRef): Pattern | undefined {
     if (ref.kind === "joint") return this.patternOfJoint(ref.jointId)?.pattern;
-    if ((ref.kind === "vertex" || ref.kind === "edge") && ref.hole !== undefined) {
+    if ((ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre") && ref.hole !== undefined) {
       return this.patternOfHole(ref.bodyId, ref.hole)?.pattern;
     }
     return undefined;
@@ -1454,6 +1745,8 @@ export class Scene {
           else delete h.radii;
           if (seed.round) h.round = seed.round;
           else delete h.round;
+          if (seed.regular) h.regular = seed.regular;
+          else delete h.regular;
         });
         this.rebuildBody(body);
       } else {
@@ -1507,7 +1800,7 @@ export class Scene {
       delete body.holesLocal;
     }
     const onHole = (ref: MeasureRef | null): ref is MeasureRef & { hole: number } =>
-      !!ref && (ref.kind === "vertex" || ref.kind === "edge") && ref.bodyId === body.id && ref.hole !== undefined;
+      !!ref && (ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre") && ref.bodyId === body.id && ref.hole !== undefined;
     const refGone = (ref: MeasureRef | null): boolean => onHole(ref) && set.has(ref.hole);
     const remap = (ref: MeasureRef | null): void => {
       if (onHole(ref)) ref.hole = map.get(ref.hole)!;
@@ -1851,6 +2144,7 @@ export class Scene {
         radius: h.radius,
         radii: h.radii ? [...h.radii] : undefined,
         round: h.round,
+        regular: h.regular,
       };
     };
 
@@ -1894,6 +2188,7 @@ export class Scene {
     body.round = "fillet";
     body.radius = def;
     body.controlLocal = ptsA.map(toLocal);
+    delete body.regular; // a split piece is a free polygon
     const ovA = Scene.overrides(loopA.map((e) => e.rad), def);
     if (ovA.some((r) => r !== null)) body.radii = ovA; else delete body.radii;
     const newHolesA: BodyHole[] = holesA.map((hi) => {
@@ -2214,7 +2509,7 @@ export class Scene {
           const src = b.holes![hi];
           const control = h.baked ? this.bodyHoleControlWorld(b, hi) : h.control.map((c) => c.p);
           return {
-            spec: { control, radius: src.radius, radii: src.radii ? [...src.radii] : undefined, round: src.round },
+            spec: { control, radius: src.radius, radii: src.radii ? [...src.radii] : undefined, round: src.round, regular: src.regular },
             origin: { bodyId: b.id, hole: hi },
           };
         }
@@ -2258,11 +2553,13 @@ export class Scene {
     survivor.round = "fillet";
     survivor.radius = def;
     survivor.controlLocal = result.outer.map(toLocal);
+    delete survivor.regular; // a combined outline is a free polygon
     const ov = Scene.overrides(radiiOf(result.outer), def);
     if (ov.some((r) => r !== null)) survivor.radii = ov; else delete survivor.radii;
     const holes: BodyHole[] = holeSpecs.map(({ spec }) => {
       const hole: BodyHole = { controlLocal: spec.control.map(toLocal), radius: Math.max(0, spec.radius ?? 0) };
       if (spec.round) hole.round = spec.round;
+      if (Scene.regularCountValid(spec.regular, hole.controlLocal.length, spec.round)) hole.regular = spec.regular;
       if (spec.radii && spec.radii.length === spec.control.length && spec.radii.some((r) => r !== null)) {
         hole.radii = [...spec.radii];
       }
@@ -2912,6 +3209,10 @@ export class Scene {
         const b = this.getBody(ref.bodyId);
         return b ? { kind: "point", p: add(b.pos, rotate(ref.local, b.angle)) } : null;
       }
+      case "centre": {
+        const c = this.regularCentreWorld(ref.bodyId, ref.hole ?? null);
+        return c ? { kind: "point", p: c } : null;
+      }
       case "rail": {
         const c = this.constraints.find(
           (x) => x.id === ref.sliderId && x.kind === "slider"
@@ -2943,13 +3244,10 @@ export class Scene {
         return p ? { kind: "point", p } : null;
       }
       case "guideLine": {
-        // An infinite guideline resolves as its defining segment flagged `infinite`
-        // (consumers that need the whole line extend it themselves); a polyline edge is
-        // a finite segment like a body edge.
+        // A reference polyline's edge: a finite segment like a body edge.
         const g = this.getGuide(ref.guideId);
-        const ln = g ? this.guideLines(g).find((l) => l.edge === (ref.edge ?? null)) : undefined;
-        if (!ln) return null;
-        return ln.infinite ? { kind: "line", a: ln.a, b: ln.b, infinite: true } : { kind: "line", a: ln.a, b: ln.b };
+        const ln = g ? this.guideLines(g).find((l) => l.edge === ref.edge) : undefined;
+        return ln ? { kind: "line", a: ln.a, b: ln.b } : null;
       }
     }
   }
@@ -3091,10 +3389,10 @@ export class Scene {
    * on the **infinite** line; normalized so the point is stored as `refA`);
    * `horizontal`/`vertical` take one line ref (refB
    * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs.
-   * Point refs are joints, body control vertices, or guideline defining points
+   * Point refs are joints, body control vertices, or reference-geometry points
    * (`bodyPoint` refs are measurement-only — the sketch solver can't move them
-   * independently); line refs are slider rails, body control edges, or guidelines
-   * (except `equal`, which rejects guidelines — an infinite line has no length).
+   * independently); line refs are slider rails, body control edges, or reference
+   * polyline edges.
    * Returns null on a kind mismatch, an unresolvable ref, or two refs naming the
    * same element (for point-on-line: a point that *is* an endpoint of the line, which
    * would be trivially satisfied forever).
@@ -3104,7 +3402,7 @@ export class Scene {
     refA: MeasureRef,
     refB?: MeasureRef
   ): SketchConstraint | null {
-    const isPoint = (r: MeasureRef) => r.kind === "joint" || r.kind === "vertex" || r.kind === "guidePoint";
+    const isPoint = (r: MeasureRef) => r.kind === "joint" || r.kind === "vertex" || r.kind === "centre" || r.kind === "guidePoint";
     const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
     let b = refB ?? null;
     if (kind === "coincident") {
@@ -3117,10 +3415,6 @@ export class Scene {
       if (b ? !(isPoint(refA) && isPoint(b)) : !isLine(refA)) return null;
     } else {
       if (!b || !isLine(refA) || !isLine(b)) return null;
-      // Equal length is meaningless on an infinite guideline (its defining segment's
-      // length is arbitrary construction, not geometry) — reject it. A reference
-      // polyline's edge has a real length, so it may take one.
-      if (kind === "equal" && (this.refIsInfiniteLine(refA) || this.refIsInfiniteLine(b))) return null;
     }
     if (!this.resolveMeasureRef(refA) || (b && !this.resolveMeasureRef(b))) return null;
     if (b && sameMeasureRef(refA, b)) return null;
@@ -3172,16 +3466,11 @@ export class Scene {
     if (ln.kind === "guideLine" && pt.kind === "guidePoint") {
       if (ln.guideId !== pt.guideId) return false;
       const g = this.getGuide(ln.guideId);
-      if (!g || g.kind !== "poly" || ln.edge === undefined) return true; // an infinite line's two points define it
+      if (!g || g.kind !== "poly") return false;
       const i = Number(pt.which);
       return i === ln.edge || i === (ln.edge + 1) % g.pts.length;
     }
     return false;
-  }
-
-  /** Whether a line reference names an infinite guideline (vs a finite edge / rail / polyline edge). */
-  private refIsInfiniteLine(r: MeasureRef): boolean {
-    return r.kind === "guideLine" && this.getGuide(r.guideId)?.kind === "line";
   }
 
   getSketchConstraint(id: number): SketchConstraint | undefined {
@@ -3881,14 +4170,6 @@ export class Scene {
     return this.guides.find((g) => g.id === id);
   }
 
-  /** Create an infinite guideline through two points. Returns null when they (nearly) coincide. */
-  addGuide(a: Vec2, b: Vec2): Guide | null {
-    if (dist(a, b) < Scene.GUIDE_MIN_SPAN) return null;
-    const guide: Guide = { id: this.id(), kind: "line", a: clone(a), b: clone(b) };
-    this.guides.push(guide);
-    return guide;
-  }
-
   /**
    * Create a reference polyline (a segment, an open chain or — `closed` — a polygon).
    * Consecutive duplicates are dropped (a closing repeat of the first point too).
@@ -3984,7 +4265,6 @@ export class Scene {
     const g = this.getGuide(id);
     if (!g) return;
     switch (g.kind) {
-      case "line": g.a = add(g.a, delta); g.b = add(g.b, delta); break;
       case "poly": g.pts = g.pts.map((p) => add(p, delta)); break;
       case "circle": g.c = add(g.c, delta); break;
       case "arc": g.a = add(g.a, delta); g.m = add(g.m, delta); g.b = add(g.b, delta); break;
@@ -3999,7 +4279,6 @@ export class Scene {
   /** Names of a guide's solver-capable points (usable as `guidePoint` references). */
   guidePointKeys(g: Guide): string[] {
     switch (g.kind) {
-      case "line": return ["a", "b"];
       case "poly": return g.pts.map((_, i) => String(i));
       case "circle": return ["c"];
       case "arc": return ["a", "m", "b"];
@@ -4022,8 +4301,6 @@ export class Scene {
   /** World position of a guide's point / handle `which`, or null when it doesn't exist. */
   guidePointWorld(g: Guide, which: string): Vec2 | null {
     switch (g.kind) {
-      case "line":
-        return which === "a" || which === "b" ? clone(g[which]) : null;
       case "poly": {
         const i = Number(which);
         return Number.isInteger(i) && i >= 0 && i < g.pts.length ? clone(g.pts[i]) : null;
@@ -4039,24 +4316,23 @@ export class Scene {
   }
 
   /**
-   * Move one defining point / handle of a guide to `worldPos`: re-aims a line, reshapes a
-   * polyline or arc, moves a circle's centre ("c") or resizes it ("r"), moves a label.
-   * A line's point may not land on its other point (the line needs a direction).
+   * Move one defining point / handle of a guide to `worldPos`: reshapes a polyline or
+   * arc, moves a circle's centre ("c") or resizes it ("r"), moves a label. A polyline
+   * point may not land on a neighbouring point (its edges need a direction).
    */
   moveGuidePoint(id: number, which: string, worldPos: Vec2): void {
     const g = this.getGuide(id);
     if (!g) return;
     switch (g.kind) {
-      case "line": {
-        if (which !== "a" && which !== "b") return;
-        const other = which === "a" ? g.b : g.a;
-        if (dist(worldPos, other) < Scene.GUIDE_MIN_SPAN) return;
-        g[which] = clone(worldPos);
-        return;
-      }
       case "poly": {
         const i = Number(which);
-        if (Number.isInteger(i) && i >= 0 && i < g.pts.length) g.pts[i] = clone(worldPos);
+        const n = g.pts.length;
+        if (!Number.isInteger(i) || i < 0 || i >= n) return;
+        for (const k of [i - 1, i + 1]) {
+          const nb = g.closed ? (k + n) % n : k;
+          if (nb !== i && nb >= 0 && nb < n && dist(worldPos, g.pts[nb]) < Scene.GUIDE_MIN_SPAN) return;
+        }
+        g.pts[i] = clone(worldPos);
         return;
       }
       case "circle":
@@ -4075,14 +4351,13 @@ export class Scene {
     }
   }
 
-  /** The line-like parts of a guide: an infinite guideline, or a polyline's edges (none for the rest). */
+  /** The line-like parts of a guide: a polyline's edges (none for the other kinds). */
   guideLines(g: Guide): GuideLine[] {
-    if (g.kind === "line") return [{ edge: null, a: clone(g.a), b: clone(g.b), infinite: true }];
     if (g.kind !== "poly") return [];
     const n = g.pts.length;
     const count = g.closed ? n : n - 1;
     const out: GuideLine[] = [];
-    for (let i = 0; i < count; i++) out.push({ edge: i, a: clone(g.pts[i]), b: clone(g.pts[(i + 1) % n]), infinite: false });
+    for (let i = 0; i < count; i++) out.push({ edge: i, a: clone(g.pts[i]), b: clone(g.pts[(i + 1) % n]) });
     return out;
   }
 
@@ -4094,8 +4369,6 @@ export class Scene {
   /** Distance from `p` to the nearest drawn part of a guide (line, edge, rim, arc or label box). */
   private guideDistance(g: Guide, p: Vec2): number {
     switch (g.kind) {
-      case "line":
-        return distToLine(p, g.a, normalize(sub(g.b, g.a)));
       case "poly":
         return Math.min(...this.guideLines(g).map((l) => distToSegment(p, l.a, l.b)));
       case "circle":
@@ -4130,14 +4403,14 @@ export class Scene {
     return best;
   }
 
-  /** Nearest guide **line** (an infinite guideline, or a polyline edge) within `radius` of `p`. */
-  guideLineAt(p: Vec2, radius: number): { guide: Guide; edge: number | null } | null {
-    let best: { guide: Guide; edge: number | null } | null = null;
+  /** Nearest guide **line** (a reference polyline edge) within `radius` of `p`. */
+  guideLineAt(p: Vec2, radius: number): { guide: Guide; edge: number } | null {
+    let best: { guide: Guide; edge: number } | null = null;
     let bestD = radius;
     for (let i = this.guides.length - 1; i >= 0; i--) {
       const g = this.guides[i];
       for (const l of this.guideLines(g)) {
-        const d = l.infinite ? distToLine(p, l.a, normalize(sub(l.b, l.a))) : distToSegment(p, l.a, l.b);
+        const d = distToSegment(p, l.a, l.b);
         if (d <= bestD) {
           bestD = d;
           best = { guide: g, edge: l.edge };
@@ -4271,6 +4544,7 @@ export class Scene {
         case "vertex":
         case "edge":
         case "bodyPoint":
+        case "centre":
           return bodyIdSet.has(r.bodyId);
         case "rail":
           return clippedSliders.has(r.sliderId);
@@ -4319,10 +4593,12 @@ export class Scene {
           radius: h.radius,
           radii: h.radii ? [...h.radii] : undefined,
           round: h.round,
+          regular: h.regular,
         })),
         radius: b.radius,
         radii: b.radii ? [...b.radii] : undefined,
         round: b.round,
+        regular: b.regular,
         color: b.color,
         grounded: b.grounded,
       })),
@@ -4370,7 +4646,8 @@ export class Scene {
         b.radius,
         b.round,
         (b.holes ?? []).map((h) => ({ ...h, control: h.control.map((p) => add(p, offset)) })),
-        b.radii // paste keeps per-corner radius overrides
+        b.radii, // paste keeps per-corner radius overrides
+        b.regular
       );
       if (body.local.length < 3) return null;
       body.color = b.color; // paste keeps the source body's colour
@@ -4481,10 +4758,12 @@ export class Scene {
         }
         case "vertex":
         case "edge":
-        case "bodyPoint": {
+        case "bodyPoint":
+        case "centre": {
           const bid = bodyIdMap.get(r.bodyId);
           if (bid === undefined) return null;
           if (r.kind === "bodyPoint") return { kind: "bodyPoint", bodyId: bid, local: clone(r.local) };
+          if (r.kind === "centre") return r.hole === undefined ? { kind: "centre", bodyId: bid } : { kind: "centre", bodyId: bid, hole: r.hole };
           return r.hole === undefined
             ? { kind: r.kind, bodyId: bid, index: r.index }
             : { kind: r.kind, bodyId: bid, index: r.index, hole: r.hole }; // hole refs keep their hole
@@ -4570,6 +4849,7 @@ export class Scene {
           radius: h.radius,
           radii: h.radii ? [...h.radii] : undefined,
           round: h.round,
+          regular: h.regular,
         };
       });
     const clipJoints: FeatureClip["joints"] = [...owned].map((id) => ({
@@ -4609,6 +4889,7 @@ export class Scene {
           return owned.has(r.jointId);
         case "vertex":
         case "edge":
+        case "centre":
           return r.bodyId === bodyId && r.hole !== undefined && holeSet.has(r.hole);
         case "rail":
           return clippedSliders.has(r.sliderId);
@@ -4680,7 +4961,7 @@ export class Scene {
       const control = h.control.map((p) => add(p, offset));
       const loop = deriveHoleOutline(control, { controlLocal: control, radius: h.radius, radii: h.radii, round: h.round });
       const idx = loop.every((p) => pointInPolygon(p, outer))
-        ? this.addBodyHole(bodyId, { control, radius: h.radius, radii: h.radii, round: h.round })
+        ? this.addBodyHole(bodyId, { control, radius: h.radius, radii: h.radii, round: h.round, regular: h.regular })
         : null;
       if (idx === null) skipped++;
       else holeMap.set(h.tmp, idx);
@@ -4756,6 +5037,10 @@ export class Scene {
         case "edge": {
           const hi = r.hole === undefined ? undefined : holeMap.get(r.hole);
           return hi === undefined ? null : { kind: r.kind, bodyId, index: r.index, hole: hi };
+        }
+        case "centre": {
+          const hi = r.hole === undefined ? undefined : holeMap.get(r.hole);
+          return hi === undefined ? null : { kind: "centre", bodyId, hole: hi };
         }
         case "rail": {
           const id = sliderMap.get(r.sliderId);
@@ -4934,6 +5219,7 @@ export class Scene {
       case "vertex":
       case "edge":
       case "bodyPoint":
+      case "centre":
         return this.instanceOfBody(ref.bodyId);
       case "rail":
         return this.instanceOfConstraint(ref.sliderId);
@@ -4966,6 +5252,7 @@ export class Scene {
       case "vertex":
       case "edge":
       case "bodyPoint":
+      case "centre":
         return bodyKey(ref.bodyId);
       case "joint": {
         const j = this.getJoint(ref.jointId);
@@ -5393,6 +5680,8 @@ export class Scene {
         if (db.radii) sb.radii = radii(db.radii);
         else delete sb.radii;
         sb.round = db.round;
+        if (db.regular) sb.regular = db.regular;
+        else delete sb.regular;
         if (db.holes?.length) {
           sb.holes = holesOf(db);
           sb.holesLocal = (db.holesLocal ?? []).map(loop);
@@ -5412,6 +5701,7 @@ export class Scene {
           radius: db.radius,
           round: db.round,
           ...(db.radii ? { radii: radii(db.radii) } : {}),
+          ...(db.regular ? { regular: db.regular } : {}),
           local: loop(db.local),
           pos: xf(db.pos),
           angle: xfAngle(db.angle),
@@ -5959,6 +6249,8 @@ export class Scene {
             if (h.round === "offset") out.round = "offset";
             const hr = sanitizeRadii(h.radii, out.controlLocal.length);
             if (hr.length) out.radii = hr;
+            // Regular-polygon holes arrived in v21; a count that doesn't match the corners is dropped.
+            if (Scene.regularCountValid(h.regular, out.controlLocal.length, out.round)) out.regular = h.regular;
             return out;
           });
       } else if (Array.isArray(src.holesLocal)) {
@@ -5970,6 +6262,9 @@ export class Scene {
       const out: Body = { ...b, pos: vec(b.pos.x, b.pos.y), local, controlLocal, radius: src.radius ?? 0, round: src.round ?? "fillet", grounded: src.grounded ?? false };
       if (radii.length) out.radii = radii;
       else delete out.radii;
+      // Regular-polygon outlines arrived in v21; a count that doesn't match the corners is dropped.
+      if (Scene.regularCountValid(src.regular, controlLocal.length, out.round)) out.regular = src.regular;
+      else delete out.regular;
       if (holes.length) {
         out.holes = holes;
         // Re-derive the sampled loops from the (sanitized) controls rather than trusting
@@ -6055,8 +6350,8 @@ export class Scene {
       if (inst.mirrored !== true) delete inst.mirrored;
     }
     this.pruneInstances();
-    // Construction guidelines arrived in v11 (infinite lines only — no `kind`); v20 added
-    // the other reference kinds. Older files simply have none.
+    // Reference geometry arrived in v11 (infinite guidelines, since retired — a kind-less
+    // record is dropped); v20 added the finite kinds. Older files simply have none.
     this.guides = Array.isArray(data.guides)
       ? data.guides.map(loadGuide).filter((g): g is Guide => g !== null)
       : [];
@@ -6235,12 +6530,7 @@ function loadGuide(raw: unknown): Guide | null {
       ? vec(q.x, q.y)
       : null;
   };
-  const kind = g.kind ?? "line";
-  switch (kind) {
-    case "line": {
-      const a = pt(g.a), b = pt(g.b);
-      return a && b && dist(a, b) >= Scene.GUIDE_MIN_SPAN ? { id: g.id, kind: "line", a, b } : null;
-    }
+  switch (g.kind) {
     case "poly": {
       if (!Array.isArray(g.pts)) return null;
       const pts = g.pts.map(pt).filter((p): p is Vec2 => p !== null);
@@ -6284,6 +6574,8 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
         a.index === (b as { index: number }).index &&
         (a.hole ?? null) === ((b as { hole?: number }).hole ?? null)
       );
+    case "centre":
+      return a.bodyId === (b as { bodyId: number }).bodyId && (a.hole ?? null) === ((b as { hole?: number }).hole ?? null);
     case "rail":
       return a.sliderId === (b as { sliderId: number }).sliderId;
     case "guidePoint":
@@ -6292,10 +6584,7 @@ export function sameMeasureRef(a: MeasureRef, b: MeasureRef): boolean {
         a.which === (b as { which: string }).which
       );
     case "guideLine":
-      return (
-        a.guideId === (b as { guideId: number }).guideId &&
-        (a.edge ?? null) === ((b as { edge?: number }).edge ?? null)
-      );
+      return a.guideId === (b as { guideId: number }).guideId && a.edge === (b as { edge: number }).edge;
     case "patternAxis":
       return a.patternId === (b as { patternId: number }).patternId && a.axis === (b as { axis: number }).axis;
     default:

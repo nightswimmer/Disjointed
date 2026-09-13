@@ -45,6 +45,44 @@ reload; the title shows `• name` while modified), with a timestamped download 
 fallback elsewhere; **auto-backup** (clock button) writes `<name>-backup-<time>.json` into a
 user-chosen folder N minutes after the first change since the last backup / save, pruning to
 the last K, with a change-armed countdown shown in its panel.
+**Regular polygons stay regular + the infinite guideline retired — serialization v21,
+2026-09-13.** A polygon drawn with the Polygon tool (Body or Cut role) now carries a `regular`
+side count on its outline (`Body.regular` / `BodyHole.regular`; the corners stay the stored
+geometry, so rendering, mass, export, patterns, mirror, copy and every reference keep working)
+and the model keeps it a **regular polygon as an invariant**, not with constraints: dragging a
+**corner** grows / spins it about its centre (the dragged corner sets radius + phase); nodes
+can't be added or removed (double-click is refused with a toast); the **side count** is edited
+in place — an "n sides" **tag** above the selected polygon (double-click to type, `↑` / `↓`
+to step; `#poly-sides` left the toolbar, the count shows beside the cursor badge while the
+tool is armed) — keeping centre, circumradius and first-corner angle (refs past the new count
+cascade, radius overrides drop, a pattern seed re-lays its members). The **centre** is a new
+point reference `MeasureRef.centre` (drawn as a small crosshair): coincident / measure /
+object-snap target, the drag reference of a lone regular body, and the polygon's own centre
+click sticks to what it landed on. **In the sketch a regular polygon is a rigid shape** (like
+the disk): every outline the solver touches joins the system whole (all corners + a centre
+variable `c:body[:hole]`) under one projection item — a **rigid** weighted fit
+(`fitRegularPolygonRigid`, size fixed for the solve; a similarity fit let a pinching
+correction shrink the polygon sweep after sweep) whose pushed points weigh more and where two
+pushed adjacent corners are read as an edge-direction demand, so H / V / parallel /
+perpendicular on an edge turn it in one step (a 90° turn included). Its **size** is a
+parameter set by **size dimensions** (`Scene.regularSizeOfDim`: a chord between two corners
+measured directly — the edge length included — centre → corner, centre → edge, or across
+flats between opposite edges), applied like a disk diameter (excluded from the vertex system,
+`setRegularSize`, re-applied by `enforceSizeDims`). A **corner drag** respects what the sketch
+leaves free (decided in `moveBodyVertex`, so the live solve never fights it): size driven →
+turn only; rotation locked (`regularRotationLocked`: a line constraint on the polygon, or two
+of its points tied elsewhere) → resize along the corner's radial line; both → the polygon is a
+rigid object and the drag moves it whole (`moveOutline`; the feature drag of a regular hole
+moves it whole too). Split / combine yield free polygons; a mismatched saved count is dropped
+on load. The **infinite construction guideline** (`kind: "line"`, tool `L`) is **gone**: the
+finite reference line (Shift+L, a two-point reference polyline) replaces it — every line
+reference is finite (`GuideLine.edge` required, no `infinite` flag; snapping / hit-testing
+within the span; `equal` and length dimensions work on it; a polyline point can't collapse onto
+its neighbour), kind-less legacy records are dropped, plain `L` is unbound (the whole shortcut
+map is due for a remap). Tests: new `scripts/regular.ts`; `guides.ts` rewritten around
+two-point polylines; `polygon tests.json` is a field repro (H + across-corners dimension).
+In-app help is deliberately **not** updated this round — see the pending-manual list in
+HANDOFF.md.
 **Shape tools + roles (Body / Cut / Reference) — serialization v20, 2026-09-13.** The Body,
 Hole and (partly) Guideline tools became **role-neutral shape tools** plus a sticky **role
 switch** at the start of the tool group (`.role-btn`s in `#role-group`; keys `1` / `2` / `3`;
@@ -53,8 +91,8 @@ first click flips Body ↔ Cut** — else the sticky role; line / arc / text for
 Shape tools (`SHAPE_TOOLS`): **polyline** (`B` = arm it in the Body role, `U` = Cut role; the
 old freehand draft + body-from-joints in the Body role), **rect** (Shift+B; two corners or
 press-and-drag, Shift = square, Alt = from the centre), **circle** (Shift+C; centre + rim or
-drag), **polygon** (Shift+P; centre + corner, side count in the `#poly-sides` toolbar field or
-↑ / ↓), **slot** (Shift+S; two ends, then a click for the width), **line** (Shift+L; a finite
+drag), **polygon** (Shift+P; centre + corner, side count beside the cursor badge, ↑ / ↓ to
+change it; since v21 the result stays a regular polygon — see the v21 entry), **slot** (Shift+S; two ends, then a click for the width), **line** (Shift+L; a finite
 reference segment), **arc** (Shift+A; start, end, then a through point), **text** (Shift+T; a
 label typed into the `#text-edit` inline input; clicked on a body it is **anchored** to it and
 rides with it; height from the `#text-size` field; double-click a label to edit it). The
@@ -86,8 +124,8 @@ body the new outline: unchanged corners keep their radii (new ones sharp — ove
 when the default is rounded), untouched holes keep their exact specs, vertex / edge refs remap
 by world geometry, `bodyPoint` refs re-anchor, stale refs drop. Offset-mode bodies are baked
 first; a rounded cutter crossing the outline arrives sampled. **Reference geometry** (model.ts
-`Guide` is now a union): `line` (infinite, the old record — ≤ v19 files carry no `kind`, the
-loader back-fills it), `poly` (`pts`, `closed`: segment / chain / polygon), `circle` (`c`, `r`),
+`Guide` is now a union; the infinite `line` kind was retired in v21 — a kind-less record is
+dropped): `poly` (`pts`, `closed`: segment / chain / polygon), `circle` (`c`, `r`),
 `arc` (`a`, `m`, `b` through-points; `guideArc` → `arcThrough`), `text` (`p`, `text`, `size`,
 optional `bodyId` — then `p` is body-local; `guideTextWorld` / `guideTextBox`, width
 estimated `TEXT_ADVANCE = 0.58 × size` per char for hit tests). Points are named by
@@ -95,12 +133,11 @@ estimated `TEXT_ADVANCE = 0.58 × size` per char for hit tests). Points are name
 arc a/m/b; text none), `guideHandleKeys` (adds the circle rim "r" and the text anchor "p",
 drag-only), `guidePointIsRef`, `guidePointWorld`, `moveGuidePoint(id, which, p)` (rim →
 resize), `moveGuide` (translate all; anchored text in its body's frame), `guideLines(g)` →
-`GuideLine[]` (infinite line, or polyline edges `edge: i`), hit tests `guideAt` (any drawn
+`GuideLine[]` (polyline edges `edge: i`), hit tests `guideAt` (any drawn
 part: line / edge / rim / arc / label box), `guideLineAt` (line refs: `{ guide, edge }`),
-`guidePointAt` (handles). `MeasureRef.guidePoint.which` is a `string`; `guideLine` gained an
-optional `edge` (a polyline edge resolves as a **finite** line; only `kind: "line"` guides
-resolve `infinite`). `addSketchConstraint` rejects `equal` only on infinite lines
-(`refIsInfiniteLine`) — polyline edges have a length. `pruneGuides` drops labels whose body is
+`guidePointAt` (handles). `MeasureRef.guidePoint.which` is a `string`; `guideLine` carries
+the `edge` (every line reference is finite since v21; `equal` works on any reference edge).
+`pruneGuides` drops labels whose body is
 gone (`removeBody`, load). sketch.ts: guide vars are generic `g:<id>:<which>` via
 `guidePointWorld` / `moveGuidePoint`; `lineVarKeys` handles polyline edges (wrapping when
 closed); tied-guide propagation uses `allGuideVars`; **`anchorVarsForGuide(scene, id)`** now
@@ -111,8 +148,8 @@ anchor on `guideAnchorWorld` (first handle). renderer.ts: `drawGuide` per kind (
 defining points, a selected circle shows its square rim handle, labels via `drawGuideText`
 rotated by the body's angle); `drawShapeDraft`, `drawRoleBadge`. svgcontext.ts gained
 `translate` / `rotate` / a no-op `clip` (the manual recorder). index.html: role switch,
-9 shape-tool buttons, `#shape-props` (`#poly-sides-label`, `#text-size-label` — hidden by the
-id-based `.hidden` rules in style.css), `#text-edit`. helpmap / manual: topics `roles`,
+9 shape-tool buttons, `#shape-props` (`#text-size-label`; the side-count field went in v21),
+`#text-edit`. helpmap / manual: topics `roles`,
 `tool-polyline`, `tool-rect`, `tool-circle`, `tool-polygon`, `tool-slot`, `tool-line`,
 `tool-arc`, `tool-text` (tool-body / tool-hole removed; el-guide is now "Reference
 geometry"). Tests: new `scripts/shapes.ts` (difference primitive, cut fast path / notch /
@@ -351,7 +388,9 @@ frozen world are **out of scope** (not solved, not reported as breaks). Rigid dr
 sim-like, so **sketch constraints are not applied** during them (a rigid rotation can
 leave an H/V constraint unsatisfied until the next sketch solve). Plain drag, vertex
 reshaping and label drags are unchanged (vertex handles win over Shift).
-**Construction guidelines** (draw mode, serialization v11): **infinite** lines defined by
+**Construction guidelines** (draw mode, serialization v11 — **retired in v21**: the infinite
+line kind is gone, the finite reference line (Shift+L) took its place and files that carried
+one drop it; kept as history): **infinite** lines defined by
 two points — pure drawing aids (invisible and unpickable in sim, never simulated). Tool
 **`L`** (the linear actuator moved to **`A`**): two clicks; each click lands **exactly on**
 a joint / body corner / another guide's point (recording a CAD-style **auto-coincident**),
@@ -1303,10 +1342,11 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
     drawing and picking together. Group-aware (any id expands to its whole group), moved
     bodies keep their relative order, returns whether the order actually changed. Array
     order already survives `serialize()`/`load()`, so persistence is free (no format bump).
-  - **Construction guidelines** (`guides: Guide[]`; since v20 `Guide` is a **union** of
-    `line` / `poly` / `circle` / `arc` / `text` — see the *Shape tools + roles* entry in
-    Current status for the generalized API; the rest of this paragraph describes the
-    original infinite-line kind, `{ id, kind: "line", a, b }`): `addGuide`
+  - **Reference geometry** (`guides: Guide[]`; since v20 `Guide` is a **union** of
+    `poly` / `circle` / `arc` / `text` — see the *Shape tools + roles* entry in
+    Current status for the generalized API; the infinite `line` kind and `addGuide` were
+    retired in v21 — `addGuidePoly([a, b], false)` makes a reference line — so the rest of
+    this paragraph is history): `addGuide`
     (rejects spans < `GUIDE_MIN_SPAN`), `removeGuide` (cascades — prunes measurements and
     sketch constraints referencing the guide), `moveGuide` (translates both points, angle
     kept), `moveGuidePoint` (re-aims; refuses collapsing onto the twin point), hit tests
@@ -1605,9 +1645,10 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
   relative direction, so an overshooting drag reads as a large error back — the pair can
   never flip through each other; absent side falls back to the current sign, the old
   behaviour).
-  The variables also include **guideline defining points** (`g:id:a` / `g:id:b`, applied
-  back via `moveGuidePoint`), and every variable carries a **mobility rank** — 0
-  construction (guide points), 1 geometry (vertices, joints), 2 drag-anchored,
+  The variables also include **reference-geometry points** (`g:id:<which>`, e.g. `g:id:0`,
+  applied back via `moveGuidePoint`) and, since v21, **regular-polygon centres**
+  (`c:body[:hole]`), and every variable carries a **mobility rank** — 0
+  construction (reference points), 1 geometry (vertices, joints, centres), 2 drag-anchored,
   3 **component-instance geometry** (immovable: its shape belongs to the definition, so
   it outranks even the drag — dragging against it yields); pattern members rank as
   geometry and ride with their seed through rigid-offset couplings — with each
@@ -1779,12 +1820,12 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
   **Component focus pass** (`highlightOccurrences`): after everything is
   drawn, a surface-coloured veil (`FOCUS_VEIL_ALPHA` 0.8) fades the picture and the hovered
   component's occurrences are redrawn on top (bodies via the `drawBodyShape` closure, a
-  dashed hull per occurrence via `drawMaterialHull`, joints via `drawJoint`). **Construction
-  guidelines** (draw mode only) draw right after the grid:
-  muted dash-dot lines (`GUIDE_COLOR` grey) clipped to the viewport via `drawGuideLine`
-  (the segment is centred on the view, so the line always spans it), with dots on the two
-  defining points; the selected guide uses theme ink; `guideDraft` previews the infinite
-  line from the first placed point to the (element-snapped) cursor. Also: joints involved in any `ConstraintBreak.joints` are painted red (fill +
+  dashed hull per occurrence via `drawMaterialHull`, joints via `drawJoint`). **Reference
+  geometry** (draw mode only) draws right after the grid: muted dash-dot (`GUIDE_COLOR`
+  grey) per kind via `drawGuide`, crosshairs on the defining points, the selected guide in
+  theme ink (`drawGuideLine` — a line extended across the view — now serves only the
+  object-snap collinear highlight); regular-polygon centres draw as small crosshairs and the
+  selected polygon's "n sides" tags as label pills (v21). Also: joints involved in any `ConstraintBreak.joints` are painted red (fill +
   stroke + slight size bump) so the stuck points stand out alongside the existing red dotted
   break lines; and joints in `containmentErrors: Set<number>` (draw mode — attached joints
   stranded outside their body's outline) are painted the same error red but with a
@@ -1904,10 +1945,10 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
     (`SHAPE_TOOLS`, `shapeRole` / `roleOverride` / `effectiveRole`, `shapePts` / `shapeSnaps`
     / `shapeTarget` / `shapePress`, `handlePolylineClick` / `handleShapeClick` /
     `commitMaterial` / `commitReference`, `shapeDraftView`, the `#text-edit` editor).
-  - **Guideline tool** (`L`, draw mode; the actuator's shortcut moved to `A`): two clicks
-    through `guidePlacementAt` — exactly on a picked point element (joint / body corner /
-    guide point; recorded and turned into an **auto-coincident** via `tryAddConstraint`),
-    projected onto a picked rail / body edge, else `snap`. Selection kind `"guide"`;
+  - **Guideline tool** — retired in v21 (plain `L` is unbound; Shift+L is the reference
+    line). `guidePlacementAt` still lands shape points exactly on a picked point element
+    (joint / body corner / guide point; recorded and turned into an **auto-coincident** via
+    `tryAddConstraint`), projected onto a picked rail / body edge, else `snap`. Selection kind `"guide"`;
     `LeftDrag` kinds `"guide"` (whole-line translate, anchor = point `a`) and
     `"guidePoint"` (endpoint re-aim with element snapping, own guide excluded from every
     pick). `snap(p, excludeGuide?)` prefers guidelines over the grid (projection; two
@@ -2170,10 +2211,10 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
     **becomes the drag anchor**, so `grabOffset` / `anchorOffset` work unchanged (a multi drag's
     `anchor` spec is `DragAnchorSpec`). Each move, `objSnapTarget` runs **before** `snap()`:
     targets (`objSnapTargets`, computed live, excluding the dragged members and joints on them)
-    are the other bodies' vertices, midpoints, centroids and edges, joints, rails and guidelines
-    (defining points + infinite line). A **point** reference lands on the nearest target point
-    within `OBJ_SNAP_PX` (12 px), else projects onto the nearest target line (segments clamped,
-    guidelines infinite); a **line** reference only considers (near-)parallel lines
+    are the other bodies' vertices, midpoints, centroids and edges, joints, rails and reference
+    geometry (points + finite edges; regular-polygon centres too, v21). A **point** reference lands on the nearest target point
+    within `OBJ_SNAP_PX` (12 px), else projects onto the nearest target line (clamped to its
+    span); a **line** reference only considers (near-)parallel lines
     (`OBJ_SNAP_PARALLEL_TOL` ≈ 2°) and translates perpendicular onto the nearest so the two become
     collinear (motion along the line stays free). Nothing in range → the usual grid/guide snap.
     The hit is recorded on the drag for the highlight; `dragSnapView()` feeds the renderer's
@@ -2229,7 +2270,7 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
 
 ### Interaction model
 Draw-mode tools are **one-shot**: arming a tool (toolbar button or shortcut —
-`B`/`U` hole/`J`/`W` weld/`C`/`G`/`K` rail/`S` slider/`L` guideline/`A` actuator/`M`) lets you
+`B`/`U` hole/`J`/`W` weld/`C`/`G`/`K` rail/`S` slider/`A` actuator/`M`; plain `L` is unbound since v21) lets you
 place one element, then it returns to **Select** mode. `Esc` aborts the current placement.
 - **Body** (`B`) — first click decides the mode. On **empty space**: freehand polygon (click
   vertices; click the first vertex / double-click / Enter to close; Esc cancels). On an
@@ -2293,12 +2334,9 @@ place one element, then it returns to **Select** mode. `Esc` aborts the current 
   to the rider (`jointAt(…, "rider")`). A world-fixed track ridden only by one body is that
   body's **own**: dragging, rotating, mirroring or copying the body carries the arrow
   (`ownedTrackJoints`); a shared or moving track stays put.
-- **Guideline** (`L`) — two clicks place an **infinite construction line**. Clicks land
-  exactly on joints / body corners / other guides' points (with an auto-coincident), project
-  onto rails / body edges, or grid/guide-snap. Select it to drag the whole line (angle kept)
-  or either defining point (re-aims); Delete removes it with its constraints/measurements.
-  With snap on, placements prefer guidelines (and guide intersections) over the grid.
-  Constraints on guides move **only free guide points**, never geometry.
+- **Guideline** (`L`) — retired in v21; use the **Line** tool (Shift+L) for a finite reference
+  segment (it snaps, measures and constrains like an edge, equal length included), and the
+  other shape tools in the Reference role for the rest of the construction geometry.
 - **Linear actuator** (`A`) — click a *slider / rail* to make it **self-driving**: the rail's
   own not-yet-driven rider nearest the click (a two-click slider's carriage — a body joint,
   so the body itself is driven) becomes the actuator's rider; a rail with none gets a new
@@ -2315,13 +2353,13 @@ place one element, then it returns to **Select** mode. `Esc` aborts the current 
   perpendicular distance to the infinite line. Line+line: distance while parallel, angle
   otherwise (dynamic; the label's sector picks θ vs 180−θ). Values update live in sim.
 - **Sketch constraints** (draw mode only): **Coincident** (`O`) — two points (joints, body
-  corners — hole corners included — guide points), **or a point + a line** (body edge,
-  slider rail, or guideline; either pick order) to hold the point on the **infinite**
-  line. **Horizontal**
-  (`H`) / **Vertical** (`V`) — one edge/rail/guideline, or two points. **Parallel** (`P`) /
-  **Perpendicular** (`T`) — two lines (edges/rails/guidelines — hole edges included);
+  corners — hole corners included — guide points, regular-polygon centres), **or a point +
+  a line** (body edge, slider rail, or reference edge; either pick order) to hold the point
+  on that line's carrier. **Horizontal**
+  (`H`) / **Vertical** (`V`) — one edge/rail/reference edge, or two points. **Parallel** (`P`) /
+  **Perpendicular** (`T`) — two lines (edges/rails/reference edges — hole edges included);
   **Equal length** (`E`) —
-  two edges/rails (guidelines rejected — no length). The geometry solves to
+  two edges/rails/reference edges. The geometry solves to
   satisfy the constraint the moment it's placed; an unsatisfiable one is rejected (conflicting
   items flash red). Badges are click-to-select, Delete to remove.
   **On component instances** constraints work like the dimensions do — components are a
@@ -2945,15 +2983,23 @@ Persistence:
   leaving the body intact, kept hole specs, merge into an overlapped hole, one- / two-point
   offset bodies (disk / slot areas), `arcThrough` / `distToArc` / `regularPolygon`, every
   reference kind (dedupe, rejections, anchored label rides + dies with its body, point /
-  handle keys, hit tests, edge refs finite, ties move the guide, equal on a segment but not
-  an infinite line), v20 round-trip of all kinds, legacy kind-less guides → lines, corrupt /
+  handle keys, hit tests, edge refs finite, ties move the guide, equal on a segment),
+  v21 round-trip of all kinds, kind-less legacy guides dropped, corrupt /
   orphaned records dropped on load.
-- **guides.ts** — construction guidelines end-to-end (57 checks): CRUD + moves (whole-line
-  translate preserves the angle; endpoint re-aim; collapse-onto-twin refused), hit tests
-  (infinite line, defining points), serialize/load v11 round-trip + pre-v11 files + id
+- **regular.ts** — regular polygons (v21): the similarity and rigid fits, creation and the
+  invariant edits (corner drag about the centre, stuck joints ride, node add / remove
+  refused, count edits keeping centre / radius / first corner and cascading refs), the
+  solver (an edge dimension resizes uniformly, a centre tie translates, H / V / parallel turn
+  — every edge of 4- / 5- / 6-gons including the 90° cases — radius kept), holes (regular
+  cut, centre ref, tie, count edit, `moveOutline`), size-dimension kinds, corner drags under a
+  driven size / locked rotation / both (the field case), travel through copy, mirror, save
+  (mismatched counts dropped), split and combine.
+- **guides.ts** — reference lines (two-point reference polylines) end-to-end: CRUD + moves
+  (translate preserves the angle; point reshape; collapse onto the neighbour refused), hit
+  tests (within the span only, defining points), serialize/load round-trip + pre-v11 files + id
   continuity + deep copy; `guidePoint`/`guideLine` refs resolving; H solved on a free
   guide; coincident guide↔joint (guide follows, joint fixed) surviving a move + re-solve;
-  `equal` with a guide rejected; parallel guide↔edge; constraint/measurement cascade on
+  `equal` on a reference segment accepted; parallel guide↔edge; constraint/measurement cascade on
   `removeGuide`; point↔guide measurement using the infinite line; **drag anchoring** (a
   rigid two-body move with a joint-bound guide leaves the bodies exactly rigid, guide
   following in full); **mobility ranks** (perpendicular between a joint-bound guide and a

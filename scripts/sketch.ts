@@ -640,17 +640,17 @@ const TOL = sketchConfig.tol;
   check("joint on the rail line", cross < TOL * 2, `dist ${cross.toExponential(2)}`);
 
   // Guideline: construction rank yields — the guide comes to the joint, the joint stays.
-  const g = s.addGuide({ x: 0, y: 100 }, { x: 100, y: 100 })!;
+  const g = s.addGuidePoly([{ x: 0, y: 100 }, { x: 100, y: 100 }], false)!;
   check("guide's own defining point rejected",
-    s.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "a" }, { kind: "guideLine", guideId: g.id }) === null);
+    s.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "0" }, { kind: "guideLine", guideId: g.id, edge: 0 }) === null);
   const fixed = s.addFreeJoint({ x: 40, y: 60 });
-  const res2 = tryAddConstraint(s, "coincident", { kind: "joint", jointId: fixed.id }, { kind: "guideLine", guideId: g.id });
+  const res2 = tryAddConstraint(s, "coincident", { kind: "joint", jointId: fixed.id }, { kind: "guideLine", guideId: g.id, edge: 0 });
   check("joint onto a guideline accepted + solved", res2.constraint !== null);
   const fw = s.jointWorld(s.getJoint(fixed.id)!);
   check("geometry outranks construction: joint unmoved", near(fw.x, 40, TOL * 2) && near(fw.y, 60, TOL * 2),
     `${fw.x}, ${fw.y}`);
   const gg = s.getGuide(g.id)!;
-  const gDist = Math.abs((gg.b.x - gg.a.x) * (fw.y - gg.a.y) - (gg.b.y - gg.a.y) * (fw.x - gg.a.x)) / Math.hypot(gg.b.x - gg.a.x, gg.b.y - gg.a.y);
+  const gDist = Math.abs((gg.pts[1].x - gg.pts[0].x) * (fw.y - gg.pts[0].y) - (gg.pts[1].y - gg.pts[0].y) * (fw.x - gg.pts[0].x)) / Math.hypot(gg.pts[1].x - gg.pts[0].x, gg.pts[1].y - gg.pts[0].y);
   check("guide moved onto the joint", gDist < TOL * 2, `dist ${gDist.toExponential(2)}`);
 }
 
@@ -660,61 +660,61 @@ const TOL = sketchConfig.tol;
   // translation reaching one point leaves the other). With 2+ ties the guide is the
   // reference: later points move perpendicular onto it, the guide + first point stay.
   const s = new Scene();
-  const g = s.addGuide({ x: 0, y: 100 }, { x: 100, y: 100 })!;
-  s.addSketchConstraint("horizontal", { kind: "guideLine", guideId: g.id });
-  const gl: MeasureRef = { kind: "guideLine", guideId: g.id };
+  const g = s.addGuidePoly([{ x: 0, y: 100 }, { x: 100, y: 100 }], false)!;
+  s.addSketchConstraint("horizontal", { kind: "guideLine", guideId: g.id, edge: 0 });
+  const gl: MeasureRef = { kind: "guideLine", guideId: g.id, edge: 0 };
   const js = [s.addFreeJoint({ x: 40, y: 60 }), s.addFreeJoint({ x: 140, y: 20 }), s.addFreeJoint({ x: 240, y: 90 })];
   const jy = (i: number) => s.jointWorld(s.getJoint(js[i].id)!).y;
   const jx = (i: number) => s.jointWorld(s.getJoint(js[i].id)!).x;
   check("1st joint onto guide", tryAddConstraint(s, "coincident", { kind: "joint", jointId: js[0].id }, gl).constraint !== null);
-  check("guide came to the 1st joint", near(s.getGuide(g.id)!.a.y, 60, TOL * 2), `${s.getGuide(g.id)!.a.y}`);
+  check("guide came to the 1st joint", near(s.getGuide(g.id)!.pts[0].y, 60, TOL * 2), `${s.getGuide(g.id)!.pts[0].y}`);
   check("2nd joint onto the same guide accepted", tryAddConstraint(s, "coincident", { kind: "joint", jointId: js[1].id }, gl).constraint !== null);
   check("3rd joint onto the same guide accepted", tryAddConstraint(s, "coincident", { kind: "joint", jointId: js[2].id }, gl).constraint !== null);
   check("guide + 1st joint held, later joints moved onto the line",
-    near(s.getGuide(g.id)!.a.y, 60, TOL * 2) && [0, 1, 2].every((i) => near(jy(i), 60, TOL * 2)), `${jy(0)} ${jy(1)} ${jy(2)}`);
+    near(s.getGuide(g.id)!.pts[0].y, 60, TOL * 2) && [0, 1, 2].every((i) => near(jy(i), 60, TOL * 2)), `${jy(0)} ${jy(1)} ${jy(2)}`);
   check("aligned joints only moved perpendicular to the guide", near(jx(0), 40) && near(jx(1), 140) && near(jx(2), 240));
   // Dragging one aligned joint carries the guide and the other aligned joints.
   s.moveJoint(js[0].id, { x: 0, y: 30 });
   check("drag an aligned joint: solves", solveSketch(s, new Set([`j:${js[0].id}`])).length === 0);
   check("guide and the other joints followed the drag",
-    near(s.getGuide(g.id)!.a.y, 90, TOL * 2) && near(jy(1), 90, TOL * 2) && near(jy(2), 90, TOL * 2), `${jy(1)} ${jy(2)}`);
+    near(s.getGuide(g.id)!.pts[0].y, 90, TOL * 2) && near(jy(1), 90, TOL * 2) && near(jy(2), 90, TOL * 2), `${jy(1)} ${jy(2)}`);
   // Dragging the guide carries every aligned joint.
   const gg = s.getGuide(g.id)!;
-  gg.a = { x: gg.a.x, y: gg.a.y + 20 };
-  gg.b = { x: gg.b.x, y: gg.b.y + 20 };
+  gg.pts[0] = { x: gg.pts[0].x, y: gg.pts[0].y + 20 };
+  gg.pts[1] = { x: gg.pts[1].x, y: gg.pts[1].y + 20 };
   check("drag the guide: solves", solveSketch(s, new Set([`g:${g.id}:a`, `g:${g.id}:b`])).length === 0);
   check("aligned joints followed the guide", [0, 1, 2].every((i) => near(jy(i), 110, TOL * 2)), `${jy(0)} ${jy(1)} ${jy(2)}`);
 
   // Mixed: a guide glued point–point to joint A plus joint B on its line — B comes to
   // the line, A and the guide stay (used to be rejected: the two ties fought).
   const t = new Scene();
-  const g2 = t.addGuide({ x: 0, y: 100 }, { x: 100, y: 100 })!;
+  const g2 = t.addGuidePoly([{ x: 0, y: 100 }, { x: 100, y: 100 }], false)!;
   const A = t.addFreeJoint({ x: 0, y: 100 });
-  t.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g2.id, which: "a" }, { kind: "joint", jointId: A.id });
+  t.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g2.id, which: "0" }, { kind: "joint", jointId: A.id });
   const B = t.addFreeJoint({ x: 150, y: 130 });
   check("glued guide + point-on-line accepted",
-    tryAddConstraint(t, "coincident", { kind: "joint", jointId: B.id }, { kind: "guideLine", guideId: g2.id }).constraint !== null);
+    tryAddConstraint(t, "coincident", { kind: "joint", jointId: B.id }, { kind: "guideLine", guideId: g2.id, edge: 0 }).constraint !== null);
   const aw = t.jointWorld(t.getJoint(A.id)!);
   const bw = t.jointWorld(t.getJoint(B.id)!);
   check("glued joint + guide held, the other joint came to the line",
-    near(aw.y, 100, TOL * 2) && near(t.getGuide(g2.id)!.a.y, 100, TOL * 2) && near(bw.y, 100, TOL * 2) && near(bw.x, 150, TOL * 2),
+    near(aw.y, 100, TOL * 2) && near(t.getGuide(g2.id)!.pts[0].y, 100, TOL * 2) && near(bw.y, 100, TOL * 2) && near(bw.x, 150, TOL * 2),
     `A ${aw.y}, B ${bw.x},${bw.y}`);
 }
 
 // --- guides tied to geometry: dimensions to them move the geometry ------------------
 {
   const rect = (s: Scene) => s.addBody([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 50 }, { x: 0, y: 50 }], 0);
-  const gl = (id: number): MeasureRef => ({ kind: "guideLine", guideId: id });
+  const gl = (id: number): MeasureRef => ({ kind: "guideLine", guideId: id, edge: 0 });
   const vx = (b: number, i: number): MeasureRef => ({ kind: "vertex", bodyId: b, index: i });
 
   // A free guide still yields: the dimension moves the guide, the body stays.
   {
     const s = new Scene();
     const b = rect(s);
-    const g = s.addGuide({ x: 200, y: -100 }, { x: 200, y: 200 })!;
+    const g = s.addGuidePoly([{ x: 200, y: -100 }, { x: 200, y: 200 }], false)!;
     const m = s.addMeasurement("draw", vx(b.id, 1), gl(g.id), { x: 150, y: 25 })!;
     check("free guide: dimension drives", applyDrivingDimension(s, m.id, 120).length === 0);
-    check("free guide: the guide moved", near(s.getGuide(g.id)!.a.x, 220, TOL * 2), `${s.getGuide(g.id)!.a.x}`);
+    check("free guide: the guide moved", near(s.getGuide(g.id)!.pts[0].x, 220, TOL * 2), `${s.getGuide(g.id)!.pts[0].x}`);
     check("free guide: body unmoved", near(s.bodyControlWorld(b)[1].x, 100, TOL * 2));
   }
   // A guide coincident with one corner is a fixed reference: dimensioning another
@@ -722,11 +722,11 @@ const TOL = sketchConfig.tol;
   {
     const s = new Scene();
     const b = rect(s);
-    const g = s.addGuide({ x: 0, y: -100 }, { x: 0, y: 200 })!;
+    const g = s.addGuidePoly([{ x: 0, y: -100 }, { x: 0, y: 200 }], false)!;
     check("tie placed", tryAddConstraint(s, "coincident", vx(b.id, 0), gl(g.id)).constraint !== null);
     const m = s.addMeasurement("draw", vx(b.id, 1), gl(g.id), { x: 50, y: -25 })!;
     check("tied guide: dimension drives", applyDrivingDimension(s, m.id, 120).length === 0);
-    check("tied guide: guide stayed put", near(s.getGuide(g.id)!.a.x, 0, TOL * 2) && near(s.getGuide(g.id)!.b.x, 0, TOL * 2));
+    check("tied guide: guide stayed put", near(s.getGuide(g.id)!.pts[0].x, 0, TOL * 2) && near(s.getGuide(g.id)!.pts[1].x, 0, TOL * 2));
     const v = s.bodyControlWorld(b);
     check("tied guide: the dimensioned corner moved", near(v[1].x, 120, TOL * 2), `${v[1].x}`);
     check("tied guide: the tied corner stayed", near(v[0].x, 0, TOL * 2) && near(v[0].y, 0, TOL * 2));
@@ -737,10 +737,10 @@ const TOL = sketchConfig.tol;
   {
     const s = new Scene();
     const b = rect(s);
-    const g = s.addGuide({ x: 30, y: -100 }, { x: 30, y: 200 })!;
+    const g = s.addGuidePoly([{ x: 30, y: -100 }, { x: 30, y: 200 }], false)!;
     check("placing a tie", tryAddConstraint(s, "coincident", vx(b.id, 0), gl(g.id)).constraint !== null);
     check("placing a tie moves the guide, not the body",
-      near(s.getGuide(g.id)!.a.x, 0, TOL * 2) && near(s.bodyControlWorld(b)[0].x, 0, TOL * 2));
+      near(s.getGuide(g.id)!.pts[0].x, 0, TOL * 2) && near(s.bodyControlWorld(b)[0].x, 0, TOL * 2));
   }
   // A guide through two grounded joints: the body corner comes to the dimension.
   {
@@ -750,25 +750,25 @@ const TOL = sketchConfig.tol;
     const j2 = s.addFreeJoint({ x: 200, y: 100 });
     s.addGround(j1.id);
     s.addGround(j2.id);
-    const g = s.addGuide({ x: 200, y: 0 }, { x: 200, y: 100 })!;
-    tryAddConstraint(s, "coincident", { kind: "joint", jointId: j1.id }, { kind: "guidePoint", guideId: g.id, which: "a" });
-    tryAddConstraint(s, "coincident", { kind: "joint", jointId: j2.id }, { kind: "guidePoint", guideId: g.id, which: "b" });
+    const g = s.addGuidePoly([{ x: 200, y: 0 }, { x: 200, y: 100 }], false)!;
+    tryAddConstraint(s, "coincident", { kind: "joint", jointId: j1.id }, { kind: "guidePoint", guideId: g.id, which: "0" });
+    tryAddConstraint(s, "coincident", { kind: "joint", jointId: j2.id }, { kind: "guidePoint", guideId: g.id, which: "1" });
     const m = s.addMeasurement("draw", vx(b.id, 1), gl(g.id), { x: 150, y: 25 })!;
     check("guide on grounded joints: dimension drives", applyDrivingDimension(s, m.id, 80).length === 0);
-    check("guide on grounded joints: guide unmoved", near(s.getGuide(g.id)!.a.x, 200, TOL * 2));
+    check("guide on grounded joints: guide unmoved", near(s.getGuide(g.id)!.pts[0].x, 200, TOL * 2));
     check("guide on grounded joints: corner moved", near(s.bodyControlWorld(b)[1].x, 120, TOL * 2), `${s.bodyControlWorld(b)[1].x}`);
   }
   // Chain: a guide tied to a tied guide counts as tied too.
   {
     const s = new Scene();
     const b = rect(s);
-    const g1 = s.addGuide({ x: 0, y: -100 }, { x: 0, y: 200 })!;
-    const g2 = s.addGuide({ x: 0, y: 300 }, { x: 100, y: 300 })!;
+    const g1 = s.addGuidePoly([{ x: 0, y: -100 }, { x: 0, y: 200 }], false)!;
+    const g2 = s.addGuidePoly([{ x: 0, y: 300 }, { x: 100, y: 300 }], false)!;
     tryAddConstraint(s, "coincident", vx(b.id, 0), gl(g1.id));
-    tryAddConstraint(s, "coincident", { kind: "guidePoint", guideId: g2.id, which: "a" }, gl(g1.id));
+    tryAddConstraint(s, "coincident", { kind: "guidePoint", guideId: g2.id, which: "0" }, gl(g1.id));
     const m = s.addMeasurement("draw", vx(b.id, 3), gl(g2.id), { x: -20, y: 150 })!;
     check("chained tie: dimension drives", applyDrivingDimension(s, m.id, 200).length === 0);
-    check("chained tie: guides unmoved", near(s.getGuide(g2.id)!.a.y, 300, TOL * 2) && near(s.getGuide(g1.id)!.a.x, 0, TOL * 2));
+    check("chained tie: guides unmoved", near(s.getGuide(g2.id)!.pts[0].y, 300, TOL * 2) && near(s.getGuide(g1.id)!.pts[0].x, 0, TOL * 2));
     check("chained tie: corner moved", near(s.bodyControlWorld(b)[3].y, 100, TOL * 2), `${s.bodyControlWorld(b)[3].y}`);
   }
 }
@@ -782,23 +782,23 @@ const TOL = sketchConfig.tol;
   const s = new Scene();
   const A = s.addBody([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }], 0);
   const B = s.addBody([{ x: 200, y: 0 }, { x: 300, y: 0 }, { x: 300, y: 100 }, { x: 200, y: 100 }], 0);
-  const g = s.addGuide({ x: -50, y: 150 }, { x: 350, y: 150 })!;
-  const gl: MeasureRef = { kind: "guideLine", guideId: g.id };
+  const g = s.addGuidePoly([{ x: -50, y: 150 }, { x: 350, y: 150 }], false)!;
+  const gl: MeasureRef = { kind: "guideLine", guideId: g.id, edge: 0 };
   const m1 = s.addMeasurement("draw", { kind: "edge", bodyId: A.id, index: 2 }, gl, { x: 50, y: 125 })!;
   check("first edge–guide dimension drives", applyDrivingDimension(s, m1.id, 30).length === 0);
-  check("single demand: the guide moved", near(s.getGuide(g.id)!.a.y, 130, TOL * 2), `${s.getGuide(g.id)!.a.y}`);
+  check("single demand: the guide moved", near(s.getGuide(g.id)!.pts[0].y, 130, TOL * 2), `${s.getGuide(g.id)!.pts[0].y}`);
   const m2 = s.addMeasurement("draw", { kind: "edge", bodyId: B.id, index: 2 }, gl, { x: 250, y: 125 })!;
   check("second dimension to the same guide drives", applyDrivingDimension(s, m2.id, 50).length === 0);
   check("guide stayed, second body moved",
-    near(s.getGuide(g.id)!.a.y, 130, TOL * 2) && near(s.bodyControlWorld(B)[2].y, 80, TOL * 2),
-    `guide ${s.getGuide(g.id)!.a.y}, B top ${s.bodyControlWorld(B)[2].y}`);
+    near(s.getGuide(g.id)!.pts[0].y, 130, TOL * 2) && near(s.bodyControlWorld(B)[2].y, 80, TOL * 2),
+    `guide ${s.getGuide(g.id)!.pts[0].y}, B top ${s.bodyControlWorld(B)[2].y}`);
   check("first dimension still holds", near(s.measureInfo(m1)!.value, 30, TOL * 2));
   // Dragging A pulls the guide (its dimension), which pulls B (the other one).
   s.moveBody(A.id, { x: 0, y: 10 });
   check("drag re-solve holds", solveSketch(s, new Set(anchorVarsForBody(s, A.id))).length === 0);
   check("drag chains through the guide",
-    near(s.getGuide(g.id)!.a.y, 140, TOL * 2) && near(s.bodyControlWorld(B)[2].y, 90, TOL * 2),
-    `guide ${s.getGuide(g.id)!.a.y}, B top ${s.bodyControlWorld(B)[2].y}`);
+    near(s.getGuide(g.id)!.pts[0].y, 140, TOL * 2) && near(s.bodyControlWorld(B)[2].y, 90, TOL * 2),
+    `guide ${s.getGuide(g.id)!.pts[0].y}, B top ${s.bodyControlWorld(B)[2].y}`);
 }
 
 // --- holes + joints ride along when a dimension moves a body ------------------
@@ -851,10 +851,10 @@ const TOL = sketchConfig.tol;
   // the body squashes; its hole used to keep the full cursor rise — now it stays centred.
   const u = new Scene();
   const R = u.addBody(sq(0, 0, 100), 0, "fillet", [{ control: [{ x: 50, y: 50 }], radius: 20, round: "offset" }]);
-  const g = u.addGuide({ x: -100, y: 150 }, { x: 300, y: 150 })!;
+  const g = u.addGuidePoly([{ x: -100, y: 150 }, { x: 300, y: 150 }], false)!;
   const fj = u.addFreeJoint({ x: -100, y: 150 });
-  u.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "a" }, { kind: "joint", jointId: fj.id });
-  const gd = u.addMeasurement("draw", { kind: "edge", bodyId: R.id, index: 2 }, { kind: "guideLine", guideId: g.id }, { x: 50, y: 125 })!;
+  u.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "0" }, { kind: "joint", jointId: fj.id });
+  const gd = u.addMeasurement("draw", { kind: "edge", bodyId: R.id, index: 2 }, { kind: "guideLine", guideId: g.id, edge: 0 }, { x: 50, y: 125 })!;
   check("edge–locked-guide dimension drives", applyDrivingDimension(u, gd.id, 50).length === 0);
   for (let f = 0; f < 5; f++) {
     u.moveBody(R.id, { x: 10, y: 7 });
@@ -863,7 +863,7 @@ const TOL = sketchConfig.tol;
   solveSketch(u);
   const rv = u.bodyControlWorld(R);
   const rh = u.bodyHoleControlWorld(R, 0)[0];
-  check("guide held, top edge held", near(u.getGuide(g.id)!.a.y, 150, TOL * 2) && near(rv[2].y, 100, TOL * 2), `${rv[2].y}`);
+  check("guide held, top edge held", near(u.getGuide(g.id)!.pts[0].y, 150, TOL * 2) && near(rv[2].y, 100, TOL * 2), `${rv[2].y}`);
   check("hole followed horizontally", near(rh.x, 100, TOL * 2), `${rh.x}`);
   check("hole stays centred in the squashed body", near(rh.y, (rv[0].y + rv[3].y) / 2, TOL * 2), `hole ${rh.y}, outline ${rv[0].y}..${rv[3].y}`);
 
@@ -882,11 +882,11 @@ const TOL = sketchConfig.tol;
   const vS = (i: number): MeasureRef => ({ kind: "vertex", bodyId: S.id, index: i });
   applyDrivingDimension(r, r.addMeasurement("draw", vS(0), vS(1), { x: 50, y: -20 })!.id, 100);
   applyDrivingDimension(r, r.addMeasurement("draw", vS(1), vS(2), { x: 120, y: 50 })!.id, 100);
-  const g2 = r.addGuide({ x: -100, y: 150 }, { x: 300, y: 150 })!;
+  const g2 = r.addGuidePoly([{ x: -100, y: 150 }, { x: 300, y: 150 }], false)!;
   const fj2 = r.addFreeJoint({ x: -100, y: 150 });
-  r.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g2.id, which: "a" }, { kind: "joint", jointId: fj2.id });
+  r.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g2.id, which: "0" }, { kind: "joint", jointId: fj2.id });
   check("rigid body–guide dimension drives",
-    applyDrivingDimension(r, r.addMeasurement("draw", { kind: "edge", bodyId: S.id, index: 2 }, { kind: "guideLine", guideId: g2.id }, { x: 50, y: 125 })!.id, 50).length === 0);
+    applyDrivingDimension(r, r.addMeasurement("draw", { kind: "edge", bodyId: S.id, index: 2 }, { kind: "guideLine", guideId: g2.id, edge: 0 }, { x: 50, y: 125 })!.id, 50).length === 0);
   const sj = r.addJoint(S.id, { x: 80, y: 30 });
   const hc0: MeasureRef = { kind: "vertex", bodyId: S.id, index: 0, hole: 0 };
   const hc1: MeasureRef = { kind: "vertex", bodyId: S.id, index: 0, hole: 1 };
@@ -927,13 +927,13 @@ const TOL = sketchConfig.tol;
     applyDrivingDimension(s, s.addMeasurement("draw", v(1), v(2), { x: x + 120, y: y + 50 })!.id, 100);
     return b;
   };
-  const g = s.addGuide({ x: -100, y: -50 }, { x: 300, y: -50 })!;
+  const g = s.addGuidePoly([{ x: -100, y: -50 }, { x: 300, y: -50 }], false)!;
   const fj = s.addFreeJoint({ x: -100, y: -50 });
-  s.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "a" }, { kind: "joint", jointId: fj.id });
+  s.addSketchConstraint("coincident", { kind: "guidePoint", guideId: g.id, which: "0" }, { kind: "joint", jointId: fj.id });
   const A = rigid(0, 0);
   const B = rigid(0, 200);
   check("guide–A edge dimension drives",
-    applyDrivingDimension(s, s.addMeasurement("draw", { kind: "edge", bodyId: A.id, index: 0 }, { kind: "guideLine", guideId: g.id }, { x: 50, y: -25 })!.id, 50).length === 0);
+    applyDrivingDimension(s, s.addMeasurement("draw", { kind: "edge", bodyId: A.id, index: 0 }, { kind: "guideLine", guideId: g.id, edge: 0 }, { x: 50, y: -25 })!.id, 50).length === 0);
   check("A–B edge–edge dimension drives",
     applyDrivingDimension(s, s.addMeasurement("draw", { kind: "edge", bodyId: A.id, index: 2 }, { kind: "edge", bodyId: B.id, index: 0 }, { x: 150, y: 150 })!.id, 100).length === 0);
   for (let f = 0; f < 10; f++) {

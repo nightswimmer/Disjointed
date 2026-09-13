@@ -40,6 +40,8 @@ export interface RenderInput {
     text: { p: Vec2; size: number; text: string } | null;
     /** The body a Cut will subtract from, once known. */
     target: number | null;
+    /** Extra text beside the role badge (the regular polygon's side count). */
+    hint: string | null;
   } | null;
   /**
    * Pattern tool: the seed hole's outline (or, with no seed yet, the hole under the
@@ -121,6 +123,10 @@ export interface RenderInput {
   flash: Set<number> | null;
   /** Control-vertex handles to draw for the selected body (draggable to reshape it). */
   editVertices: Vec2[] | null;
+  /** Centres of regular-polygon outlines (draw mode): crosshair markers, pickable as point references. */
+  regularCentres: Vec2[];
+  /** Side-count tags of the selected body's regular outlines (draw mode; double-click edits). */
+  regularTags: { at: Vec2; text: string }[];
   /** Per-corner radius handles for the selected body (circle = drag to round that corner). */
   filletHandles: Vec2[] | null;
   /**
@@ -128,8 +134,6 @@ export interface RenderInput {
    * (1 → previewing toward the cursor; 2 → rail set, awaiting the riding joint).
    */
   railDraft: { rail: Vec2[]; cursor: Vec2 } | null;
-  /** Guide tool: the first defining point placed (line previews toward the cursor). */
-  guideDraft: { a: Vec2; cursor: Vec2 } | null;
   /**
    * While building a body from joints: `outline` are the picked joints; `preview` is
    * the expanded body boundary once the user is sizing its margin (else null).
@@ -318,19 +322,14 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
 
   if (input.gridVisible) drawGrid(ctx, left, top, right, bottom, px(1), input.gridStep, theme.grid);
 
-  // Construction geometry (draw mode only): infinite guidelines, reference polylines /
-  // circles / arcs and text labels, dash-dot under the geometry, with crosshair handles on
-  // their defining points (drag one to reshape; a circle's rim handle shows when selected).
+  // Reference geometry (draw mode only): polylines / circles / arcs and text labels,
+  // dash-dot under the geometry, with crosshair handles on their defining points (drag
+  // one to reshape; a circle's rim handle shows when selected).
   if (input.mode === "draw") {
     const selectedGuide = input.selection?.kind === "guide" ? input.selection.id : null;
     for (const g of scene.guides) {
       const sel = g.id === selectedGuide;
-      drawGuide(ctx, scene, g, left, top, right, bottom, px, sel ? theme.ink : GUIDE_COLOR, sel);
-    }
-    if (input.guideDraft) {
-      const { a, cursor } = input.guideDraft;
-      drawGuideLine(ctx, a, cursor, left, top, right, bottom, px, GUIDE_COLOR, false);
-      crosshair(ctx, a, px, theme.ink, false);
+      drawGuide(ctx, scene, g, px, sel ? theme.ink : GUIDE_COLOR, sel);
     }
   }
 
@@ -797,6 +796,14 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   }
 
   // Control-vertex handles for the selected body (square = draggable corner).
+  // Regular-polygon centres: a small crosshair (the centre is a point reference).
+  if (input.regularCentres.length) {
+    ctx.save();
+    ctx.globalAlpha = 0.7;
+    for (const c of input.regularCentres) crosshair(ctx, c, px, theme.ink, false);
+    ctx.restore();
+  }
+
   if (input.editVertices) {
     const h = px(5);
     ctx.lineWidth = px(2);
@@ -824,6 +831,9 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       ctx.stroke();
     }
   }
+
+  // Side-count tags of the selected regular polygons (double-click to edit, ↑ / ↓ to step).
+  for (const t of input.regularTags) drawLabelPill(ctx, t.text, t.at, view, dpr, theme, theme.ink, false);
 
   // Per-corner radius handles (circle = drag along the corner's bisector to round it).
   // Inverted colours vs the vertex squares so the two handle kinds read apart.
@@ -868,7 +878,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   // with a dotted line so the relationship reads at a glance.
   for (const g of input.sketchGlyphs) {
     if (!g.hover) continue;
-    for (const r of g.hover.refs) drawMeasureRefHighlight(ctx, r, px, false, viewRect, SKETCH_COLOR);
+    for (const r of g.hover.refs) drawMeasureRefHighlight(ctx, r, px, false, SKETCH_COLOR);
     if (g.hover.link) {
       const [from, to] = g.hover.link;
       ctx.save();
@@ -884,8 +894,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   }
   if (input.sketchDraft) {
     const { refs, hover } = input.sketchDraft;
-    if (hover) drawMeasureRefHighlight(ctx, hover, px, true, viewRect, SKETCH_COLOR);
-    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false, viewRect, SKETCH_COLOR);
+    if (hover) drawMeasureRefHighlight(ctx, hover, px, true, SKETCH_COLOR);
+    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false, SKETCH_COLOR);
   }
   // Object snap: the target it snapped onto (dashed, a line target extended when it acts
   // as an infinite line), then the dragged reference itself on top.
@@ -895,17 +905,17 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       if (hit.kind === "line" && hitInfinite) {
         drawGuideLine(ctx, hit.a, hit.b, left, top, right, bottom, px, OSNAP_COLOR, false);
       }
-      drawMeasureRefHighlight(ctx, hit, px, true, viewRect, OSNAP_COLOR);
+      drawMeasureRefHighlight(ctx, hit, px, true, OSNAP_COLOR);
     }
-    drawMeasureRefHighlight(ctx, ref, px, false, viewRect, OSNAP_COLOR);
+    drawMeasureRefHighlight(ctx, ref, px, false, OSNAP_COLOR);
   }
   // Implicit constraints: the armed alignment candidate and the dragged reference in the
   // sketch violet, then the previewed alignment — a dotted line carrying the badge of the
   // constraint a release would create.
   if (input.dragAlign) {
     const { ref, cand, match } = input.dragAlign;
-    drawMeasureRefHighlight(ctx, cand, px, false, viewRect, SKETCH_COLOR);
-    drawMeasureRefHighlight(ctx, ref, px, false, viewRect, SKETCH_COLOR);
+    drawMeasureRefHighlight(ctx, cand, px, false, SKETCH_COLOR);
+    drawMeasureRefHighlight(ctx, ref, px, false, SKETCH_COLOR);
     if (match) {
       const span = dist(match.from, match.to);
       if (span > px(1)) {
@@ -942,8 +952,8 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
 
   if (input.measureDraft) {
     const { refs, hover, preview } = input.measureDraft;
-    if (hover) drawMeasureRefHighlight(ctx, hover, px, true, viewRect);
-    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false, viewRect);
+    if (hover) drawMeasureRefHighlight(ctx, hover, px, true);
+    for (const r of refs) drawMeasureRefHighlight(ctx, r, px, false);
     if (preview) drawMeasurement(ctx, preview, view, dpr, theme, false, true, false, false, input.scene.unit);
   }
 
@@ -974,7 +984,7 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
   // Shape tools: the active role rides beside the cursor (screen space), so the mode
   // the next shape will take is visible right where the eye is.
   if (input.shapeDraft && input.cursor && input.mode === "draw") {
-    drawRoleBadge(ctx, worldToScreen(view, input.cursor), input.shapeDraft.role, dpr, theme);
+    drawRoleBadge(ctx, worldToScreen(view, input.cursor), input.shapeDraft.role, dpr, theme, input.shapeDraft.hint);
   }
 
   // View-rotation dial: drawn last, in screen space, over everything.
@@ -992,11 +1002,12 @@ function drawRoleBadge(
   at: Vec2,
   role: "body" | "cut" | "reference",
   dpr: number,
-  theme: Theme
+  theme: Theme,
+  hint: string | null = null
 ): void {
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const label = ROLE_LABEL[role];
+  const label = hint ? `${ROLE_LABEL[role]} · ${hint}` : ROLE_LABEL[role];
   ctx.font = "600 11px system-ui, sans-serif";
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
@@ -1095,10 +1106,6 @@ function drawGuide(
   ctx: CanvasRenderingContext2D,
   scene: Scene,
   g: Guide,
-  left: number,
-  top: number,
-  right: number,
-  bottom: number,
   px: (n: number) => number,
   color: string,
   selected: boolean
@@ -1109,11 +1116,6 @@ function drawGuide(
     ctx.setLineDash([px(12), px(5), px(3), px(5)]);
   };
   switch (g.kind) {
-    case "line":
-      drawGuideLine(ctx, g.a, g.b, left, top, right, bottom, px, color, selected);
-      crosshair(ctx, g.a, px, color, selected);
-      crosshair(ctx, g.b, px, color, selected);
-      return;
     case "poly":
       dash();
       ctx.beginPath();
@@ -1473,7 +1475,7 @@ function drawLabelPill(
 const MEASURE_COLOR = "#46c2cb";
 /** Temporary context dimensions (definition ↔ enclosing-assembly ghost): a muted measure tint. */
 const TEMP_MEASURE_COLOR = "#7fa6a9";
-/** Construction guidelines: muted, CAD-centre-line grey (reads on both themes). */
+/** Reference geometry: muted, CAD-centre-line grey (reads on both themes). */
 const GUIDE_COLOR = "#9aa0ac";
 /** Accent colour for sketch constraints (violet, distinct from every other accent). */
 const SKETCH_COLOR = "#b48cff";
@@ -1563,37 +1565,9 @@ function drawMeasureRefHighlight(
   ref: MeasureHighlight,
   px: (n: number) => number,
   isHover: boolean,
-  viewRect: { left: number; top: number; right: number; bottom: number },
   color: string = MEASURE_COLOR
 ): void {
   ctx.strokeStyle = color;
-  if (ref.kind === "line" && ref.infinite) {
-    // A guide is an infinite construction line: highlight it right across the view,
-    // and ring its two defining points so they stay easy to find along it.
-    const d = normalize(sub(ref.b, ref.a));
-    if (d.x !== 0 || d.y !== 0) {
-      const { left, top, right, bottom } = viewRect;
-      const tc = ((left + right) / 2 - ref.a.x) * d.x + ((bottom + top) / 2 - ref.a.y) * d.y;
-      const half = Math.hypot(right - left, bottom - top);
-      ctx.save();
-      ctx.globalAlpha = isHover ? 0.4 : 0.7;
-      ctx.lineWidth = px(5);
-      ctx.beginPath();
-      ctx.moveTo(ref.a.x + d.x * (tc - half), ref.a.y + d.y * (tc - half));
-      ctx.lineTo(ref.a.x + d.x * (tc + half), ref.a.y + d.y * (tc + half));
-      ctx.stroke();
-      ctx.restore();
-    }
-    ctx.lineWidth = px(2);
-    if (isHover) ctx.setLineDash([px(3), px(3)]);
-    for (const p of [ref.a, ref.b]) {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, px(7), 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-    return;
-  }
   if (ref.kind === "circle" || ref.kind === "arc") {
     ctx.save();
     ctx.globalAlpha = isHover ? 0.4 : 0.7;
@@ -1732,9 +1706,10 @@ function drawMeasurement(
 }
 
 /**
- * Draw the **infinite** line through `a`–`b`, clipped to the visible world rect, as a
- * dash-dot construction line. The segment drawn is centred on the viewport (projection
- * of the view centre onto the line ± the viewport diagonal), so it always spans the view.
+ * Draw the line through `a`–`b` extended right across the visible world rect, as a
+ * dash-dot construction line (the object-snap collinear highlight). The segment drawn is
+ * centred on the viewport (projection of the view centre onto the line ± the viewport
+ * diagonal), so it always spans the view.
  */
 function drawGuideLine(
   ctx: CanvasRenderingContext2D,
@@ -1787,7 +1762,7 @@ function drawGrid(
 }
 
 /**
- * Construction-point marker for guideline base points: a thin "+" with a small open ring
+ * Construction-point marker for reference-geometry points: a thin "+" with a small open ring
  * at the centre. Reads as a reference point (CAD convention) rather than a joint, whose
  * marker is a filled disk. Slightly larger and heavier when its guide is selected.
  */
