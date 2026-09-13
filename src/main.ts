@@ -4603,7 +4603,31 @@ function measureRefAt(p: Vec2): MeasureRef | null {
   return null;
 }
 
-/** Measure tool click: two reference picks, then a third click places the value label. */
+/**
+ * The endpoint pair a single line pick (body / hole edge, reference-line segment, rail)
+ * stands for, or null: no pick yet, two picks, a point, a ghost feature, a pattern axis.
+ */
+function pickedLineEnds(): [MeasureRef, MeasureRef] | null {
+  const first = measurePicks.length === 1 ? measurePicks[0] : undefined;
+  return first && first.kind !== "ghost" ? scene.lineEndRefs(first) : null;
+}
+
+/**
+ * With a single line picked, the reference a click / hover at `p` would take as the second
+ * one — or null when it would place the line's own length dimension instead. A bare body
+ * interior doesn't count here (it would swallow every label placed over a plate): to
+ * dimension a line against an arbitrary body point, pick the point first.
+ */
+function measureSecondRefAt(p: Vec2): TempRef | null {
+  const ref: TempRef | null = measureRefAt(p) ?? ghostRefAt(p);
+  return ref && ref.kind === "bodyPoint" ? null : ref;
+}
+
+/**
+ * Measure tool click: two reference picks, then a third click places the value label.
+ * A single pick on a line followed by a click on nothing places the line's own length
+ * (a dimension between its ends) — see `pickedLineEnds`.
+ */
 function handleMeasureClick(p: Vec2): void {
   if (measurePicks.length < 2) {
     // First pick on a disk rim: a diameter dimension — both refs are the disk's centre
@@ -4624,13 +4648,24 @@ function handleMeasureClick(p: Vec2): void {
     }
     // Live geometry first; with nothing there, a feature of the context ghost (a
     // temporary dimension onto the surroundings — see addTempDim).
-    const ref: TempRef | null = measureRefAt(p) ?? ghostRefAt(p);
-    if (!ref) return; // empty space — keep waiting for a reference
+    const ends = pickedLineEnds();
+    const ref: TempRef | null = ends ? measureSecondRefAt(p) : measureRefAt(p) ?? ghostRefAt(p);
+    if (!ref) {
+      // Nothing under the click after a single line pick: the line's own length, the
+      // label where the click landed. After a point pick, keep waiting for a reference.
+      if (ends) placeMeasurement(ends[0], ends[1], p);
+      return;
+    }
     if (measurePicks.length === 1 && sameTempRef(measurePicks[0], ref)) return;
     measurePicks.push(ref);
     return;
   }
   const [pa, pb] = measurePicks;
+  placeMeasurement(pa, pb, p);
+}
+
+/** Finish the measure tool: a dimension between `pa` and `pb` with its label at `p`. */
+function placeMeasurement(pa: TempRef, pb: TempRef, p: Vec2): void {
   if (pa.kind === "ghost" || pb.kind === "ghost") {
     const td = addTempDim(pa, pb, p);
     disarmTool();
@@ -7843,7 +7878,9 @@ function measureDraftView(): {
     if (measurePicks.length < 2) {
       const rim = measurePicks.length === 0 ? diskRimAt(cursor) : null;
       const arc = measurePicks.length === 0 && !rim ? cornerArcAt(cursor) : null;
-      const h: TempRef | null = rim || arc ? null : measureRefAt(cursor) ?? ghostRefAt(cursor);
+      const ends = pickedLineEnds();
+      const h: TempRef | null =
+        rim || arc ? null : ends ? measureSecondRefAt(cursor) : measureRefAt(cursor) ?? ghostRefAt(cursor);
       hover = rim
         ? { kind: "circle", c: rim.c, r: rim.r }
         : arc
@@ -7851,6 +7888,9 @@ function measureDraftView(): {
           : h
             ? resolveTemp(h)
             : null;
+      // One line picked and nothing under the cursor: the line's own length, previewed
+      // the way a click would place it.
+      if (ends && !h) preview = scene.measurePreview(ends[0], ends[1], cursor);
     } else if (measurePicks[0].kind === "ghost" || measurePicks[1].kind === "ghost") {
       preview = tempDimPreview(measurePicks[0], measurePicks[1], cursor);
     } else {

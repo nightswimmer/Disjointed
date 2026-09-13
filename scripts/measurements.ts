@@ -438,6 +438,58 @@ const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) < eps;
   check("vertex removal drops its radius dimension", s.getMeasurement(hm.id) === undefined);
 }
 
+// --- single line pick → its endpoint pair ------------------------------------------
+{
+  const s = new Scene();
+  const sq = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 60 }, { x: 0, y: 60 }];
+  const b = s.addBody(sq, 0, "fillet", [
+    { control: [{ x: 20, y: 20 }, { x: 40, y: 20 }, { x: 40, y: 40 }], radius: 0 },
+  ]);
+  const same = (a: MeasureRef, b: MeasureRef) => JSON.stringify(a) === JSON.stringify(b);
+
+  const e3 = s.lineEndRefs({ kind: "edge", bodyId: b.id, index: 3 })!;
+  check(
+    "edge ends: last outer edge wraps to vertex 0",
+    e3 !== null && same(e3[0], { kind: "vertex", bodyId: b.id, index: 3 }) && same(e3[1], { kind: "vertex", bodyId: b.id, index: 0 })
+  );
+  const h2 = s.lineEndRefs({ kind: "edge", bodyId: b.id, index: 2, hole: 0 })!;
+  check(
+    "edge ends: hole edge keeps the hole and wraps within it",
+    h2 !== null &&
+      same(h2[0], { kind: "vertex", bodyId: b.id, index: 2, hole: 0 }) &&
+      same(h2[1], { kind: "vertex", bodyId: b.id, index: 0, hole: 0 })
+  );
+  check("edge ends: out-of-range edge → null", s.lineEndRefs({ kind: "edge", bodyId: b.id, index: 4 }) === null);
+  check("point ref → null", s.lineEndRefs({ kind: "vertex", bodyId: b.id, index: 0 }) === null);
+
+  // The single-pick dimension is the plain point-point one: the edge's length, axis from placement.
+  const m = s.addMeasurement("draw", e3[0], e3[1], { x: -30, y: 30 })!;
+  check("edge length dimension = edge length (v beside a vertical edge)", m.axis === "v" && near(s.measureInfo(m)!.value, 60));
+
+  const g = s.addGuidePoly([{ x: 200, y: 0 }, { x: 260, y: 0 }, { x: 260, y: 80 }], true)!;
+  const g2 = s.lineEndRefs({ kind: "guideLine", guideId: g.id, edge: 2 })!;
+  check(
+    "reference polyline ends: closing edge wraps to point 0",
+    g2 !== null &&
+      same(g2[0], { kind: "guidePoint", guideId: g.id, which: "2" }) &&
+      same(g2[1], { kind: "guidePoint", guideId: g.id, which: "0" })
+  );
+  const open = s.addGuidePoly([{ x: 300, y: 0 }, { x: 340, y: 0 }], false)!;
+  check("open polyline: no closing edge", s.lineEndRefs({ kind: "guideLine", guideId: open.id, edge: 1 }) === null);
+  const gm = s.addMeasurement("draw", g2[0], g2[1], { x: 230, y: 40 })!;
+  check("reference segment length from its ends", near(s.measureInfo(gm)!.value, 100));
+
+  const ra = s.addFreeJoint({ x: 400, y: 0 });
+  const rb = s.addFreeJoint({ x: 430, y: 40 });
+  const rail = s.addSlider(ra.id, rb.id)!;
+  const rr = s.lineEndRefs({ kind: "rail", sliderId: rail.id })!;
+  check(
+    "rail ends: its two joints",
+    rr !== null && same(rr[0], { kind: "joint", jointId: ra.id }) && same(rr[1], { kind: "joint", jointId: rb.id })
+  );
+  check("missing rail → null", s.lineEndRefs({ kind: "rail", sliderId: 9999 }) === null);
+}
+
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);
   process.exit(1);

@@ -45,6 +45,23 @@ reload; the title shows `• name` while modified), with a timestamped download 
 fallback elsewhere; **auto-backup** (clock button) writes `<name>-backup-<time>.json` into a
 user-chosen folder N minutes after the first change since the last backup / save, pruning to
 the last K, with a change-armed countdown shown in its panel.
+**Single-click line dimensions (no format change, 2026-09-13).** The Measure tool no longer
+needs both ends of a line: a **single pick on a line** (body / hole edge, reference-line
+segment, rail) followed by a **click on nothing** places the line's own length — an ordinary
+point–point dimension between the line's two ends (`Scene.lineEndRefs(ref)`: the edge's
+corners with wrap-around, a reference polyline edge's two points, the rail's joints; null for
+a pattern axis, whose ends are derived). Because it is the same record two clicks on the ends
+would make, the label-placement rule (h / v / direct), driving, `equal` and the
+regular-polygon size rule all apply unchanged. While one line is picked, the draft view
+previews that dimension at the cursor whenever nothing is under it (`measureDraftView`), a
+hovered reference is highlighted as before, and clicking a reference still makes the usual
+line-to-point / line-to-line dimension. **Option A for body interiors**: with a line as the
+first pick, a bare body interior is *not* a reference for the second click (it places the
+label) — to dimension a line against an arbitrary body point, pick the point first
+(`measureSecondRefAt` drops `bodyPoint`). Point-first picks, ghost picks and pattern axes
+keep waiting for a second reference on a click on nothing. Main: `pickedLineEnds`,
+`measureSecondRefAt`, `placeMeasurement` (the shared finishing step). Tests in
+`scripts/measurements.ts`. Manual / what's-this string deferred (HANDOFF.md).
 **Regular polygons stay regular + the infinite guideline retired — serialization v21,
 2026-09-13.** A polygon drawn with the Polygon tool (Body or Cut role) now carries a `regular`
 side count on its outline (`Body.regular` / `BodyHole.regular`; the corners stay the stored
@@ -1966,7 +1983,9 @@ device px. `src/vite-env.d.ts` adds the Vite client types (`import.meta.env`).
     guide points and lines (draw mode only for measure — guides are invisible in sim).
   - **Measure tool** (`D`, one-shot, the only tool that also works in **sim mode** — its
     toolbar group never hides): two reference picks then a label-placement click →
-    `handleMeasureClick` / `measurePicks`. `measureRefAt(p)` picks by priority: joint →
+    `handleMeasureClick` / `measurePicks` (a single *line* pick + a click on nothing places
+    the line's own length between its ends — `pickedLineEnds` / `Scene.lineEndRefs`;
+    `placeMeasurement` finishes either path). `measureRefAt(p)` picks by priority: joint →
     body control vertex → slider rail → body control-polygon edge → point inside a body
     (grid-snapped when snapping keeps it inside; empty space picks nothing). The draft view
     passes picked/hover refs + a live `measurePreview` to the renderer. Labels:
@@ -2356,7 +2375,8 @@ place one element, then it returns to **Select** mode. `Esc` aborts the current 
 - **Measure** (`D`, also available in sim mode — sim keeps its own set) — click two references
   (joint, body corner, slider rail, body edge — **hole corners/edges included** (v16) — or a
   point on a body), then click where the value
-  should sit. Point+point: the label spot picks horizontal / vertical / direct. Point+line:
+  should sit — or click a **line** once and then click on nothing: the line's own length,
+  a point+point dimension between its ends. Point+point: the label spot picks horizontal / vertical / direct. Point+line:
   perpendicular distance to the infinite line. Line+line: distance while parallel, angle
   otherwise (dynamic; the label's sector picks θ vs 180−θ). Values update live in sim.
 - **Sketch constraints** (draw mode only): **Coincident** (`O`) — two points (joints, body

@@ -3291,6 +3291,42 @@ export class Scene {
     }
   }
 
+  /**
+   * The two point references at the ends of a line reference — a body / hole edge's
+   * corners, a reference polyline edge's two points, or a rail's joints — so a single
+   * measure-tool pick on the line can stand for a dimension between its ends (the same
+   * dimension two clicks on the ends would make). Null for a point reference and for a
+   * pattern axis, whose ends are derived rather than elements.
+   */
+  lineEndRefs(ref: MeasureRef): [MeasureRef, MeasureRef] | null {
+    switch (ref.kind) {
+      case "edge": {
+        const b = this.getBody(ref.bodyId);
+        const ctrl = b ? this.controlListOf(b, ref.hole ?? null) : null;
+        if (!ctrl || ctrl.length < 2 || ref.index < 0 || ref.index >= ctrl.length) return null;
+        const v = (index: number): MeasureRef =>
+          ref.hole === undefined
+            ? { kind: "vertex", bodyId: ref.bodyId, index }
+            : { kind: "vertex", bodyId: ref.bodyId, index, hole: ref.hole };
+        return [v(ref.index), v((ref.index + 1) % ctrl.length)];
+      }
+      case "guideLine": {
+        const g = this.getGuide(ref.guideId);
+        if (!g || g.kind !== "poly" || !this.guideLines(g).some((l) => l.edge === ref.edge)) return null;
+        const pt = (i: number): MeasureRef => ({ kind: "guidePoint", guideId: ref.guideId, which: String(i) });
+        return [pt(ref.edge), pt((ref.edge + 1) % g.pts.length)];
+      }
+      case "rail": {
+        const c = this.constraints.find(
+          (x) => x.id === ref.sliderId && x.kind === "slider"
+        ) as SliderConstraint | undefined;
+        return c ? [{ kind: "joint", jointId: c.railA }, { kind: "joint", jointId: c.railB }] : null;
+      }
+      default:
+        return null;
+    }
+  }
+
   /** Current world position of a measurement's value label, or null if a ref is gone. */
   measurementLabelPos(m: Measurement): Vec2 | null {
     const a = this.resolveMeasureRef(m.refA);

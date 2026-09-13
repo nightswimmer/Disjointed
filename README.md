@@ -114,7 +114,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Rotate** | `R` | A mode (not one-shot): **drag a body** to rotate it about its centroid, or **drag a control node** of the already-selected body to rotate about that node. A **multi-selection or group** rotates as one about the centre of its bounding box. The angle **snaps to 45°** when it's within ~2° of a multiple. Joints and ground anchors turn with the body. |
 | **Linear actuator** | `A` | Click a **slider arrow** (or rail) to make it self-driving: the slider's own carriage — the body — travels back and forth along the arrow when animation runs in Simulate mode. A bare rail with no rider gets a free self-driving rider instead. Off-animation the rider is just a normal rider you can pin to anything. |
 | **Motor** | `M` | Click a joint to set the **pivot**, then another joint **on the same body** for the **crank pin**. In Simulate mode with animation running, the crank pin orbits the pivot at the motor's speed. |
-| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a reference edge). Click the **rim of a round hole** (or disk body) as the first pick for a **diameter** dimension — it needs no second reference, the next click places the label. Likewise, click a **rounded corner's arc** as the first pick for a **radius** dimension. Works in **both modes** — see *Measurements* below. |
+| **Measure** | `D` | Click **two references**, then click where the value should sit. A reference is a **point** (a joint, a body corner node — hole corners included — a guide point, or any point inside a body) or a **line** (a rail, a body edge or hole edge, or a reference edge). To dimension a **line's own length**, click the line once and then click where the value should sit (anywhere that isn't another reference) — the same dimension you'd get from its two ends. Click the **rim of a round hole** (or disk body) as the first pick for a **diameter** dimension — it needs no second reference, the next click places the label. Likewise, click a **rounded corner's arc** as the first pick for a **radius** dimension. Works in **both modes** — see *Measurements* below. |
 | **Coincident** | `O` | Click **two points** (joints, body corners, reference points or a regular polygon's centre) to make them share a position — or a **point and a line** (body edge, rail or reference edge, either order) to hold the point on that line. |
 | **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, rail or reference edge** (one click), or **two points**, to make it horizontal / vertical. |
 | **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails or reference edges) to constrain their directions — or, for Equal, their lengths. |
@@ -248,6 +248,13 @@ set of measurements. What gets measured follows from the two references you pick
 - **Two lines** — the **distance** while they're parallel, the **angle** otherwise. This is
   re-evaluated live, so a line pair can flip between distance and angle mid-simulation, and
   the side you place the label on picks θ vs 180°−θ.
+- **One line** — click a body edge, hole edge, reference segment or rail once, then click on
+  nothing (or on a bare body interior): its **length**, as a dimension between the line's two
+  ends, so the placement rule above applies (above/below a slanted edge gives its horizontal
+  size, along it the true length) and it can drive like any two-point dimension. While the
+  line is picked, hovering empty space previews the value; clicking another reference instead
+  makes the usual point–line or line–line dimension. To dimension a line against an arbitrary
+  point inside a body, pick the point first.
 - **A disk** — click the rim of a round hole (or a disk body) and place the label: a
   **diameter** dimension (`⌀`), drawn through the centre towards the label. In draw mode you
   can type a value into it (double-click the label) and it **drives** the hole's diameter;

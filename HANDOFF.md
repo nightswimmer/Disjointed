@@ -120,3 +120,16 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   is gone. A size the polygon can't reach, or one that disagrees with another driving size
   on the same polygon, is refused with the conflicting dimension flashed. Field repro:
   `dimensioning.json` (a hexagon with an "h" dimension on one side).
+- **Single-click line dimensions (2026-09-13).** Manual (Measure topic + the `measure`
+  what's-this string in `src/main.ts`, which still says "Click two references"): a single
+  Measure click on a line — a body or hole edge, a reference-line segment, a rail — followed
+  by a click on nothing places that line's own length: a plain dimension between the line's
+  two ends (corners / reference points / rail joints), so the label-placement rule (above or
+  below → horizontal size, beside → vertical, along → true length), driving, `equal`, and the
+  regular-polygon size rule all apply exactly as if both ends had been clicked. While one
+  line is picked, hovering empty space previews that dimension at the cursor; hovering
+  another reference highlights it, and clicking it makes the usual line-to-point /
+  line-to-line dimension. A bare body interior no longer counts as a reference for that
+  second click (it places the label instead) — to dimension a line against an arbitrary
+  point on a body, pick the point first, then the line. A pattern axis and a point-first
+  pick keep the old behaviour (a click on nothing waits for a reference).
