@@ -6,6 +6,6 @@
 - If something feels incomplete, feel free to suggest modifications or things to add.
 - Before big updates or big structure changes, remind me to push to GitHub.
 - When I say we're finishing, closing the chat or it's time for a commit, do the following:
-    -Update the file PROJECT_INSTRUCTIONS.md with the current state of the project. This file will be passed to future chats to serve as a reference point. It doesn't need to go into details about variable name and stuff like that, only high-level stuff. 
+    -Update the file PROJECT_INSTRUCTIONS.md with the current state of the project. This file will be passed to future chats to serve as a reference point. Do not write information that is redundand or trivial to find in the code. 
     -Update file README.md to be displayed in github page. In the end, tell me an overview of the changes, and suggest a commit name and description for git. I will do the commit in the end.
-    -If there is unfinished work to do, write the relevant information to the file HANDOFF.md, so we can continue the work in the next chat.
+    -If there is unfinished work to do, write the relevant information to the file HANDOFF.md, so we can continue the work in the next chat. This file should not contain information about things already done.
