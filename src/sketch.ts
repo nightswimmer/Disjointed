@@ -1,6 +1,6 @@
 /**
  * Sketch solver: CAD-style draw-mode constraints (coincident / horizontal / vertical /
- * parallel / perpendicular / equal / fixed) plus driving dimensions. Iterative projection
+ * parallel / perpendicular / equal / fixed / symmetric) plus driving dimensions. Iterative projection
  * (Gauss-Seidel, the same philosophy as solver.ts) — but where the mechanism solver
  * moves rigid poses, this one moves *shape*: the variables are the world positions of
  * body control vertices and joints. After a converged solve the new positions are
@@ -13,6 +13,7 @@
 import {
   sameMeasureRef,
   refHost,
+  sketchRefs,
   Scene,
   SketchConstraint,
   Measurement,
@@ -121,11 +122,24 @@ function allGuideVars(scene: Scene, guideId: number): string[] {
   return g ? scene.guidePointKeys(g).map((w) => `g:${guideId}:${w}`) : [];
 }
 
-/** Guide variables tied to geometry through coincident constraints (see System.tied). */
+/**
+ * Guide variables tied to geometry through coincident constraints (see System.tied) —
+ * plus every point of a guide that is the **mirror of two or more symmetric
+ * constraints**: one symmetry re-places a free mirror onto the pair's bisector (a guide
+ * with one demand moves alone), but two pairs want two different bisectors, and a
+ * mirror chasing both never settles. Such a guide is the reference for all of its
+ * symmetries, and the pairs come to it.
+ */
 function tiedGuideVars(scene: Scene): Set<string> {
   const tied = new Set<string>();
   const links: [string[], string[]][] = []; // guide–guide coincidences, for the chain
+  const mirrored = new Map<number, number>(); // guide id → symmetric constraints it mirrors
   for (const c of scene.sketch) {
+    if (c.kind === "symmetric" && c.mirror) {
+      const m = refHost(c.mirror);
+      if (m.kind === "guideLine") mirrored.set(m.guideId, (mirrored.get(m.guideId) ?? 0) + 1);
+      continue;
+    }
     if (c.kind !== "coincident" || !c.refB) continue;
     const ga = isGuideRef(c.refA);
     const gb = isGuideRef(c.refB);
@@ -133,6 +147,7 @@ function tiedGuideVars(scene: Scene): Set<string> {
     else if (ga) for (const k of guideVarKeys(scene, c.refA)) tied.add(k);
     else if (gb) for (const k of guideVarKeys(scene, c.refB)) tied.add(k);
   }
+  for (const [id, n] of mirrored) if (n >= 2) for (const k of allGuideVars(scene, id)) tied.add(k);
   // A guide tied to a tied guide is tied too (a whole guide is tied when any point is).
   const wholeGuide = (k: string) => allGuideVars(scene, Number(k.split(":")[1]));
   let grew = true;
@@ -176,6 +191,11 @@ function fixedPointVars(scene: Scene): Set<string> {
     if (k) out.add(k);
   }
   return out;
+}
+
+/** Whether a line ref is held whole — angle and position — by a `fixed` lock. */
+function lineLocked(scene: Scene, ref: MeasureRef): boolean {
+  return scene.sketch.some((c) => c.kind === "fixed" && c.angle !== undefined && sameMeasureRef(c.refA, ref));
 }
 
 /** Mobility rank of a variable (see System.rank). */
@@ -476,6 +496,89 @@ function wrapHalfPi(a: number): number {
   return d;
 }
 
+/** An infinite line: a point on it, its unit direction and unit normal. */
+interface InfLine {
+  p: Vec2;
+  u: Vec2;
+  n: Vec2;
+}
+
+/** The infinite line through two points, or null when they coincide. */
+function infLine(a: Vec2, b: Vec2): InfLine | null {
+  const d = sub(b, a);
+  const l = len(d);
+  if (l < EPS) return null;
+  const u = scale(d, 1 / l);
+  return { p: a, u, n: perp(u) };
+}
+
+/** Signed distance of a point off an infinite line. */
+const offLine = (L: InfLine, p: Vec2): number => dot(sub(p, L.p), L.n);
+
+/** The mirror image of a point across a line. */
+function reflectAcross(L: InfLine, p: Vec2): Vec2 {
+  return sub(p, scale(L.n, 2 * offLine(L, p)));
+}
+
+/**
+ * Move a line a fraction `w` of the way onto `target` as a rigid piece: turn it about
+ * its midpoint toward the target's direction, then shift it along the target's normal —
+ * so it lands exactly on the target at `w` = 1 and keeps its length (projecting the
+ * ends along the normal instead would shorten a line by the cosine of the turn).
+ */
+function moveLineOnto(pos: Vec2[], i: number, j: number, target: InfLine, w: number): void {
+  const d = sub(pos[j], pos[i]);
+  if (len(d) > EPS) {
+    const dd = wrapHalfPi(Math.atan2(target.u.y, target.u.x) - Math.atan2(d.y, d.x));
+    if (Math.abs(dd) > EPS) rotateAboutMid(pos, i, j, dd * w);
+  }
+  const shift = scale(target.n, offLine(target, scale(add(pos[i], pos[j]), 0.5)) * w);
+  pos[i] = sub(pos[i], shift);
+  pos[j] = sub(pos[j], shift);
+}
+
+/** Participants at this rank or above are never written by a symmetric item (see System.rank). */
+const IMMOVABLE_RANK = 3;
+
+/**
+ * How a symmetric constraint's correction is shared between its mirror and its pair: the
+ * mirror's fraction, by the usual rank rule — except that an immovable participant
+ * (instance geometry, a locked point or line) is never written. With the pair immovable
+ * the mirror takes it all; with the mirror immovable the pair does; with both, nothing
+ * moves and the residual stands, so the solve rejects instead of deforming an instance.
+ */
+function mirrorShare(mirrorRank: number, pairRank: number): { wM: number; pairMoves: boolean } {
+  const mirrorFree = mirrorRank < IMMOVABLE_RANK;
+  const pairFree = pairRank < IMMOVABLE_RANK;
+  const wM = !mirrorFree ? 0 : !pairFree ? 1 : shareOf(mirrorRank, pairRank);
+  return { wM, pairMoves: pairFree };
+}
+
+/**
+ * The line two lines are mirror images across, chosen nearest the current mirror `M`:
+ * through their intersection along the angle bisector closer to M's direction (the two
+ * bisectors are perpendicular — either would do, M says which one was meant), or, for
+ * parallel lines, the midline between them.
+ */
+function bisectorLine(A: InfLine, B: InfLine, M: InfLine): InfLine | null {
+  const cr = A.u.x * B.u.y - A.u.y * B.u.x;
+  if (Math.abs(cr) < 1e-6) {
+    const foot = sub(A.p, scale(B.n, offLine(B, A.p)));
+    const mid = scale(add(A.p, foot), 0.5);
+    return infLine(mid, add(mid, A.u));
+  }
+  const w = sub(B.p, A.p);
+  const X = add(A.p, scale(A.u, (w.x * B.u.y - w.y * B.u.x) / cr)); // A ∩ B
+  const ub = dot(A.u, B.u) < 0 ? scale(B.u, -1) : B.u; // within a quarter turn of A.u
+  const s = add(A.u, ub);
+  const l = len(s);
+  if (l < EPS) return null;
+  const u1 = scale(s, 1 / l);
+  const u2 = perp(u1);
+  const u = Math.abs(dot(u1, M.u)) >= Math.abs(dot(u2, M.u)) ? u1 : u2;
+  return infLine(X, add(X, u));
+}
+
 function rotateAboutMid(pos: Vec2[], i: number, j: number, ang: number): void {
   const mid = scale(add(pos[i], pos[j]), 0.5);
   pos[i] = add(mid, rotate(sub(pos[i], mid), ang));
@@ -575,6 +678,120 @@ function buildConstraintItem(
           const s = dot(sub(pos[k], at), n); // signed distance off the locked line
           err = Math.max(err, Math.abs(s));
           if (apply) pos[k] = sub(pos[k], scale(n, s));
+        }
+        return err;
+      },
+    };
+  }
+  if (kind === "symmetric") {
+    // Two points, or two lines, mirror images across the `mirror` line. Three
+    // participants share each correction by rank, in two steps: first the mirror
+    // against the pair — it moves onto the pair's bisector as far as its share goes (a
+    // free reference line placed by eye is *re-placed* by its first symmetry, the
+    // app's rule for a guide with one demand; tied or multiply demanded it is the
+    // reference and holds; a body edge among geometry shares half) — then the two
+    // objects against each other (an anchored one stays put, the other comes to its
+    // image). A mirror held whole by a `fixed` lock is immovable here: the lock would
+    // undo any move, and a mirror that never settles stalls the pair.
+    if (!c.refB || !c.mirror) return "invalid";
+    const km = lineVarKeys(scene, c.mirror);
+    if (!km) return "invalid";
+    const m0 = acquire(scene, sys, km[0]);
+    const m1 = acquire(scene, sys, km[1]);
+    if (m0 === null || m1 === null) return "invalid";
+    if (m0 === m1) return null; // a one-point mirror names no line
+    const mirrorRank = lineLocked(scene, c.mirror) ? 3 : Math.min(rank(m0), rank(m1));
+    const mirrorAt = (pos: Vec2[]): InfLine | null => infLine(pos[m0], pos[m1]);
+    if (!isLineRef(c.refA)) {
+      const A = acquirePoint(scene, sys, c.refA, rank);
+      const B = acquirePoint(scene, sys, c.refB, rank);
+      if (!A || !B) return "invalid";
+      const { wM, pairMoves } = mirrorShare(mirrorRank, Math.min(A.rank, B.rank)); // the mirror's share
+      const wA = shareOf(A.rank, B.rank); // A's share of what the pair absorbs
+      return {
+        id: c.id,
+        kind: "constraint",
+        run(pos, apply) {
+          let M = mirrorAt(pos);
+          if (!M) return 0; // degenerate mirror this sweep: nothing to reflect across
+          const a = A.at(pos);
+          const b = B.at(pos);
+          const err = dist(reflectAcross(M, a), b) / 2;
+          if (!apply || err <= EPS) return err;
+          let moved = false;
+          if (wM > EPS) {
+            // The mirror onto the pair's perpendicular bisector (two coincident points
+            // have none — the pair then does the moving).
+            const d = sub(b, a);
+            const mid = scale(add(a, b), 0.5);
+            const bis = len(d) > EPS ? infLine(mid, add(mid, perp(d))) : null;
+            if (bis) {
+              moveLineOnto(pos, m0, m1, bis, wM);
+              M = mirrorAt(pos) ?? M;
+              moved = true;
+            }
+          }
+          if (pairMoves && (wM < 1 - EPS || !moved)) {
+            // Each object toward the other's image, from the pre-move positions on
+            // both sides: reflection is affine, so whatever the split the pair lands on
+            // exact mirror images of each other.
+            const aImg = reflectAcross(M, a);
+            const bImg = reflectAcross(M, b);
+            A.set(pos, add(a, scale(sub(bImg, a), wA)));
+            B.set(pos, add(b, scale(sub(aImg, b), 1 - wA)));
+          }
+          return err;
+        },
+      };
+    }
+    const ka = lineVarKeys(scene, c.refA);
+    const kb = lineVarKeys(scene, c.refB);
+    if (!ka || !kb) return "invalid";
+    const a0 = acquire(scene, sys, ka[0]);
+    const a1 = acquire(scene, sys, ka[1]);
+    const b0 = acquire(scene, sys, kb[0]);
+    const b1 = acquire(scene, sys, kb[1]);
+    if (a0 === null || a1 === null || b0 === null || b1 === null) return "invalid";
+    if (a0 === a1 || b0 === b1) return null; // a one-point line has no direction to mirror
+    const rankA = Math.min(rank(a0), rank(a1));
+    const rankB = Math.min(rank(b0), rank(b1));
+    const { wM, pairMoves } = mirrorShare(mirrorRank, Math.min(rankA, rankB));
+    const wA = shareOf(rankA, rankB);
+    /** The image of a line's two ends across the mirror, as an infinite line. */
+    const imageOf = (M: InfLine, pos: Vec2[], i: number, j: number): InfLine | null =>
+      infLine(reflectAcross(M, pos[i]), reflectAcross(M, pos[j]));
+    return {
+      id: c.id,
+      kind: "constraint",
+      run(pos, apply) {
+        let M = mirrorAt(pos);
+        const A = infLine(pos[a0], pos[a1]);
+        const B = infLine(pos[b0], pos[b1]);
+        if (!M || !A || !B) return 0; // a degenerate participant this sweep
+        // Each line's ends must sit on the other's image (as infinite lines — the ends
+        // themselves are free to sit anywhere along it). The residual is the largest of
+        // the four offsets, halved: each side owns half the gap.
+        const imgA = imageOf(M, pos, a0, a1)!;
+        const imgB = imageOf(M, pos, b0, b1)!;
+        const offs = [offLine(imgA, pos[b0]), offLine(imgA, pos[b1]), offLine(imgB, pos[a0]), offLine(imgB, pos[a1])];
+        const err = Math.max(...offs.map(Math.abs)) / 2;
+        if (!apply || err <= EPS) return err;
+        let moved = false;
+        if (wM > EPS) {
+          const bis = bisectorLine(A, B, M);
+          if (bis) {
+            moveLineOnto(pos, m0, m1, bis, wM);
+            M = mirrorAt(pos) ?? M;
+            moved = true;
+          }
+        }
+        if (pairMoves && (wM < 1 - EPS || !moved)) {
+          // Both images from the pre-move ends, then B's ends onto A's image and A's
+          // onto B's, each side by its share.
+          const iA = imageOf(M, pos, a0, a1)!;
+          const iB = imageOf(M, pos, b0, b1)!;
+          moveLineOnto(pos, b0, b1, iA, 1 - wA);
+          moveLineOnto(pos, a0, a1, iB, wA);
         }
         return err;
       },
@@ -887,7 +1104,7 @@ function buildSystem(
   for (const c of scene.sketch) {
     // Pose constraints (every end on instance geometry) are not shape material: they
     // move rigid parts and are enforced by pose.ts, never by this solver.
-    if (scene.refInstanceOwned(c.refA) && (!c.refB || scene.refInstanceOwned(c.refB))) continue;
+    if (sketchRefs(c).every((r) => scene.refInstanceOwned(r))) continue;
     const item = buildConstraintItem(scene, sys, c);
     if (item === "invalid") invalid.push({ id: c.id, kind: "constraint", error: Infinity });
     else if (item) items.push(item);
@@ -1381,9 +1598,10 @@ export function tryAddConstraint(
   scene: Scene,
   kind: SketchConstraint["kind"],
   refA: MeasureRef,
-  refB?: MeasureRef
+  refB?: MeasureRef,
+  mirror?: MeasureRef
 ): { constraint: SketchConstraint | null; breaks: SketchBreak[] } {
-  const c = scene.addSketchConstraint(kind, refA, refB);
+  const c = scene.addSketchConstraint(kind, refA, refB, mirror);
   if (!c) return { constraint: null, breaks: [] };
   const breaks = solveSketch(scene);
   if (breaks.length) {

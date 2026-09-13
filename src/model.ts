@@ -611,7 +611,8 @@ export interface Measurement {
  * `horizontal`/`vertical` — a line (or a point pair) is axis-aligned;
  * `parallel`/`perpendicular` — two lines' directions; `equal` — two lines have equal
  * length; `fixed` — a single reference is nailed down where it is (a point keeps its
- * world position, a line keeps its angle).
+ * world position, a line keeps its angle); `symmetric` — two points, or two lines, are
+ * mirror images of each other across a third reference, the `mirror` line.
  */
 export type SketchConstraintKind =
   | "coincident"
@@ -620,21 +621,31 @@ export type SketchConstraintKind =
   | "parallel"
   | "perpendicular"
   | "equal"
-  | "fixed";
+  | "fixed"
+  | "symmetric";
 
 /**
- * A sketch constraint between one or two references (reusing the measurement reference
- * system, so constraints track their elements the same way measurements do — including
- * index remapping across control-vertex edits and prune-on-delete). `refB` is null for
- * horizontal/vertical applied to a single line reference, and always for `fixed`.
- * Solvable point refs are joints and body control vertices (`bodyPoint` refs are
- * measurement-only); line refs are slider rails and body control edges.
+ * A sketch constraint between one, two or three references (reusing the measurement
+ * reference system, so constraints track their elements the same way measurements do —
+ * including index remapping across control-vertex edits and prune-on-delete). `refB` is
+ * null for horizontal/vertical applied to a single line reference, and always for
+ * `fixed`; `mirror` exists only on `symmetric`. Solvable point refs are joints and body
+ * control vertices (`bodyPoint` refs are measurement-only); line refs are slider rails
+ * and body control edges. Enumerate a constraint's references through `sketchRefs`,
+ * never as `[refA, refB]`, so the third one is never left behind.
  */
 export interface SketchConstraint {
   kind: SketchConstraintKind;
   id: number;
   refA: MeasureRef;
   refB: MeasureRef | null;
+  /**
+   * `symmetric` only: the mirror line — a body edge, rail or reference segment — that
+   * `refA` and `refB` are reflected across. Two points are true mirror images (equal
+   * perpendicular distances *and* on one perpendicular); two lines mirror as infinite
+   * lines (angle and offset), their endpoints free to slide.
+   */
+  mirror?: MeasureRef;
   /**
    * `fixed`: the world position it is nailed to — the point itself for a point lock, a
    * point *on* the locked line (its midpoint at capture) for a line lock. The one place
@@ -650,6 +661,19 @@ export interface SketchConstraint {
    * stay free, but only to slide along it and stretch it, never to turn or shift it.
    */
   angle?: number;
+}
+
+/**
+ * Every reference a sketch constraint names, in order: `refA`, `refB` when present, and
+ * a symmetric constraint's `mirror`. Every site that remaps, prunes, clones or
+ * ownership-tests a constraint's references goes through this — a reference the loop
+ * doesn't know about is a reference that silently goes stale.
+ */
+export function sketchRefs(c: { refA: MeasureRef; refB: MeasureRef | null; mirror?: MeasureRef }): MeasureRef[] {
+  const out = [c.refA];
+  if (c.refB) out.push(c.refB);
+  if (c.mirror) out.push(c.mirror);
+  return out;
 }
 
 /** A reference resolved to current world geometry. */
@@ -884,7 +908,7 @@ export interface SelectionClip {
   /** Permanent groups among the copied members (body / free-joint tmp ids). */
   groups: { bodies: number[]; joints: number[] }[];
   /** Fully-internal sketch constraints; refs carry the original ids, remapped on paste. */
-  sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null }[];
+  sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null; mirror?: MeasureRef }[];
   /** Fully-internal draw-mode dimensions; refs carry the original ids. Driving ones carry
    *  a `target`; driven (reference) ones travel only when the clip asks for them. */
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
@@ -921,7 +945,7 @@ export interface FeatureClip {
   grounds: { joint: number; anchor: Vec2 }[];
   sliders: { tmp: number; railA: number; railB: number; riders: number[]; locked: number[]; startRiders?: number[] }[];
   motors: { pivot: number; crank: number; speed: number }[];
-  sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null }[];
+  sketch: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null; mirror?: MeasureRef }[];
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
   /** Layout vectors in **world** orientation (re-oriented into the target body on paste). */
   patterns: {
@@ -1193,6 +1217,29 @@ export class Scene {
     for (const c of this.sketch) {
       const a = onOutline(c.refA);
       const b = onOutline(c.refB);
+      const m = onOutline(c.mirror ?? null);
+      if (!a && !b && !m) continue;
+      if (c.kind === "symmetric") {
+        // Two of its own points / edges mirrored about an outside line: the pair's
+        // direction is that line's normal, so the outline can't turn. Its own edge as
+        // the mirror of outside geometry: the edge is the pair's bisector, same thing.
+        // Its own points about its own edge say nothing; one own point mirrored to
+        // outside geometry is one tie, one own edge mirrored outside pins the angle.
+        if (a && b) {
+          if (m) continue;
+          return true;
+        }
+        if (m) return true;
+        if (a) {
+          if (c.refA.kind === "edge") return true;
+          tied.add(pointKey(c.refA));
+        }
+        if (b && c.refB) {
+          if (c.refB.kind === "edge") return true;
+          tied.add(pointKey(c.refB));
+        }
+        continue;
+      }
       if (!a && !b) continue;
       const line = c.kind === "horizontal" || c.kind === "vertical" || c.kind === "parallel" || c.kind === "perpendicular";
       if (line) {
@@ -1820,7 +1867,7 @@ export class Scene {
   private prunePatternRefs(): void {
     const dead = (r: MeasureRef | null): boolean =>
       !!r && r.kind === "patternAxis" && !this.resolveMeasureRef(r);
-    this.sketch = this.sketch.filter((c) => !dead(c.refA) && !dead(c.refB));
+    this.sketch = this.sketch.filter((c) => !sketchRefs(c).some(dead));
     this.measurements = this.measurements.filter((mm) => !dead(mm.refA) && !dead(mm.refB));
   }
 
@@ -1922,9 +1969,9 @@ export class Scene {
       if (onHole(ref)) ref.hole = map.get(ref.hole)!;
     };
     this.measurements = this.measurements.filter((m) => !refGone(m.refA) && !refGone(m.refB));
-    this.sketch = this.sketch.filter((c) => !refGone(c.refA) && !refGone(c.refB));
+    this.sketch = this.sketch.filter((c) => !sketchRefs(c).some(refGone));
     for (const m of this.measurements) { remap(m.refA); remap(m.refB); }
-    for (const c of this.sketch) { remap(c.refA); remap(c.refB); }
+    for (const c of this.sketch) sketchRefs(c).forEach(remap);
     this.patterns = this.patterns.filter((p) => {
       if (p.bodyId !== body.id || p.seed.kind !== "hole") return true;
       if (set.has(p.seed.hole)) return false; // seed gone → the pattern dissolves
@@ -2361,7 +2408,7 @@ export class Scene {
       return true;
     };
     this.measurements = this.measurements.filter((mm) => remap(mm.refA) && remap(mm.refB));
-    this.sketch = this.sketch.filter((c) => remap(c.refA) && remap(c.refB));
+    this.sketch = this.sketch.filter((c) => sketchRefs(c).every(remap));
     for (const { ref, world } of bodyPointWorlds) {
       const owner = pointInPolygon(world, ptsA) ? body : bBody;
       ref.bodyId = owner.id;
@@ -2663,7 +2710,7 @@ export class Scene {
       });
     };
     for (const mm of this.measurements) { record(mm.refA); record(mm.refB); }
-    for (const c of this.sketch) { record(c.refA); record(c.refB); }
+    for (const c of this.sketch) sketchRefs(c).forEach(record);
 
     // --- survivor takes the result ---
     const def = shapes[sources.indexOf(survivor)]?.radius ?? shapes[0].radius;
@@ -2734,7 +2781,7 @@ export class Scene {
     const stale = new Set<MeasureRef>(refRecs.map((r) => r.ref).filter((r) => !ok.has(r)));
     const isStale = (r: MeasureRef | null): boolean => !!r && stale.has(refHost(r)); // recorded through the host
     this.measurements = this.measurements.filter((mm) => !isStale(mm.refA) && !isStale(mm.refB));
-    this.sketch = this.sketch.filter((c) => !isStale(c.refA) && !isStale(c.refB));
+    this.sketch = this.sketch.filter((c) => !sketchRefs(c).some(isStale));
     for (const { ref, world } of bodyPoints) {
       ref.bodyId = survivor.id;
       ref.local = rotate(sub(world, survivor.pos), -survivor.angle);
@@ -3541,7 +3588,7 @@ export class Scene {
     if (gone.size) this.measurements = this.measurements.filter((m) => !gone.has(m.id));
     const cGone = new Set<number>();
     for (const c of this.sketch) {
-      for (const ref of [refHost(c.refA), c.refB ? refHost(c.refB) : null]) {
+      for (const ref of sketchRefs(c).map(refHost)) {
         if (!affected(ref)) continue;
         if (delta === -1) {
           if (ref.index === at) cGone.add(c.id);
@@ -3561,7 +3608,9 @@ export class Scene {
    * `coincident` takes two point refs, or a point ref + a line ref (the point is held
    * on the **infinite** line; normalized so the point is stored as `refA`);
    * `horizontal`/`vertical` take one line ref (refB
-   * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs.
+   * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs;
+   * `symmetric` takes two point refs or two line refs plus the `mirror` line they
+   * reflect across.
    * Point refs are joints, body control vertices, regular-polygon centres, line
    * midpoints, or reference-geometry points (`bodyPoint` refs are measurement-only —
    * the sketch solver can't move them independently); line refs are slider rails,
@@ -3573,13 +3622,24 @@ export class Scene {
   addSketchConstraint(
     kind: SketchConstraintKind,
     refA: MeasureRef,
-    refB?: MeasureRef
+    refB?: MeasureRef,
+    mirror?: MeasureRef
   ): SketchConstraint | null {
     const isPoint = (r: MeasureRef) =>
       r.kind === "joint" || r.kind === "vertex" || r.kind === "centre" || r.kind === "guidePoint" || r.kind === "midpoint";
     const isLine = (r: MeasureRef) => r.kind === "rail" || r.kind === "edge" || r.kind === "guideLine" || r.kind === "patternAxis";
     let b = refB ?? null;
-    if (kind === "coincident") {
+    if (kind !== "symmetric" && mirror) return null; // only a symmetry has a mirror
+    if (kind === "symmetric") {
+      // Two objects of one kind — both points or both lines — reflected across a line.
+      if (!b || !mirror || !isLine(mirror)) return null;
+      if (!((isPoint(refA) && isPoint(b)) || (isLine(refA) && isLine(b)))) return null;
+      if (sameMeasureRef(refA, mirror) || sameMeasureRef(b, mirror)) return null; // a line is trivially its own image
+      // A point that ends the mirror (or is its midpoint) *is* its own image: the pair
+      // could only be met by collapsing the other point onto it.
+      if (isPoint(refA) && (this.pointIsLineEndpoint(refA, mirror) || this.pointIsLineEndpoint(b, mirror))) return null;
+      if (!this.resolveMeasureRef(mirror)) return null;
+    } else if (kind === "coincident") {
       if (!b) return null;
       // Normalize point-on-line order: the point is stored as refA (the badge anchors there).
       if (isLine(refA) && isPoint(b)) [refA, b] = [b, refA];
@@ -3605,9 +3665,11 @@ export class Scene {
     // whose every end is instance-owned is a *pose constraint* (pose.ts): it moves
     // rigid parts, so it's rejected only when no pose can satisfy it — two ends rigid
     // to one another (same body / chassis group), or "equal" (both lengths locked).
-    if (this.refInstanceOwned(refA) && (!b || this.refInstanceOwned(b))) {
+    if (this.refInstanceOwned(refA) && (!b || this.refInstanceOwned(b)) && (!mirror || this.refInstanceOwned(mirror))) {
       if (kind === "equal") return null;
       if (b) {
+        // (A symmetric pair rigid to one another can't be posed either — only the two
+        // objects move, never the mirror, so the mirror's unit is free to be either.)
         const ka = this.refRigidUnitKey(refA);
         const kb = this.refRigidUnitKey(b);
         if (ka === null || kb === null || ka === kb) return null;
@@ -3619,6 +3681,7 @@ export class Scene {
       refA: cloneMeasureRef(refA),
       refB: b ? cloneMeasureRef(b) : null,
     };
+    if (mirror) c.mirror = cloneMeasureRef(mirror);
     if (kind === "fixed" && !this.captureFixed(c, resA)) return null; // degenerate line
     this.sketch.push(c);
     return c;
@@ -3699,9 +3762,7 @@ export class Scene {
 
   /** Drop sketch constraints whose references no longer resolve (their element was removed). */
   private pruneSketch(): void {
-    this.sketch = this.sketch.filter(
-      (c) => this.resolveMeasureRef(c.refA) && (!c.refB || this.resolveMeasureRef(c.refB))
-    );
+    this.sketch = this.sketch.filter((c) => sketchRefs(c).every((r) => this.resolveMeasureRef(r)));
   }
 
   /**
@@ -4209,10 +4270,7 @@ export class Scene {
       remap(m.refA);
       remap(m.refB);
     }
-    for (const sc of this.sketch) {
-      remap(sc.refA);
-      remap(sc.refB);
-    }
+    for (const sc of this.sketch) sketchRefs(sc).forEach(remap);
   }
 
   /**
@@ -4782,11 +4840,12 @@ export class Scene {
     };
     const sketch: SelectionClip["sketch"] = [];
     for (const c of this.sketch) {
-      if (internal(c.refA) && internal(c.refB)) {
+      if (sketchRefs(c).every(internal)) {
         sketch.push({
           kind: c.kind,
           refA: cloneMeasureRef(c.refA),
           refB: c.refB ? cloneMeasureRef(c.refB) : null,
+          ...(c.mirror ? { mirror: cloneMeasureRef(c.mirror) } : {}),
         });
       }
     }
@@ -5011,8 +5070,9 @@ export class Scene {
     for (const c of clip.sketch) {
       const ra = remapRef(c.refA);
       const rb = c.refB ? remapRef(c.refB) : null;
-      if (!ra || (c.refB && !rb)) continue;
-      this.addSketchConstraint(c.kind, ra, rb ?? undefined);
+      const rm = c.mirror ? remapRef(c.mirror) : null;
+      if (!ra || (c.refB && !rb) || (c.mirror && !rm)) continue;
+      this.addSketchConstraint(c.kind, ra, rb ?? undefined, rm ?? undefined);
     }
     for (const d of clip.dims) {
       const ra = remapRef(d.refA);
@@ -5132,8 +5192,13 @@ export class Scene {
     };
     const sketch: FeatureClip["sketch"] = [];
     for (const c of this.sketch) {
-      if (internal(c.refA) && internal(c.refB)) {
-        sketch.push({ kind: c.kind, refA: cloneMeasureRef(c.refA), refB: c.refB ? cloneMeasureRef(c.refB) : null });
+      if (sketchRefs(c).every(internal)) {
+        sketch.push({
+          kind: c.kind,
+          refA: cloneMeasureRef(c.refA),
+          refB: c.refB ? cloneMeasureRef(c.refB) : null,
+          ...(c.mirror ? { mirror: cloneMeasureRef(c.mirror) } : {}),
+        });
       }
     }
     const dims: FeatureClip["dims"] = [];
@@ -5292,8 +5357,9 @@ export class Scene {
     for (const c of clip.sketch) {
       const ra = remapRef(c.refA);
       const rb = c.refB ? remapRef(c.refB) : null;
-      if (!ra || (c.refB && !rb)) continue;
-      this.addSketchConstraint(c.kind, ra, rb ?? undefined);
+      const rm = c.mirror ? remapRef(c.mirror) : null;
+      if (!ra || (c.refB && !rb) || (c.mirror && !rm)) continue;
+      this.addSketchConstraint(c.kind, ra, rb ?? undefined, rm ?? undefined);
     }
     for (const d of clip.dims) {
       const ra = remapRef(d.refA);
@@ -6560,6 +6626,7 @@ export class Scene {
           ...c,
           refA: cloneMeasureRef(c.refA),
           refB: c.refB ? cloneMeasureRef(c.refB) : null,
+          ...(c.mirror ? { mirror: cloneMeasureRef(c.mirror) } : {}),
           // `fixed` carries a coordinate / an angle: clone the point so a loaded scene
           // never shares it with the data it came from (undo snapshots reload in place).
           ...(c.at ? { at: vec(c.at.x, c.at.y) } : {}),

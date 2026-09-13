@@ -84,7 +84,10 @@ motion; actuators / motors animate.
   a held `side`). The **one** exception to "never coordinates" is the `fixed` constraint: a lock
   in place *is* a coordinate and there is no element to name it with, so it carries `at` (the
   point, or a point on the locked line) and — line form only — `angle`. `angle !== undefined`
-  is what tells the two forms apart.
+  is what tells the two forms apart. The `symmetric` constraint is the one with **three**
+  references: `refA` / `refB` (both points or both lines) plus `mirror` (a line). Every site
+  that remaps, prunes, clones or ownership-tests a constraint's refs iterates
+  **`sketchRefs(c)`**, never `[refA, refB]` — keep that invariant when adding a site.
 - The `bodies` array **is** the z-order (drawn first→last, picked last→first).
 
 ## Design decisions and invariants (with reasons)
@@ -160,6 +163,25 @@ motion; actuators / motors animate.
   Deliberate whole-element transforms that don't live-solve (`mirrorBody` / `mirrorBodies`)
   call `recaptureFixed` — the reflection is a move the user asked for, so the lock re-anchors
   instead of fighting it; drags and rotations need nothing, they solve live and the lock wins.
+- **`symmetric` shares its correction mirror-first, by rank** (`mirrorShare` in sketch.ts):
+  the mirror line moves onto the pair's bisector (perpendicular bisector for points, the
+  angle bisector nearest its current direction — or the midline — for lines) as far as its
+  share goes, then the two objects move toward each other's image (reflection is affine, so
+  any split lands on exact images). Consequences that follow from the guide rules: a **free
+  reference line is re-placed** by its first symmetry (one demand → the guide moves alone);
+  a guide mirroring **two or more** symmetries joins the tied set (`tiedGuideVars`) and is the
+  reference; a `fixed` line reads as rank 3 for the mirror. **Immovable participants are
+  never written** (rank ≥ 3: instance geometry, locked points): pair immovable → the mirror
+  takes it all; mirror immovable → the pair; both → the residual stands and the edit rejects
+  (before this rule an item splitting 50/50 between two rank-3 instance points deformed the
+  instances — the only place two rank-3 variables can meet in one item outside the pose
+  route). Lines move as rigid pieces (`moveLineOnto`: turn about the midpoint, then shift), so
+  lengths survive; projecting the ends along the normal shortened them by the cosine.
+  On the pose route (every ref instance-owned) the A side is **not** the negated B move:
+  `PoseMove` grew `deltaA` / `angleA`, and a side that carries the mirror moves by the
+  *reflected* shift (moving it moves the mirror, which moves the image it chases) with the
+  turn's sign flipped. Instance points about a non-instance mirror are a *sketch* case: the
+  mirror moves (free) or the edit rejects (locked).
 - **Regular polygons are an invariant, not constraints**: rigid weighted fit per solve (a similarity
   fit let pinching corrections shrink it sweep after sweep); H/V/parallel/perpendicular on an edge
   turn it in one step; **a dimension never turns a regular polygon** (that solver item could stall
@@ -234,10 +256,11 @@ motion; actuators / motors animate.
 
 ### UI conventions
 - **Sketch badges** are 11 px pills carrying one glyph; `SKETCH_SYMBOL` maps a kind to a
-  character, or to `null` when the glyph is vector art (today only `fixed`'s padlock,
-  `drawLockGlyph` — it matches the tool's toolbar icon, and every character that means "locked"
-  is either an emoji, which ignores the badge colour, or another shape-in-a-shape that reads as
-  the coincident ◎ at that size). `SvgRecorder` replays the drawn glyph fine.
+  character, or to `null` when the glyph is vector art (`fixed`'s padlock, `drawLockGlyph`,
+  and `symmetric`'s dashed mirror with a dot each side, `drawMirrorGlyph` — each matches its
+  toolbar icon, and no character reads right at that size: everything meaning "locked" is an
+  emoji or a shape-in-a-shape like the coincident ◎, and ⇔ / ⋈ read as equivalence / join).
+  `SvgRecorder` replays drawn glyphs fine. A symmetry badges all three of its elements.
 - **A dimension's direction is fixed at placement.** The h / v / direct choice of a point–point
   dimension is read from the label position only when it is created (`measureAxisForPlacement`);
   `setMeasurementLabel` and the context dimensions' `setTempDimLabel` move the label and nothing
@@ -278,7 +301,7 @@ motion; actuators / motors animate.
   vs `featureSel` (vertices + joints of one body). Ctrl+G is a group toggle; plain G is Ground.
 - Two-click slider start pair: a press grabs the **rail joint** in draw mode, the **rider** in sim.
 - Text shortcuts: plain letters in `TOOL_KEYS`, Shift+letter shape tools in `SHIFT_TOOL_KEYS`
-  (main.ts); plain `L` arms Fixed; the whole shortcut map is due for a remap.
+  (main.ts); plain `L` arms Fixed and `Y` Symmetrical; the whole shortcut map is due for a remap.
 - View rotation is purely visual (world axes for constraints, grid and snapping).
 
 ## Serialization history (`load` accepts everything ≤ 21)
@@ -287,7 +310,7 @@ v9 groups · v10 grounded bodies · v11 guides · v12 units · v13 holes (baked)
 group joints · v15 per-corner radii · v16 editable holes · v17 locked riders · v18 welds ·
 v19 patterns · v20 guide union + `startRiders` · v21 regular polygons, infinite guideline dropped.
 Optional fields added without a bump: `Measurement.side`, `mirrored`, `rigid`, the `fixed`
-sketch-constraint kind with its `at` / `angle`. Load sanitizes
+sketch-constraint kind with its `at` / `angle`, the `symmetric` kind with its `mirror` ref. Load sanitizes
 every list invariant (locked ⊆ riders, pattern members exist, mismatched regular counts dropped).
 
 ## Tests (`scripts/`, one line each)
@@ -295,7 +318,9 @@ solver-smoke (slider-crank + end-stops) · free-rail · ground-drag · impossibl
 persistence · build-body · shape-edit (fillet, containment, node↔joint link, radii, holes) ·
 edit-utils (rotate/mirror/copy/z-order) · actuators · measurements (incl. diameter/radius) ·
 sketch (constraints, dims, ranks, rigid carry, drift) · fixed-constraint (point / line locks,
-conflict rejects, mirror re-capture) · midpoint (midpoint refs: resolve, validate, solve, who
+conflict rejects, mirror re-capture) · symmetric-constraint (validation, point / line forms,
+who moves — free / twice-demanded / tied / locked mirror, drag follow — rejects, remaps,
+load, copy/paste, pose route incl. a mirror riding with the moved side) · midpoint (midpoint refs: resolve, validate, solve, who
 moves, follow-the-line remaps, load) · groups · group-joints · grounded-bodies ·
 freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression with solver stats) ·
 components · pose-dims · pose-constraints · split-combine · shapes (cut, references, v21 load) ·
@@ -332,11 +357,13 @@ it for the exact cases.
   projected corner-pair size dimensions, single-click line dimensions, the two-candidate /
   point-on-point implicit constraints with their new toolbar switch, the Fixed constraint,
   line midpoints as snap / implicit-constraint / placement targets, the fixed dimension
-  direction with its pill glyph / glyph button / off-line leader, and stale what's-this
-  strings. One manual exception so far: a **text-only** `tool-fixed` topic had to be
-  written, because `npm run manual` hard-fails on a topic the app can ask for and every
-  `data-tool` button implies one — it still needs the illustration pass like the rest.
-- Plain `L` arms the Fixed constraint (F was already fit-view); a full shortcut remap is planned.
+  direction with its pill glyph / glyph button / off-line leader, the Symmetrical
+  constraint, and stale what's-this strings. Manual exceptions so far: **text-only**
+  `tool-fixed` and `tool-symmetric` topics had to be written, because `npm run manual`
+  hard-fails on a topic the app can ask for and every `data-tool` button implies one —
+  both still need the illustration pass like the rest.
+- Plain `L` arms the Fixed constraint (F was already fit-view) and `Y` the Symmetrical one
+  (S is the slider); a full shortcut remap is planned.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.
 - The toolbar was regrouped into draggable groups for **draw mode**; sim mode inherits the rack
   but its own grouping (Animation + solver tuning) has not been designed yet — see HANDOFF.md.
@@ -368,8 +395,10 @@ it for the exact cases.
   lines only — there is no "lock this whole body" (two locks pin one rigidly, but a body click
   would be the obvious gesture); a locked element gets no styling of its own beyond its badge, so
   a body deforming around a lock under a drag is only explained by the badge.
-- **Tangential and Symmetrical** are still dimmed placeholders in the Constraints group (as are
-  Subtract / Intersect in Boolean).
+- **Tangential** is still a dimmed placeholder in the Constraints group (as are Subtract /
+  Intersect in Boolean). **Symmetrical** gaps: no symmetric between a point pair and a line
+  pair at once, no "symmetric about a body's own axis" without a reference line, and the
+  constraint tools still don't pick midpoints (so a midpoint can't be one of the pair).
 - **Context ghost**: can't switch reference instance; no hotkey for the eyes; ghost drops parent
   guides; temp dims are per session.
 - **Sliders / welds**: Connect tool doesn't create welds; second click of a two-click slider snaps

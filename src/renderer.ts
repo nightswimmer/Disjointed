@@ -1502,7 +1502,31 @@ const SKETCH_SYMBOL: Record<SketchConstraintKind, string | null> = {
   perpendicular: "⊥",
   equal: "=",
   fixed: null, // a padlock, drawn — see drawLockGlyph
+  symmetric: null, // a dashed mirror line with a dot each side, drawn — see drawMirrorGlyph
 };
+
+/**
+ * The Symmetrical badge, centred on the pill: a dashed mirror line with a dot on each
+ * side, the same picture as its toolbar button. Drawn for the same reason as the
+ * padlock — no character reads as "mirror image" at 11 px (⇔ reads as equivalence, ⋈
+ * as a join), and a drawn glyph keeps the badge colour.
+ */
+function drawMirrorGlyph(ctx: CanvasRenderingContext2D, cx: number, cy: number, color: string, bold: boolean): void {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = bold ? 1.4 : 1;
+  ctx.setLineDash([1.8, 1.4]);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 5.2);
+  ctx.lineTo(cx, cy + 5.2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  for (const dx of [-3.6, 3.6]) {
+    ctx.beginPath();
+    ctx.arc(cx + dx, cy, 1.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
 
 /**
  * The Fixed badge's padlock, centred on the pill: the same icon as its toolbar button,
@@ -1579,7 +1603,8 @@ function drawSketchBadge(
   ctx.stroke();
   const sym = SKETCH_SYMBOL[kind];
   if (sym === null) {
-    drawLockGlyph(ctx, sx, sy, color, bold);
+    if (kind === "symmetric") drawMirrorGlyph(ctx, sx, sy, color, bold);
+    else drawLockGlyph(ctx, sx, sy, color, bold);
   } else {
     ctx.fillStyle = color;
     ctx.textAlign = "center";

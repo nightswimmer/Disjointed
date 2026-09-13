@@ -102,7 +102,7 @@ you simulate), and the caption under it names the mode you are in. A group whose
 hidden carries a small **eye** on its caption — **Grid**, **Constraints** (the badges) and
 **Measure** (the dimensions); a struck-through eye means that group's drawing is hidden, never
 that it stopped working. Buttons for tools that are not built yet (Subtract, Intersect,
-Tangential, Symmetrical) are dimmed placeholders and say so when clicked.
+Tangential) are dimmed placeholders and say so when clicked.
 
 Fields that belong to a selection or an armed tool — text height, actuator / motor speed, the
 solver-tuning knobs — appear in a strip to the **right of the groups**, so nothing shifts when a
@@ -142,6 +142,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, rail or reference edge** (one click), or **two points**, to make it horizontal / vertical. |
 | **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails or reference edges) to constrain their directions — or, for Equal, their lengths. |
 | **Fixed** | `L` | **One click, one element.** Click a **point** (joint, body corner, regular polygon centre, reference point) to lock it exactly where it is — nothing moves it again: no other constraint, no dimension, not even dragging it. Click a **line** (body edge, rail, reference edge) to lock **the line itself** — angle *and* position: its two ends stay free, but only to slide **along** that line and stretch it; the line can never turn or shift. Anything constrained to a locked element yields to it. |
+| **Symmetrical** | `Y` | **Three clicks.** Click **two points** (joints, body corners, regular polygon centres, reference points) — or **two lines** (body edges, rails, reference edges) — then the **mirror line** (a body edge, rail or reference edge). Two points become true mirror images: the same perpendicular distance from the mirror, on opposite sides, on one perpendicular to it. Two lines mirror as whole lines — angle and offset — while their endpoints stay free, so they need not be the same length. The more mobile side gives way: a free reference line used as the mirror is itself re-placed onto the pair's bisector by its first symmetry; carrying two symmetries, snapped to geometry, or locked with Fixed, it stays and the pairs come to it. |
 
 **Select mode** (no tool active, the default): click a body, joint, or rail to select it.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
@@ -306,11 +307,13 @@ remove it — all of this works in both modes. Measurements are saved with the m
 
 **Sketch constraints & driving dimensions** (draw mode). Draw mode works like a CAD sketch:
 
-- The seven **constraint tools** (table above) relate points and lines — or, for **Fixed**,
-  nail a single element down where it is. The geometry moves to
+- The eight **constraint tools** (table above) relate points and lines — or, for **Fixed**,
+  nail a single element down where it is; **Symmetrical** relates a pair *and* the mirror line
+  between them. The geometry moves to
   satisfy a constraint the moment you place it, and a constraint that *can't* be satisfied is
   rejected (the conflicting items flash red, nothing moves). Each constraint shows a small
-  violet **badge** (◎ H V ∥ ⊥ =, and a padlock for Fixed) beside its element — faded until you **hover the element**
+  violet **badge** (◎ H V ∥ ⊥ =, a padlock for Fixed, a dashed mirror with a dot each side for
+  Symmetrical — on both elements and on the mirror line) beside its element — faded until you **hover the element**
   (or the badge — hovering a badge also **highlights the elements it constrains**, with a
   dotted line between them when they're apart): click to select, **Delete** to remove. The **eye** on the **Constraints** group's caption
   **shows/hides all badges** (constraints keep working while hidden), and the eye on the
@@ -771,6 +774,15 @@ back unconditionally every sweep; a locked line stores the whole infinite line, 
 its ends are projected onto it each sweep, which leaves them one degree of freedom (slide
 and stretch) and none for the line. Because the write-back ignores the ranks, locks that
 disagree simply never settle, and the edit is rejected like any other impossibility.
+**Symmetrical** is the one constraint with three participants, and it shares each correction
+in two steps by the same rank rule: first the mirror line against the pair — it moves onto
+the pair's perpendicular bisector (points) or angle bisector (lines) as far as its share goes,
+so a free reference line is re-placed by its first symmetry, while a line locked by Fixed, a
+line carrying two symmetries, or a snapped one is a reference and holds — then the two objects
+against each other, each moving toward the other's image (reflection is affine, so any split
+lands on exact mirror images). Lines move as rigid pieces (a turn about the midpoint, then a
+shift), so their lengths survive. An immovable participant is never written: two instance
+points about a locked line simply reject.
 **Pattern members** are derived geometry: each member variable is coupled to its seed by a
 rigid offset, so a constraint or dimension on a member moves the whole array — seed, members
 and their body together — instead of pinning it in place.
@@ -778,9 +790,12 @@ and their body together — instead of pinning it in place.
 constraints whose every end lives on component instances — not shape material at all:
 between two instances the correction is a closed-form **rigid move** of one of them — a
 translation for distances, coincident and H/V point pairs, a rotation about the constrained
-edge's midpoint for line H/V, parallel and perpendicular — and, for a Fixed lock on an
+edge's midpoint for line H/V, parallel and perpendicular — for a Fixed lock on an
 instance, a translation back onto the locked point or a turn then a shift back onto the
-locked line (Gauss-Seidel over all pose items,
+locked line — and, for a Symmetrical pair on instances, a translation onto the partner's
+mirror image or a turn to the mirrored angle then a shift onto the image line (a side that
+carries the mirror itself moves by the *reflected* shift, since moving it moves the image it
+is chasing) (Gauss-Seidel over all pose items,
 translations and rotations alternating, run live during drags with the dragged instances
 anchored, so partners follow the drag); within one instance the **rigid-drag solver**
 re-poses the internal mechanism with everything else frozen. Rejected edits restore a

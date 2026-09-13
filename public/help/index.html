@@ -413,6 +413,28 @@
         </p>
       </section>
 
+      <section class="topic" id="tool-symmetric">
+        <h2>Symmetrical <span class="keys"><kbd>Y</kbd></span></h2>
+        <p>
+          <strong>What it does:</strong> makes two elements mirror images of each other across a line. Two
+          <em>points</em> &mdash; joints, body corners, a regular polygon&rsquo;s centre, reference points &mdash; end up
+          at the same perpendicular distance from the mirror line, on opposite sides and on one perpendicular to it.
+          Two <em>lines</em> &mdash; body edges, rails, reference segments &mdash; mirror as whole lines, angle and
+          offset; their endpoints stay free, so the two need not be the same length or line up end to end.
+        </p>
+        <p>
+          <strong>To add one:</strong> click the two points (or the two lines), then the mirror line &mdash; a body edge,
+          a rail or a reference segment. Its badge is a small <strong>dashed mirror with a dot each side</strong>, the
+          same picture as the toolbar button, on both elements and on the mirror line.
+        </p>
+        <p>
+          Who moves follows the usual rule: the more mobile side gives way. A free reference line used as the mirror is
+          itself re-placed onto the pair&rsquo;s bisector by its first symmetry; once it carries two symmetries, is
+          snapped to geometry or is locked with <a href="#tool-fixed">Fixed</a>, it stays and the pairs come to it.
+          Dragging one of a symmetric pair swings the other to keep the mirror image.
+        </p>
+      </section>
+
       <section class="topic" id="tool-measure">
         <h2>Measure <span class="keys"><kbd>D</kbd></span></h2>
         <p>
@@ -871,7 +893,7 @@
           <li>Roles: <kbd>1</kbd> body &middot; <kbd>2</kbd> cut &middot; <kbd>3</kbd> reference &middot; <kbd>Ctrl</kbd>+click flips Body / Cut for one shape</li>
           <li>Shapes: <kbd>B</kbd> polyline (body) &middot; <kbd>U</kbd> polyline (cut) &middot; <kbd>Shift</kbd>+<kbd>B</kbd> rectangle &middot; <kbd>Shift</kbd>+<kbd>C</kbd> circle &middot; <kbd>Shift</kbd>+<kbd>P</kbd> regular polygon &middot; <kbd>Shift</kbd>+<kbd>S</kbd> slot &middot; <kbd>Shift</kbd>+<kbd>L</kbd> line &middot; <kbd>Shift</kbd>+<kbd>A</kbd> arc &middot; <kbd>Shift</kbd>+<kbd>T</kbd> text</li>
           <li>Tools: <kbd>X</kbd> split &middot; <kbd>N</kbd> combine &middot; <kbd>J</kbd> joint &middot; <kbd>W</kbd> weld &middot; <kbd>C</kbd> connect &middot; <kbd>G</kbd> ground &middot; <kbd>K</kbd> rail &middot; <kbd>S</kbd> slider &middot; <kbd>L</kbd> guideline &middot; <kbd>R</kbd> rotate &middot; <kbd>I</kbd> linear pattern &middot; <kbd>Q</kbd> circular pattern &middot; <kbd>A</kbd> actuator &middot; <kbd>M</kbd> motor &middot; <kbd>D</kbd> measure</li>
-          <li>Constraints: <kbd>O</kbd> coincident &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>E</kbd> equal &middot; <kbd>L</kbd> fixed</li>
+          <li>Constraints: <kbd>O</kbd> coincident &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>E</kbd> equal &middot; <kbd>L</kbd> fixed &middot; <kbd>Y</kbd> symmetrical</li>
           <li>Editing: <kbd>Delete</kbd> &middot; <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd> undo, redo &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>V</kbd> copy, paste &middot; <kbd>Ctrl</kbd>+<kbd>G</kbd> group &middot; <kbd>[</kbd> / <kbd>]</kbd> corner radius &middot; <kbd>PageUp</kbd> / <kbd>PageDown</kbd> stacking</li>
           <li>Files: <kbd>Ctrl</kbd>+<kbd>S</kbd> save &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save as &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open</li>
           <li>Help: <kbd>?</kbd> open / close the manual &middot; <kbd>F1</kbd> table of contents</li>

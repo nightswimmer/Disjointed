@@ -45,6 +45,7 @@ import {
   SketchConstraintKind,
   DIM_VIOLATION_TOL,
   sameMeasureRef,
+  sketchRefs,
 } from "./model";
 import { solve, Driver, SolveFreeze, resetPoseBaselines } from "./solver";
 import {
@@ -72,7 +73,7 @@ export function isPoseDim(scene: Scene, m: Measurement): boolean {
  *  shape material instead: the sketch solver moves the free side, instance variables
  *  being immovable there. */
 export function isPoseConstraint(scene: Scene, c: SketchConstraint): boolean {
-  return scene.refInstanceOwned(c.refA) && (c.refB === null || scene.refInstanceOwned(c.refB));
+  return sketchRefs(c).every((r) => scene.refInstanceOwned(r));
 }
 
 /**
@@ -99,11 +100,12 @@ export function placeConstraint(
   scene: Scene,
   kind: SketchConstraintKind,
   refA: MeasureRef,
-  refB?: MeasureRef
+  refB?: MeasureRef,
+  mirror?: MeasureRef
 ): { constraint: SketchConstraint | null; breaks: SketchBreak[] } {
-  const pose = scene.refInstanceOwned(refA) && (!refB || scene.refInstanceOwned(refB));
-  if (!pose) return tryAddConstraint(scene, kind, refA, refB);
-  return applyPoseConstraint(scene, kind, refA, refB);
+  const pose = sketchRefs({ refA, refB: refB ?? null, mirror }).every((r) => scene.refInstanceOwned(r));
+  if (!pose) return tryAddConstraint(scene, kind, refA, refB, mirror);
+  return applyPoseConstraint(scene, kind, refA, refB, mirror);
 }
 
 /** Whether a pose constraint currently fails to hold (rendered in the error style). */
@@ -118,11 +120,19 @@ export function poseConstraintViolated(scene: Scene, c: SketchConstraint): boole
 /**
  * A closed-form rigid correction. As given it applies to the **refB side**; the refA
  * side takes the inverse (negated translation, or the negated angle about its own
- * pivot). A single-ref item (line H/V) only has a refA side.
+ * pivot) unless the item states its own A-side move (`deltaA` / `angleA` — a symmetric
+ * pair's sides are each other's *images*, not each other's negation). A single-ref
+ * item (line H/V) only has a refA side.
  */
 type PoseMove =
-  | { kind: "translate"; delta: Vec2 }
-  | { kind: "rotate"; angle: number; pivotA: Vec2; pivotB: Vec2 };
+  | { kind: "translate"; delta: Vec2; deltaA?: Vec2 }
+  | { kind: "rotate"; angle: number; angleA?: number; pivotA: Vec2; pivotB: Vec2 };
+
+/** The translation / angle a move applies to the given side. */
+const moveDelta = (m: PoseMove & { kind: "translate" }, side: "A" | "B"): Vec2 =>
+  side === "B" ? m.delta : m.deltaA ?? scale(m.delta, -1);
+const moveAngle = (m: PoseMove & { kind: "rotate" }, side: "A" | "B"): number =>
+  side === "B" ? m.angle : m.angleA ?? -m.angle;
 
 /** One enforceable pose item: a driving pose dimension or a pose constraint. Geometry
  *  is re-resolved on every call, so items stay valid across the solve rounds. */
@@ -389,6 +399,98 @@ function constraintItem(scene: Scene, c: SketchConstraint): PoseItem {
     case "equal":
       // Both lengths are locked to their definitions — never satisfiable as a pose.
       return { id: c.id, kind: "constraint", refA: c.refA, refB: c.refB, error: () => Infinity, correction: () => null };
+    case "symmetric": {
+      // Two points: B translates onto A's image across the mirror (or A onto B's). Two
+      // lines: turn to the mirrored angle first, then shift onto the other's image, as
+      // the `fixed` line does. The A side is never the plain inverse of the B side —
+      // the reflection of a vector is its image, not its negation — so both sides are
+      // stated (`deltaA` / `angleA`). And when the mirror rides with the moving side,
+      // moving that side by t moves the mirror too, which shifts the image it chases by
+      // t − R·t (R the reflection's linear part): the exact move is then R·s for the
+      // plain shift s, and the turn changes sign (θ + φ = 2(θM + φ) − θ' ⇒ φ = −dd).
+      const mirrorRef = c.mirror;
+      const inert: PoseItem = { id: c.id, kind: "constraint", refA: c.refA, refB: c.refB, error: () => null, correction: () => null };
+      if (!mirrorRef || !c.refB) return inert;
+      const instM = scene.instanceOfRef(mirrorRef)?.id;
+      const withA = instM !== undefined && instM === scene.instanceOfRef(c.refA)?.id;
+      const withB = instM !== undefined && instM === scene.instanceOfRef(c.refB)?.id;
+      type Inf = { p: Vec2; u: Vec2; n: Vec2 };
+      const mirrorLine = (): Inf | null => {
+        const m = scene.resolveMeasureRef(mirrorRef);
+        if (!m || m.kind !== "line" || lineLen(m) < 1e-9) return null;
+        const u = scale(sub(m.b, m.a), 1 / lineLen(m));
+        return { p: m.a, u, n: perp(u) };
+      };
+      const reflectVec = (M: Inf, v: Vec2): Vec2 => sub(v, scale(M.n, 2 * dot(v, M.n)));
+      const reflectPt = (M: Inf, p: Vec2): Vec2 => add(M.p, reflectVec(M, sub(p, M.p)));
+      const isLineA = c.refA.kind === "rail" || c.refA.kind === "edge" || c.refA.kind === "guideLine" || c.refA.kind === "patternAxis";
+      if (!isLineA) {
+        const gap = (): { res: number; a: Vec2; b: Vec2 } | null => {
+          const a = resolveA();
+          const b = resolveB();
+          const M = mirrorLine();
+          if (!a || !b || !M || a.kind !== "point" || b.kind !== "point") return null;
+          const sB = sub(reflectPt(M, a.p), b.p); // B onto A's image, the mirror standing still
+          const sA = sub(reflectPt(M, b.p), a.p); // A onto B's image, likewise
+          return { res: len(sB), b: withB ? reflectVec(M, sB) : sB, a: withA ? reflectVec(M, sA) : sA };
+        };
+        return {
+          id: c.id,
+          kind: "constraint",
+          refA: c.refA,
+          refB: c.refB,
+          error: () => gap()?.res ?? null,
+          correction() {
+            const g = gap();
+            return g ? { kind: "translate", delta: g.b, deltaA: g.a } : null;
+          },
+        };
+      }
+      const mismatch = (): { dd: number; a: Line; b: Line; sA: Vec2; sB: Vec2; M: Inf } | null => {
+        const a = resolveA();
+        const b = resolveB();
+        const M = mirrorLine();
+        if (!a || !b || !M || a.kind !== "line" || b.kind !== "line" || lineLen(a) < 1e-9 || lineLen(b) < 1e-9) return null;
+        // The turn that mirrors B onto A's direction — the same expression, read from
+        // A's side, turns A onto B's: 2θM − θA − θB either way.
+        const dd = wrapHalfPi(2 * Math.atan2(M.u.y, M.u.x) - lineAngle(a) - lineAngle(b));
+        const imgA: Line = { kind: "line", a: reflectPt(M, a.a), b: reflectPt(M, a.b) };
+        const imgB: Line = { kind: "line", a: reflectPt(M, b.a), b: reflectPt(M, b.b) };
+        const nA = perp(scale(sub(imgA.b, imgA.a), 1 / lineLen(imgA)));
+        const nB = perp(scale(sub(imgB.b, imgB.a), 1 / lineLen(imgB)));
+        const sB = scale(nA, -dot(sub(lineMid(b), imgA.a), nA)); // B's midpoint onto A's image
+        const sA = scale(nB, -dot(sub(lineMid(a), imgB.a), nB)); // A's midpoint onto B's image
+        return { dd, a, b, sA, sB, M };
+      };
+      return {
+        id: c.id,
+        kind: "constraint",
+        refA: c.refA,
+        refB: c.refB,
+        error() {
+          const mm = mismatch();
+          return mm ? Math.max(angularError(mm.dd, Math.max(lineLen(mm.a), lineLen(mm.b))), len(mm.sB)) : null;
+        },
+        correction() {
+          const mm = mismatch();
+          if (!mm) return null;
+          if (angularError(mm.dd, Math.max(lineLen(mm.a), lineLen(mm.b))) > sketchConfig.tol) {
+            return {
+              kind: "rotate",
+              angle: withB ? -mm.dd : mm.dd,
+              angleA: withA ? -mm.dd : mm.dd,
+              pivotA: lineMid(mm.a),
+              pivotB: lineMid(mm.b),
+            };
+          }
+          return {
+            kind: "translate",
+            delta: withB ? reflectVec(mm.M, mm.sB) : mm.sB,
+            deltaA: withA ? reflectVec(mm.M, mm.sA) : mm.sA,
+          };
+        },
+      };
+    }
   }
 }
 
@@ -407,13 +509,9 @@ function poseItems(scene: Scene): PoseItem[] {
 /** Apply a move to one side's whole instance. */
 function applyMove(scene: Scene, inst: ComponentInstance, move: PoseMove, side: "A" | "B"): void {
   if (move.kind === "translate") {
-    scene.moveInstance(inst.id, side === "B" ? move.delta : scale(move.delta, -1));
+    scene.moveInstance(inst.id, moveDelta(move, side));
   } else {
-    scene.rotateInstance(
-      inst.id,
-      side === "B" ? move.pivotB : move.pivotA,
-      side === "B" ? move.angle : -move.angle
-    );
+    scene.rotateInstance(inst.id, side === "B" ? move.pivotB : move.pivotA, moveAngle(move, side));
   }
 }
 
@@ -517,10 +615,11 @@ export function applyPoseConstraint(
   scene: Scene,
   kind: SketchConstraintKind,
   refA: MeasureRef,
-  refB?: MeasureRef
+  refB?: MeasureRef,
+  mirror?: MeasureRef
 ): { constraint: SketchConstraint | null; breaks: SketchBreak[] } {
   const snap = JSON.stringify(scene.serialize());
-  const c = scene.addSketchConstraint(kind, refA, refB);
+  const c = scene.addSketchConstraint(kind, refA, refB, mirror);
   if (!c) return { constraint: null, breaks: [] };
   const fail = (breaks: SketchBreak[]): { constraint: null; breaks: SketchBreak[] } => {
     scene.load(JSON.parse(snap)); // predates the constraint: it's gone with the restore
@@ -710,13 +809,12 @@ function poseSolveIntra(scene: Scene, item: PoseItem, moveFirst: "A" | "B"): boo
       const at = driverWorld(scene, drv);
       if (!move || !at) return false;
       if (move.kind === "translate") {
-        drv.target = add(at, side === "B" ? move.delta : scale(move.delta, -1));
+        drv.target = add(at, moveDelta(move, side));
       } else {
         // Turn the grabbed far end about the line's near end by this side's angle.
         const ln = scene.resolveMeasureRef(moveRef);
         if (!ln || ln.kind !== "line") return false;
-        const ang = side === "B" ? move.angle : -move.angle;
-        drv.target = add(ln.a, rotate(sub(at, ln.a), ang));
+        drv.target = add(ln.a, rotate(sub(at, ln.a), moveAngle(move, side)));
       }
       solve(scene, drv, INTRA_ITERS, 1, undefined, undefined, freeze);
     }

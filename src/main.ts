@@ -38,6 +38,7 @@ import {
   SketchConstraintKind,
   sameMeasureRef,
   refHost,
+  sketchRefs,
   isMidpointHost,
   measureInfoFor,
   measureAxisForPlacement,
@@ -83,7 +84,7 @@ type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "gui
 
 /** The tools that place a sketch constraint (tool name = constraint kind). */
 const CONSTRAINT_TOOLS = new Set<Tool>([
-  "coincident", "horizontal", "vertical", "parallel", "perpendicular", "equal", "fixed",
+  "coincident", "horizontal", "vertical", "parallel", "perpendicular", "equal", "fixed", "symmetric",
 ]);
 
 /** Pick / close thresholds in screen (CSS) pixels — converted to world units via the view. */
@@ -1965,7 +1966,21 @@ const HINTS: Record<Mode | Tool | "select" | "viewRotate", string> = {
   perpendicular: "Click two lines (body edges, rails or guidelines) to make them perpendicular.",
   equal: "Click two lines (body edges or rails) to make their lengths equal.",
   fixed: "Click a point (joint, body corner, polygon centre or reference point) to lock it where it is — or a line (body edge, rail or reference segment) to lock the line itself: its ends can still slide along it and stretch it, but the line can never turn or shift.",
+  symmetric: "Click two points (joints, body corners, polygon centres or reference points) — or two lines (body edges, rails or reference segments) — then the mirror line: the two become mirror images across it.", // live stage hint: symmetricHint()
 };
+
+/** Stage hint for the Symmetrical tool: what the next click is for. */
+function symmetricHint(): string {
+  if (constraintPicks.length === 0) return HINTS.symmetric;
+  const first = constraintPicks[0];
+  const line = first.kind === "rail" || first.kind === "edge" || first.kind === "guideLine" || first.kind === "patternAxis";
+  if (constraintPicks.length === 1) {
+    return line
+      ? "Symmetrical: now click the second line (a body edge, rail or reference segment), then the mirror line."
+      : "Symmetrical: now click the second point (a joint, body corner, polygon centre or reference point), then the mirror line.";
+  }
+  return "Symmetrical: now click the mirror line (a body edge, rail or reference segment) the two are reflected across.";
+}
 
 /**
  * Attached joints stranded outside their body's outline (a component edit cascading
@@ -1998,6 +2013,7 @@ function updateHint(): void {
     : tool === null ? HINTS.select
     : isPatternTool(tool) ? patternHint()
     : isShapeTool(tool) ? shapeHint()
+    : tool === "symmetric" ? symmetricHint()
     : HINTS[tool];
   setHint(containmentWarning() + base);
 }
@@ -4252,6 +4268,7 @@ function handleDrawClick(p: Vec2): void {
     case "perpendicular":
     case "equal":
     case "fixed":
+    case "symmetric":
       handleConstraintClick(p);
       return; // manages its own dirty-marking and disarm
   }
@@ -4395,6 +4412,15 @@ function constraintRefAt(p: Vec2): MeasureRef | null {
   }
   // Fixed takes one reference of either shape and commits on that first click.
   if (kind === "fixed") return constraintPointRefAt(p) ?? constraintLineRefAt(p);
+  if (kind === "symmetric") {
+    // Two objects of one kind, then the mirror line: the first pick prefers a point but
+    // takes a line; the second must match it; the third is always a line.
+    if (constraintPicks.length === 0) return constraintPointRefAt(p) ?? constraintLineRefAt(p);
+    if (constraintPicks.length >= 2) return constraintLineRefAt(p);
+    const first = constraintPicks[0];
+    const firstIsLine = first.kind === "rail" || first.kind === "edge" || first.kind === "guideLine" || first.kind === "patternAxis";
+    return firstIsLine ? constraintLineRefAt(p) : constraintPointRefAt(p);
+  }
   if (kind === "coincident") {
     // Point + point, or point + line (either pick order): a pick prefers a point but
     // also takes a line — unless a line is already picked (a line pair is invalid).
@@ -4415,7 +4441,8 @@ function constraintRefAt(p: Vec2): MeasureRef | null {
 
 /**
  * Constraint tool click. Line-pair and point-pair kinds take two picks; horizontal /
- * vertical on a line — and Fixed, on anything — commit on the first. The commit adds the constraint and runs a
+ * vertical on a line — and Fixed, on anything — commit on the first; Symmetrical takes
+ * the pair and then the mirror line, three picks. The commit adds the constraint and runs a
  * sketch solve — geometry moves to satisfy it, or (unsatisfiable) the constraint is
  * removed again and the conflicting items flash red (reject semantics).
  */
@@ -4430,17 +4457,27 @@ function handleConstraintClick(p: Vec2): void {
       return;
     }
     constraintPicks = [ref];
+    updateHint();
     return;
   }
-  if (sameMeasureRef(constraintPicks[0], ref)) return;
+  if (constraintPicks.some((r) => sameMeasureRef(r, ref))) return; // an element picked twice
+  if (kind === "symmetric") {
+    if (constraintPicks.length === 1) {
+      constraintPicks = [constraintPicks[0], ref];
+      updateHint();
+      return;
+    }
+    commitConstraint(kind, constraintPicks[0], constraintPicks[1], ref);
+    return;
+  }
   commitConstraint(kind, constraintPicks[0], ref);
 }
 
 /** Add + solve a sketch constraint; on an unsatisfiable solve it's removed again and flashes.
  *  Every end on component-instance geometry makes it a pose constraint (rigid parts move
  *  instead of shape — pose.ts routes it). */
-function commitConstraint(kind: SketchConstraintKind, refA: MeasureRef, refB?: MeasureRef): void {
-  const { constraint, breaks } = placeConstraint(scene, kind, refA, refB);
+function commitConstraint(kind: SketchConstraintKind, refA: MeasureRef, refB?: MeasureRef, mirror?: MeasureRef): void {
+  const { constraint, breaks } = placeConstraint(scene, kind, refA, refB, mirror);
   disarmTool(); // clears the picks (and, via resetTransient, the selection)
   if (!constraint) {
     if (breaks.length) flashSketchItems(breaks);
@@ -7447,6 +7484,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   t: "perpendicular",
   e: "equal",
   l: "fixed", // Lock in place — F was already "fit the view"
+  y: "symmetric", // sYmmetrical — S is the slider
 };
 /** Shift + letter: the point-defined shape tools (the plain letters were all taken). */
 const SHIFT_TOOL_KEYS: Record<string, Tool> = {
@@ -8237,7 +8275,7 @@ function sketchGlyphsView(): SketchGlyphView[] {
   const out: SketchGlyphView[] = [];
   let hoveredBadge = -1; // index in `out` of the topmost constraint whose badge is under the cursor
   for (const c of scene.sketch) {
-    const allRefs = c.refB ? [c.refA, c.refB] : [c.refA];
+    const allRefs = sketchRefs(c); // a symmetry badges its mirror line too
     const badgeRefs = c.kind === "coincident" ? [c.refA] : allRefs;
     const badges: Vec2[] = [];
     for (const ref of badgeRefs) {
@@ -8277,10 +8315,11 @@ function sketchGlyphsView(): SketchGlyphView[] {
   // one a click would select) gets it, so stacked badges don't all fire at once.
   if (hoveredBadge >= 0) {
     const c = scene.sketch.find((k) => k.id === out[hoveredBadge].id)!;
-    const refs = (c.refB ? [c.refA, c.refB] : [c.refA])
+    const refs = sketchRefs(c)
       .map((ref) => scene.resolveMeasureRef(ref))
       .filter((r): r is ResolvedMeasureRef => r !== null);
-    const link = refs.length === 2 ? sketchLink(refs[0], refs[1]) : null;
+    // The link joins the two related elements (a symmetry's pair — its mirror is the third).
+    const link = refs.length >= 2 ? sketchLink(refs[0], refs[1]) : null;
     out[hoveredBadge].hover = { refs, link };
   }
   sketchGlyphCache = out;

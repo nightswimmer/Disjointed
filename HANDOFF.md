@@ -192,9 +192,9 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   of the toolbar into a status bar** along the bottom of the window (one line, full text on
   its tooltip); the text-size, actuator/motor and solver-tuning fields live in a fixed
   properties strip right of the rack. Placeholder buttons (dimmed, "not implemented yet"
-  toast) now hold places for **Subtract**, **Intersect**, **Tangential** and
-  **Symmetrical** — the manual should not describe them as working tools. (**Fixed** was a
-  placeholder here too and is now a real tool — see the next entry.) `GROUP_TOPICS` in
+  toast) now hold places for **Subtract**, **Intersect** and **Tangential** — the manual
+  should not describe them as working tools. (**Fixed** and **Symmetrical** were
+  placeholders here too and are now real tools — see the entries below.) `GROUP_TOPICS` in
   `src/helpmap.ts` now keys on the `sec-*` ids; the manual generator reads section membership
   through `.tb-sec[id], .group[id]` (`scripts/manual/shoot.ts`), so `glyphs.js` /
   `DISJOINTED_GROUPS` will change shape on the next `npm run manual`.
@@ -248,3 +248,22 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   lists the badge glyphs `◎ H V ∥ ⊥ =` — now seven, with a drawn **padlock** for
   Fixed (vector art, not a character: `drawLockGlyph` in `src/renderer.ts`). README.md is
   already updated.
+- **Symmetrical constraint implemented (2026-09-13).** The dimmed `#symmetric-btn`
+  placeholder became a real tool (`data-tool="symmetric"`, key `Y` — S is the slider; fold
+  into the planned shortcut remap). A **text-only** `tool-symmetric` topic was written (same
+  reason as Fixed: `npm run manual` hard-fails on a missing topic) plus the `Y` entry on the
+  Constraints line of the shortcut list; it needs the illustration pass, and the Constraints
+  group's toolbar shot needs reshooting anyway. Behaviour to document: **three clicks** — two
+  points (joint, body corner, polygon centre, reference point) *or* two lines (body edge,
+  rail, reference segment), then the **mirror line** (body edge, rail or reference segment);
+  the status bar says which click comes next. Two points become true mirror images (equal
+  perpendicular distances, opposite sides, on one perpendicular); two lines mirror as whole
+  lines — angle and offset — with their endpoints free (lengths may differ, and each keeps
+  its length when it moves). Who moves: the usual rank rule, applied mirror-first — a free
+  reference line used as the mirror is re-placed onto the pair's bisector by its first
+  symmetry; a line carrying two symmetries, snapped to geometry (tied), or locked with Fixed
+  is the reference and the pair comes to it; a body edge among geometry shares the move.
+  Dragging one of a symmetric pair swings the partner. The badge is a drawn **dashed mirror
+  with a dot each side** (`drawMirrorGlyph`, the toolbar icon) on both elements *and* on
+  the mirror line; hovering a badge links the pair. The *Constraints* overview now counts
+  **eight** tools. README.md is already updated.
