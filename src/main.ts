@@ -80,7 +80,7 @@ type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "gui
 
 /** The tools that place a sketch constraint (tool name = constraint kind). */
 const CONSTRAINT_TOOLS = new Set<Tool>([
-  "coincident", "horizontal", "vertical", "parallel", "perpendicular", "equal",
+  "coincident", "horizontal", "vertical", "parallel", "perpendicular", "equal", "fixed",
 ]);
 
 /** Pick / close thresholds in screen (CSS) pixels — converted to world units via the view. */
@@ -1955,6 +1955,7 @@ const HINTS: Record<Mode | Tool | "select" | "viewRotate", string> = {
   parallel: "Click two lines (body edges, rails or guidelines) to make them parallel.",
   perpendicular: "Click two lines (body edges, rails or guidelines) to make them perpendicular.",
   equal: "Click two lines (body edges or rails) to make their lengths equal.",
+  fixed: "Click a point (joint, body corner, polygon centre or reference point) to lock it where it is — or a line (body edge, rail or reference segment) to lock the line itself: its ends can still slide along it and stretch it, but the line can never turn or shift.",
 };
 
 /**
@@ -4230,6 +4231,7 @@ function handleDrawClick(p: Vec2): void {
     case "parallel":
     case "perpendicular":
     case "equal":
+    case "fixed":
       handleConstraintClick(p);
       return; // manages its own dirty-marking and disarm
   }
@@ -4366,6 +4368,8 @@ function constraintRefAt(p: Vec2): MeasureRef | null {
   if (kind === "parallel" || kind === "perpendicular" || kind === "equal") {
     return constraintLineRefAt(p);
   }
+  // Fixed takes one reference of either shape and commits on that first click.
+  if (kind === "fixed") return constraintPointRefAt(p) ?? constraintLineRefAt(p);
   if (kind === "coincident") {
     // Point + point, or point + line (either pick order): a pick prefers a point but
     // also takes a line — unless a line is already picked (a line pair is invalid).
@@ -4386,7 +4390,7 @@ function constraintRefAt(p: Vec2): MeasureRef | null {
 
 /**
  * Constraint tool click. Line-pair and point-pair kinds take two picks; horizontal /
- * vertical on a line commits on the first. The commit adds the constraint and runs a
+ * vertical on a line — and Fixed, on anything — commit on the first. The commit adds the constraint and runs a
  * sketch solve — geometry moves to satisfy it, or (unsatisfiable) the constraint is
  * removed again and the conflicting items flash red (reject semantics).
  */
@@ -4396,7 +4400,7 @@ function handleConstraintClick(p: Vec2): void {
   if (!ref) return; // empty space — keep waiting for a reference
   const isLine = ref.kind === "rail" || ref.kind === "edge" || ref.kind === "guideLine" || ref.kind === "patternAxis";
   if (constraintPicks.length === 0) {
-    if ((kind === "horizontal" || kind === "vertical") && isLine) {
+    if (kind === "fixed" || ((kind === "horizontal" || kind === "vertical") && isLine)) {
       commitConstraint(kind, ref);
       return;
     }
@@ -7311,6 +7315,7 @@ const TOOL_KEYS: Record<string, Tool> = {
   p: "parallel",
   t: "perpendicular",
   e: "equal",
+  l: "fixed", // Lock in place — F was already "fit the view"
 };
 /** Shift + letter: the point-defined shape tools (the plain letters were all taken). */
 const SHIFT_TOOL_KEYS: Record<string, Tool> = {

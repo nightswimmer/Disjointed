@@ -391,6 +391,28 @@
         <p><strong>To add one:</strong> click the two lines. A matching pair of badges marks both.</p>
       </section>
 
+      <section class="topic" id="tool-fixed">
+        <h2>Fixed <span class="keys"><kbd>L</kbd></span></h2>
+        <p>
+          <strong>What it does:</strong> locks one element where it is. A <em>point</em> — a joint, a body corner, a
+          regular polygon&rsquo;s centre, a reference point — keeps its exact position: nothing moves it again, not
+          another constraint, not a dimension, not even dragging it. A <em>line</em> — a body edge, a rail, a reference
+          segment — is pinned as a whole, angle <em>and</em> position: its two ends stay free, but only to slide
+          <em>along</em> that line and stretch it. The line itself can never turn or shift.
+        </p>
+        <p>
+          <strong>To add one:</strong> click the point or the line. One click is the whole gesture, and its badge is a small
+          <strong>padlock</strong> on the locked element &mdash; the same icon as the toolbar button.
+        </p>
+        <p>
+          Use it to nail a mechanism down while you sketch the rest against it: everything constrained to a locked
+          element yields to it instead of dragging it along. Two locks that contradict each other (a coincident between
+          two locked points, a parallel between two lines locked on different tracks) are refused, and the conflicting
+          items flash red. Mirroring a locked body re-anchors its locks to the mirrored geometry &mdash; the lock holds
+          it <em>there</em> rather than fighting a move you asked for.
+        </p>
+      </section>
+
       <section class="topic" id="tool-measure">
         <h2>Measure <span class="keys"><kbd>D</kbd></span></h2>
         <p>
@@ -849,7 +871,7 @@
           <li>Roles: <kbd>1</kbd> body &middot; <kbd>2</kbd> cut &middot; <kbd>3</kbd> reference &middot; <kbd>Ctrl</kbd>+click flips Body / Cut for one shape</li>
           <li>Shapes: <kbd>B</kbd> polyline (body) &middot; <kbd>U</kbd> polyline (cut) &middot; <kbd>Shift</kbd>+<kbd>B</kbd> rectangle &middot; <kbd>Shift</kbd>+<kbd>C</kbd> circle &middot; <kbd>Shift</kbd>+<kbd>P</kbd> regular polygon &middot; <kbd>Shift</kbd>+<kbd>S</kbd> slot &middot; <kbd>Shift</kbd>+<kbd>L</kbd> line &middot; <kbd>Shift</kbd>+<kbd>A</kbd> arc &middot; <kbd>Shift</kbd>+<kbd>T</kbd> text</li>
           <li>Tools: <kbd>X</kbd> split &middot; <kbd>N</kbd> combine &middot; <kbd>J</kbd> joint &middot; <kbd>W</kbd> weld &middot; <kbd>C</kbd> connect &middot; <kbd>G</kbd> ground &middot; <kbd>K</kbd> rail &middot; <kbd>S</kbd> slider &middot; <kbd>L</kbd> guideline &middot; <kbd>R</kbd> rotate &middot; <kbd>I</kbd> linear pattern &middot; <kbd>Q</kbd> circular pattern &middot; <kbd>A</kbd> actuator &middot; <kbd>M</kbd> motor &middot; <kbd>D</kbd> measure</li>
-          <li>Constraints: <kbd>O</kbd> coincident &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>E</kbd> equal</li>
+          <li>Constraints: <kbd>O</kbd> coincident &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>E</kbd> equal &middot; <kbd>L</kbd> fixed</li>
           <li>Editing: <kbd>Delete</kbd> &middot; <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd> undo, redo &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>V</kbd> copy, paste &middot; <kbd>Ctrl</kbd>+<kbd>G</kbd> group &middot; <kbd>[</kbd> / <kbd>]</kbd> corner radius &middot; <kbd>PageUp</kbd> / <kbd>PageDown</kbd> stacking</li>
           <li>Files: <kbd>Ctrl</kbd>+<kbd>S</kbd> save &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save as &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open</li>
           <li>Help: <kbd>?</kbd> open / close the manual &middot; <kbd>F1</kbd> table of contents</li>

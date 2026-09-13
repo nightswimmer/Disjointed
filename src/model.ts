@@ -579,7 +579,8 @@ export interface Measurement {
  * `coincident` — two points share a position, or a point lies on an infinite line;
  * `horizontal`/`vertical` — a line (or a point pair) is axis-aligned;
  * `parallel`/`perpendicular` — two lines' directions; `equal` — two lines have equal
- * length.
+ * length; `fixed` — a single reference is nailed down where it is (a point keeps its
+ * world position, a line keeps its angle).
  */
 export type SketchConstraintKind =
   | "coincident"
@@ -587,21 +588,37 @@ export type SketchConstraintKind =
   | "vertical"
   | "parallel"
   | "perpendicular"
-  | "equal";
+  | "equal"
+  | "fixed";
 
 /**
  * A sketch constraint between one or two references (reusing the measurement reference
  * system, so constraints track their elements the same way measurements do — including
- * index remapping across control-vertex edits and prune-on-delete). `refB` is null only
- * for horizontal/vertical applied to a single line reference. Solvable point refs are
- * joints and body control vertices (`bodyPoint` refs are measurement-only); line refs
- * are slider rails and body control edges.
+ * index remapping across control-vertex edits and prune-on-delete). `refB` is null for
+ * horizontal/vertical applied to a single line reference, and always for `fixed`.
+ * Solvable point refs are joints and body control vertices (`bodyPoint` refs are
+ * measurement-only); line refs are slider rails and body control edges.
  */
 export interface SketchConstraint {
   kind: SketchConstraintKind;
   id: number;
   refA: MeasureRef;
   refB: MeasureRef | null;
+  /**
+   * `fixed`: the world position it is nailed to — the point itself for a point lock, a
+   * point *on* the locked line (its midpoint at capture) for a line lock. The one place
+   * a constraint stores a coordinate rather than naming an element — a lock in place
+   * *is* a coordinate, and there is no element to name it with. Re-captured whenever the
+   * reference is deliberately transformed as a whole (`mirrorBody`), so a reflection
+   * doesn't leave the anchor behind.
+   */
+  at?: Vec2;
+  /**
+   * `fixed` on a **line** only (and the field that tells the two forms apart): the world
+   * angle of the locked line. With `at` it pins the whole infinite line — the two ends
+   * stay free, but only to slide along it and stretch it, never to turn or shift it.
+   */
+  angle?: number;
 }
 
 /** A reference resolved to current world geometry. */
@@ -1116,9 +1133,10 @@ export class Scene {
 
   /**
    * Whether the sketch pins a regular outline's rotation: a horizontal / vertical /
-   * parallel / perpendicular on one of its edges (or between two of its corners), or
-   * two of its points tied to other geometry (coincident / aligned) — a structural
-   * reading of the common cases; the live solve still has the last word.
+   * parallel / perpendicular on one of its edges (or between two of its corners), a
+   * `fixed` on one of its edges, or two of its points tied to other geometry
+   * (coincident / aligned / fixed) — a structural reading of the common cases; the
+   * live solve still has the last word.
    */
   regularRotationLocked(bodyId: number, hole: number | null): boolean {
     const onOutline = (r: MeasureRef | null): r is MeasureRef & { kind: "edge" | "vertex" | "centre" } =>
@@ -1136,6 +1154,12 @@ export class Scene {
         if (c.refA.kind === "edge" || c.refB?.kind === "edge") return true; // an edge against an outside line
         if (a) tied.add(pointKey(c.refA)); // one corner aligned with something outside
         if (b && c.refB) tied.add(pointKey(c.refB));
+        continue;
+      }
+      if (c.kind === "fixed" && a) {
+        // A locked edge holds its angle outright; a locked corner / centre is one tie.
+        if (c.refA.kind === "edge") return true;
+        tied.add(pointKey(c.refA));
         continue;
       }
       if (c.kind === "coincident") {
@@ -3488,11 +3512,18 @@ export class Scene {
       if (isLine(b) && this.pointIsLineEndpoint(refA, b)) return null;
     } else if (kind === "horizontal" || kind === "vertical") {
       if (b ? !(isPoint(refA) && isPoint(b)) : !isLine(refA)) return null;
+    } else if (kind === "fixed") {
+      // One reference, point or line — a lock has nothing to relate to.
+      if (b || !(isPoint(refA) || isLine(refA))) return null;
     } else {
       if (!b || !isLine(refA) || !isLine(b)) return null;
     }
-    if (!this.resolveMeasureRef(refA) || (b && !this.resolveMeasureRef(b))) return null;
+    const resA = this.resolveMeasureRef(refA);
+    if (!resA || (b && !this.resolveMeasureRef(b))) return null;
     if (b && sameMeasureRef(refA, b)) return null;
+    // One lock per element: a second `fixed` on the same reference would only restate
+    // the first (and, after the element moved, fight it).
+    if (kind === "fixed" && this.sketch.some((c) => c.kind === "fixed" && sameMeasureRef(c.refA, refA))) return null;
     // Instance geometry is design-locked: its shape belongs to the component definition.
     // A constraint with ONE end free is shape material for the free side (instance
     // variables are immovable in the sketch solver — see varRank in sketch.ts). One
@@ -3513,8 +3544,42 @@ export class Scene {
       refA: cloneMeasureRef(refA),
       refB: b ? cloneMeasureRef(b) : null,
     };
+    if (kind === "fixed" && !this.captureFixed(c, resA)) return null; // degenerate line
     this.sketch.push(c);
     return c;
+  }
+
+  /**
+   * Capture what a `fixed` constraint holds its reference to: a point's world position,
+   * or — for a line — the infinite line it lies on, as a point on it (the midpoint) plus
+   * an angle. Returns false for a degenerate (zero-length) line, which names no line at
+   * all. `res` is the already-resolved reference when the caller has it.
+   */
+  private captureFixed(c: SketchConstraint, res?: ResolvedMeasureRef | null): boolean {
+    const r = res ?? this.resolveMeasureRef(c.refA);
+    if (!r) return false;
+    if (r.kind === "point") {
+      c.at = vec(r.p.x, r.p.y);
+      delete c.angle;
+      return true;
+    }
+    const d = sub(r.b, r.a);
+    if (Math.hypot(d.x, d.y) < 1e-9) return false;
+    c.at = vec((r.a.x + r.b.x) / 2, (r.a.y + r.b.y) / 2);
+    c.angle = Math.atan2(d.y, d.x);
+    return true;
+  }
+
+  /**
+   * Re-anchor every `fixed` constraint to where its reference sits now. Called after a
+   * deliberate whole-element transform the lock is not meant to resist (a mirror in
+   * place): the geometry moved as the user asked, and the lock holds it *there*.
+   * Re-anchoring an element that didn't move is a no-op, so this can run scene-wide.
+   * Transforms that go through a live sketch solve (drags, rotations) need nothing —
+   * the lock pulls back against those, which is the whole point of it.
+   */
+  recaptureFixed(): void {
+    for (const c of this.sketch) if (c.kind === "fixed") this.captureFixed(c);
   }
 
   /**
@@ -4038,6 +4103,9 @@ export class Scene {
     this.remapReversedOutlineRefs(bodyId);
     // bodyPoint refs land on the reflection of the spot they marked (angle is 0 now).
     for (const bp of bodyPoints) bp.ref.local = sub(reflect(bp.world), body.pos);
+    // A reflection negates a locked angle and moves a locked point: re-anchor the locks
+    // rather than leave them fighting a move the user asked for.
+    this.recaptureFixed();
   }
 
   /**
@@ -4122,6 +4190,7 @@ export class Scene {
       this.moveJoint(j.id, reflectDelta(this.jointWorld(j)));
     }
     for (const id of instanceIds) this.mirrorInstance(id, axis, c);
+    this.recaptureFixed(); // the per-body recapture predates the centroid reflection
   }
 
   // --- permanent body groups ------------------------------------------------
@@ -6398,6 +6467,9 @@ export class Scene {
           ...c,
           refA: cloneMeasureRef(c.refA),
           refB: c.refB ? cloneMeasureRef(c.refB) : null,
+          // `fixed` carries a coordinate / an angle: clone the point so a loaded scene
+          // never shares it with the data it came from (undo snapshots reload in place).
+          ...(c.at ? { at: vec(c.at.x, c.at.y) } : {}),
         }))
       : [];
     // Permanent groups arrived in v9 (free-joint members in v14); older files have none.

@@ -105,7 +105,8 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   point onto its neighbour is refused (the edge keeps a direction). The what's-this strings
   in `src/main.ts` (`measure`, `coincident`, `horizontal`, `vertical`, `parallel`,
   `perpendicular`) still say "guideline" — reword them in the same pass.
-- Plain **`L` is unbound** for now (whole shortcut map to be redone later).
+- Plain **`L` now arms the Fixed constraint** (it was left unbound when the Guideline tool
+  went away). The whole shortcut map is still due for a redo.
 - **Regular polygons are now parametric (2026-09-13, format v21).** Manual: rewrite the
   Polygon tool topic — the side count is no longer a toolbar field: it shows beside the
   cursor badge while the tool is armed (↑ / ↓ change it) and, once the polygon exists, as
@@ -191,8 +192,21 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   of the toolbar into a status bar** along the bottom of the window (one line, full text on
   its tooltip); the text-size, actuator/motor and solver-tuning fields live in a fixed
   properties strip right of the rack. Placeholder buttons (dimmed, "not implemented yet"
-  toast) now hold places for **Subtract**, **Intersect**, **Tangential**, **Symmetrical** and
-  **Fixed** — the manual should not describe them as working tools. `GROUP_TOPICS` in
+  toast) now hold places for **Subtract**, **Intersect**, **Tangential** and
+  **Symmetrical** — the manual should not describe them as working tools. (**Fixed** was a
+  placeholder here too and is now a real tool — see the next entry.) `GROUP_TOPICS` in
   `src/helpmap.ts` now keys on the `sec-*` ids; the manual generator reads section membership
   through `.tb-sec[id], .group[id]` (`scripts/manual/shoot.ts`), so `glyphs.js` /
   `DISJOINTED_GROUPS` will change shape on the next `npm run manual`.
+
+- **Fixed constraint implemented (2026-09-13).** The dimmed `#fixed-btn` placeholder became a
+  real one-shot tool (`data-tool="fixed"`, key `L` — F was already fit-view; plain L had been
+  left unbound for the planned shortcut remap, so reconsider it there). A **topic was written**
+  (`tool-fixed` in `public/help/index.html`, plus the `L` entry on the Constraints line of the
+  shortcut list) because `npm run manual` hard-fails on a missing topic — but it is
+  **text-only**: it still needs the usual illustration treatment, and the Constraints group's
+  toolbar illustration needs reshooting anyway (the auto-constraints entry above asks for the
+  same shot). Also to reword: the *Constraints* overview says "the six constraint tools" and
+  lists the badge glyphs `◎ H V ∥ ⊥ =` — now seven, with a drawn **padlock** for
+  Fixed (vector art, not a character: `drawLockGlyph` in `src/renderer.ts`). README.md is
+  already updated.

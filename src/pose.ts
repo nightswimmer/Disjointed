@@ -67,9 +67,10 @@ export function isPoseDim(scene: Scene, m: Measurement): boolean {
   );
 }
 
-/** Whether a sketch constraint is pose-level: every end on instance geometry (a
- *  single-line H/V included). One free end makes it ordinary shape material instead —
- *  the sketch solver moves the free side, instance variables being immovable there. */
+/** Whether a sketch constraint is pose-level: every end on instance geometry (the
+ *  single-ref kinds — a line H/V, a `fixed` — included). One free end makes it ordinary
+ *  shape material instead: the sketch solver moves the free side, instance variables
+ *  being immovable there. */
 export function isPoseConstraint(scene: Scene, c: SketchConstraint): boolean {
   return scene.refInstanceOwned(c.refA) && (c.refB === null || scene.refInstanceOwned(c.refB));
 }
@@ -334,6 +335,54 @@ function constraintItem(scene: Scene, c: SketchConstraint): PoseItem {
           if (!mm) return null;
           // B turns by -dd onto A's direction; A instead turns by +dd onto B's.
           return { kind: "rotate", angle: -mm.dd, pivotA: lineMid(mm.a), pivotB: lineMid(mm.b) };
+        },
+      };
+    }
+    case "fixed": {
+      // A locked point holds the instance where it is: translate it back. A locked line
+      // pins the whole infinite line, so the instance may be both turned and shifted off
+      // it — enforcePose iterates, so the item hands back the turn while the angle is
+      // wrong and the shift once it is right, and the two rounds settle it. Only a refA
+      // side exists, and applyMove negates whatever a single-ref item returns, so every
+      // correction is stated for the absent B side (as the single-line H/V does).
+      if (c.at === undefined) {
+        return { id: c.id, kind: "constraint", refA: c.refA, refB: null, error: () => null, correction: () => null };
+      }
+      const at = c.at;
+      if (c.angle === undefined) {
+        return translateItem(c, () => {
+          const a = resolveA();
+          if (!a || a.kind !== "point") return null;
+          return sub(a.p, at); // negated for side A: the instance moves back onto `at`
+        });
+      }
+      const ang = c.angle;
+      const n = perp({ x: Math.cos(ang), y: Math.sin(ang) }); // normal of the locked line
+      /** Angular mismatch, and how far the line's midpoint sits off the locked line. */
+      const mismatch = (): { dd: number; off: number; ln: Line } | null => {
+        const a = resolveA();
+        if (!a || a.kind !== "line" || lineLen(a) < 1e-9) return null;
+        return { dd: wrapHalfPi(ang - lineAngle(a)), off: dot(sub(lineMid(a), at), n), ln: a };
+      };
+      return {
+        id: c.id,
+        kind: "constraint",
+        refA: c.refA,
+        refB: null,
+        error() {
+          const mm = mismatch();
+          return mm ? Math.max(angularError(mm.dd, lineLen(mm.ln)), Math.abs(mm.off)) : null;
+        },
+        correction() {
+          const mm = mismatch();
+          if (!mm) return null;
+          // Turn first (about the line's own midpoint, so the offset below still holds),
+          // then slide the line back onto its locked track along the normal.
+          if (angularError(mm.dd, lineLen(mm.ln)) > sketchConfig.tol) {
+            const mid = lineMid(mm.ln);
+            return { kind: "rotate", angle: -mm.dd, pivotA: mid, pivotB: mid };
+          }
+          return { kind: "translate", delta: scale(n, mm.off) };
         },
       };
     }

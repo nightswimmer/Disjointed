@@ -102,7 +102,7 @@ you simulate), and the caption under it names the mode you are in. A group whose
 hidden carries a small **eye** on its caption — **Grid**, **Constraints** (the badges) and
 **Measure** (the dimensions); a struck-through eye means that group's drawing is hidden, never
 that it stopped working. Buttons for tools that are not built yet (Subtract, Intersect,
-Tangential, Symmetrical, Fixed) are dimmed placeholders and say so when clicked.
+Tangential, Symmetrical) are dimmed placeholders and say so when clicked.
 
 Fields that belong to a selection or an armed tool — text height, actuator / motor speed, the
 solver-tuning knobs — appear in a strip to the **right of the groups**, so nothing shifts when a
@@ -141,6 +141,7 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Coincident** | `O` | Click **two points** (joints, body corners, reference points or a regular polygon's centre) to make them share a position — or a **point and a line** (body edge, rail or reference edge, either order) to hold the point on that line. |
 | **Horizontal** / **Vertical** | `H` / `V` | Click a **body edge, rail or reference edge** (one click), or **two points**, to make it horizontal / vertical. |
 | **Parallel** / **Perpendicular** / **Equal** | `P` / `T` / `E` | Click **two lines** (body edges, rails or reference edges) to constrain their directions — or, for Equal, their lengths. |
+| **Fixed** | `L` | **One click, one element.** Click a **point** (joint, body corner, regular polygon centre, reference point) to lock it exactly where it is — nothing moves it again: no other constraint, no dimension, not even dragging it. Click a **line** (body edge, rail, reference edge) to lock **the line itself** — angle *and* position: its two ends stay free, but only to slide **along** that line and stretch it; the line can never turn or shift. Anything constrained to a locked element yields to it. |
 
 **Select mode** (no tool active, the default): click a body, joint, or rail to select it.
 **Drag** the selection to move it. An attached joint **can't leave its body** — dragging it past
@@ -299,10 +300,11 @@ works in both modes. Measurements are saved with the mechanism.
 
 **Sketch constraints & driving dimensions** (draw mode). Draw mode works like a CAD sketch:
 
-- The six **constraint tools** (table above) relate points and lines — the geometry moves to
+- The seven **constraint tools** (table above) relate points and lines — or, for **Fixed**,
+  nail a single element down where it is. The geometry moves to
   satisfy a constraint the moment you place it, and a constraint that *can't* be satisfied is
   rejected (the conflicting items flash red, nothing moves). Each constraint shows a small
-  violet **badge** (◎ H V ∥ ⊥ =) beside its element — faded until you **hover the element**
+  violet **badge** (◎ H V ∥ ⊥ =, and a padlock for Fixed) beside its element — faded until you **hover the element**
   (or the badge — hovering a badge also **highlights the elements it constrains**, with a
   dotted line between them when they're apart): click to select, **Delete** to remove. The **eye** on the **Constraints** group's caption
   **shows/hides all badges** (constraints keep working while hidden), and the eye on the
@@ -745,6 +747,12 @@ gives the CAD feel: guide constraints move guides rather than geometry, dragged 
 is never tugged back by its constraints (guides follow it exactly, so groups stay rigid),
 and when a drag would need the constraints to give way, a symmetric re-solve runs the same
 frame so the constraint visibly holds and the drag slides along the directions left free.
+**Fixed** is the one constraint that stores a coordinate instead of naming an element — a
+lock in place *is* a coordinate. A locked point joins the immovable rank and is written
+back unconditionally every sweep; a locked line stores the whole infinite line, and both of
+its ends are projected onto it each sweep, which leaves them one degree of freedom (slide
+and stretch) and none for the line. Because the write-back ignores the ranks, locks that
+disagree simply never settle, and the edit is rejected like any other impossibility.
 **Pattern members** are derived geometry: each member variable is coupled to its seed by a
 rigid offset, so a constraint or dimension on a member moves the whole array — seed, members
 and their body together — instead of pinning it in place.
@@ -752,7 +760,9 @@ and their body together — instead of pinning it in place.
 constraints whose every end lives on component instances — not shape material at all:
 between two instances the correction is a closed-form **rigid move** of one of them — a
 translation for distances, coincident and H/V point pairs, a rotation about the constrained
-edge's midpoint for line H/V, parallel and perpendicular (Gauss-Seidel over all pose items,
+edge's midpoint for line H/V, parallel and perpendicular — and, for a Fixed lock on an
+instance, a translation back onto the locked point or a turn then a shift back onto the
+locked line (Gauss-Seidel over all pose items,
 translations and rotations alternating, run live during drags with the dragged instances
 anchored, so partners follow the drag); within one instance the **rigid-drag solver**
 re-poses the internal mechanism with everything else frozen. Rejected edits restore a

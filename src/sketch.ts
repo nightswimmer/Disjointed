@@ -1,6 +1,6 @@
 /**
  * Sketch solver: CAD-style draw-mode constraints (coincident / horizontal / vertical /
- * parallel / perpendicular / equal) plus driving dimensions. Iterative projection
+ * parallel / perpendicular / equal / fixed) plus driving dimensions. Iterative projection
  * (Gauss-Seidel, the same philosophy as solver.ts) — but where the mechanism solver
  * moves rigid poses, this one moves *shape*: the variables are the world positions of
  * body control vertices and joints. After a converged solve the new positions are
@@ -52,8 +52,9 @@ interface System {
   /**
    * Per-variable mobility rank: 0 = construction (reference-geometry points),
    * 1 = geometry (body control vertices, joints), 2 = pinned by the active drag,
-   * 3 = component-instance geometry (immovable — the shape belongs to the definition,
-   * so it outranks even the drag: dragging against it yields instead). Pattern members
+   * 3 = immovable — component-instance geometry (the shape belongs to the definition)
+   * and points held by a `fixed` constraint; both outrank even the drag, so dragging
+   * against one yields instead. Pattern members
    * rank like the geometry they sit on and ride with their seed (addPatternCouplings).
    * Corrections always flow to the **lowest** rank in a pair — so guide constraints
    * are satisfied by moving free guide points, never by moving joints or body nodes,
@@ -82,6 +83,8 @@ interface System {
    * guide's defining point glued to its joint / corner.
    */
   multiTied: ReadonlySet<number>;
+  /** Variable keys of points held by a `fixed` constraint (rank-immovable, see rank). */
+  fixedPts: ReadonlySet<string>;
 }
 
 /**
@@ -154,8 +157,24 @@ function multiTiedGuides(scene: Scene): Set<number> {
   return new Set([...count].filter(([, n]) => n >= 2).map(([id]) => id));
 }
 
+/**
+ * Variable keys of every point a `fixed` constraint nails down (see System.fixedPts).
+ * Only the **point** form (no `angle`) freezes a variable: a locked line's endpoints
+ * keep their mobility — they may still slide along the line and stretch it.
+ */
+function fixedPointVars(scene: Scene): Set<string> {
+  const out = new Set<string>();
+  for (const c of scene.sketch) {
+    if (c.kind !== "fixed" || !c.at || c.angle !== undefined) continue;
+    const k = pointVarKey(scene, c.refA);
+    if (k) out.add(k);
+  }
+  return out;
+}
+
 /** Mobility rank of a variable (see System.rank). */
-function varRank(scene: Scene, key: string, anchored: boolean): number {
+function varRank(scene: Scene, key: string, anchored: boolean, locked: boolean): number {
+  if (locked) return 3; // a `fixed` point: the pin item holds it, nothing else may move it
   // A pattern axis: the seed anchor never moves for the axis's sake (the direction pivots
   // about the seed), the first-instance point is ordinary geometry.
   if (key.startsWith("pa:")) return 3;
@@ -345,7 +364,7 @@ function acquire(scene: Scene, sys: System, key: string): number | null {
   sys.index.set(key, sys.keys.length);
   sys.keys.push(key);
   sys.pos.push(vec(w.x, w.y));
-  sys.rank.push(varRank(scene, key, sys.anchorSet?.has(key) ?? false));
+  sys.rank.push(varRank(scene, key, sys.anchorSet?.has(key) ?? false, sys.fixedPts.has(key)));
   return sys.keys.length - 1;
 }
 
@@ -371,9 +390,13 @@ function shareOf(rankA: number, rankB: number): number {
 function axisNormalOf(scene: Scene, ref: MeasureRef): Vec2 | null {
   for (const c of scene.sketch) {
     if (c.refB !== null && c.refB !== undefined) continue;
-    if (c.kind !== "horizontal" && c.kind !== "vertical") continue;
     if (!sameMeasureRef(c.refA, ref)) continue;
-    return c.kind === "horizontal" ? vec(0, 1) : vec(1, 0);
+    if (c.kind === "horizontal") return vec(0, 1);
+    if (c.kind === "vertical") return vec(1, 0);
+    // A `fixed` line's direction is locked just as firmly, so its normal is as stable.
+    if (c.kind === "fixed" && c.angle !== undefined) {
+      return perp(vec(Math.cos(c.angle), Math.sin(c.angle)));
+    }
   }
   return null;
 }
@@ -450,6 +473,54 @@ function buildConstraintItem(
   // A guide–geometry coincidence is a *tie*: it always brings the guide to the geometry.
   const tie = kind === "coincident" && !!c.refB && isGuideRef(c.refA) !== isGuideRef(c.refB);
   let rank = (i: number) => itemRank(sys, i, tie);
+  if (kind === "fixed") {
+    // A locked point is nailed to the position captured when the lock was placed; a
+    // locked line pins the whole infinite line through `at` at `angle`, and each of its
+    // two ends is simply projected back onto it — so the ends stay free to slide along
+    // the line and stretch it, and nothing can turn or shift the line itself.
+    //
+    // Both forms are unconditional: they write the lock back whatever the ranks say, so
+    // each converges on its own and locks that disagree (two locked points with a
+    // coincident between them, an endpoint locked off its own line) never settle — the
+    // edit is then rejected, which is exactly what an impossible lock should do.
+    if (!c.at) return "invalid";
+    const at = c.at;
+    if (c.angle === undefined) {
+      const kp = pointVarKey(scene, c.refA);
+      if (!kp) return "invalid";
+      const i = acquire(scene, sys, kp);
+      if (i === null) return "invalid";
+      return {
+        id: c.id,
+        kind: "constraint",
+        run(pos, apply) {
+          const err = dist(pos[i], at);
+          if (apply) pos[i] = vec(at.x, at.y);
+          return err;
+        },
+      };
+    }
+    const kl = lineVarKeys(scene, c.refA);
+    if (!kl) return "invalid";
+    const i = acquire(scene, sys, kl[0]);
+    const j = acquire(scene, sys, kl[1]);
+    if (i === null || j === null) return "invalid";
+    if (i === j) return null; // degenerate line: nothing to hold
+    const n = perp(vec(Math.cos(c.angle), Math.sin(c.angle))); // normal of the locked line
+    return {
+      id: c.id,
+      kind: "constraint",
+      run(pos, apply) {
+        let err = 0;
+        for (const k of [i, j]) {
+          const s = dot(sub(pos[k], at), n); // signed distance off the locked line
+          err = Math.max(err, Math.abs(s));
+          if (apply) pos[k] = sub(pos[k], scale(n, s));
+        }
+        return err;
+      },
+    };
+  }
   if (kind === "coincident" && c.refB && (isLineRef(c.refA) || isLineRef(c.refB))) {
     // A point-on-line tie onto a guide that carries several ties can't be met by
     // translating the guide (see System.multiTied): the guide is the reference and
@@ -749,6 +820,7 @@ function buildSystem(
     keys: [], pos: [], index: new Map(), rank: [], anchorSet: anchors,
     tied: guidesAsReference ? { has: () => true } : tiedGuideVars(scene),
     multiTied: multiTiedGuides(scene),
+    fixedPts: fixedPointVars(scene),
   };
   const items: SolveItem[] = [];
   const invalid: SketchBreak[] = [];

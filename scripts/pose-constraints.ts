@@ -301,6 +301,55 @@ function twoBlocks(pos2: Vec2, angle2 = 0) {
   }
 }
 
+// --- tier 5: a Fixed lock on instance geometry poses the instance -------------------
+{
+  // A point lock nails the instance where it is: moving it leaves the lock violated,
+  // and the un-anchored settle translates the whole instance back.
+  const { scene, inst2, body2 } = twoBlocks({ x: 200, y: 70 });
+  const shape = JSON.stringify(body2.controlLocal);
+  const corner = () => scene.resolveMeasureRef({ kind: "vertex", bodyId: body2.id, index: 0 })!;
+  const c0 = corner();
+  const r = placeConstraint(scene, "fixed", { kind: "vertex", bodyId: body2.id, index: 0 });
+  check("fixed on instance geometry is a pose constraint", r.constraint !== null && isPoseConstraint(scene, r.constraint), `${r.breaks.length} breaks`);
+  check("placing it moves nothing", dist(body2.pos, { x: 200, y: 70 }) < 1e-9, fmt(body2.pos));
+  scene.moveInstance(inst2.id, { x: 40, y: -25 });
+  check("the lock reads violated once the instance moves", poseConstraintViolated(scene, r.constraint!), "violated");
+  const left = enforcePose(scene);
+  const c1 = corner();
+  check(
+    "enforcePose translates the instance back onto the anchor",
+    left.length === 0 && c0.kind === "point" && c1.kind === "point" && dist(c0.p, c1.p) < TOL,
+    c1.kind === "point" ? fmt(c1.p) : "not a point"
+  );
+  check("the instance's shape is untouched", JSON.stringify(body2.controlLocal) === shape, "held");
+}
+{
+  // A line lock pins the instance's edge to a whole line — angle and position. A turn is
+  // undone, and so is a shift off the line; a slide *along* it is not a violation.
+  const { scene, inst2, body2 } = twoBlocks({ x: 200, y: 70 });
+  const r = placeConstraint(scene, "fixed", { kind: "edge", bodyId: body2.id, index: 0 });
+  const a0 = edgeAngle(scene, body2.id, 0); // the top edge: horizontal, at y = 50
+  check("fixed on an instance edge accepted", r.constraint !== null && r.breaks.length === 0, `${r.breaks.length} breaks`);
+  scene.rotateInstance(inst2.id, body2.pos, 0.4);
+  scene.moveInstance(inst2.id, { x: 15, y: 22 });
+  check("the line lock reads violated after a turn and a shift", poseConstraintViolated(scene, r.constraint!), "violated");
+  const left = enforcePose(scene);
+  const dd = wrapHalfPi(edgeAngle(scene, body2.id, 0) - a0);
+  const mid = scene.resolveMeasureRef({ kind: "edge", bodyId: body2.id, index: 0 })!;
+  const offY = mid.kind === "line" ? (mid.a.y + mid.b.y) / 2 - 50 : NaN;
+  check("enforcePose turns the instance back to the locked angle", left.length === 0 && Math.abs(dd) < 1e-4, `mismatch ${dd.toExponential(2)}`);
+  check("…and puts the edge back on the locked line", Math.abs(offY) < TOL, `off by ${offY.toExponential(2)}`);
+  // Sliding the instance along the locked line leaves the lock satisfied.
+  const settled = { x: body2.pos.x, y: body2.pos.y };
+  scene.moveInstance(inst2.id, { x: 35, y: 0 });
+  check("a slide along the locked line is not a violation", !poseConstraintViolated(scene, r.constraint!), "satisfied");
+  check(
+    "…and the instance keeps the slide",
+    Math.abs(body2.pos.x - settled.x - 35) < TOL && Math.abs(body2.pos.y - settled.y) < TOL,
+    `${fmt(settled)} -> ${fmt(body2.pos)}`
+  );
+}
+
 if (failures > 0) {
   console.error(`${failures} FAILURE(S)`);
   process.exit(1);

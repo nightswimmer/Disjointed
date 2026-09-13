@@ -1490,15 +1490,37 @@ const FEATURE_SEL_COLOR = "#4f9dff";
 /** Rejected sketch edits flash the conflicting items in the error red. */
 const FLASH_COLOR = "#ff4d4d";
 
-/** Badge symbol per sketch-constraint kind (drawn in the glyph pill). */
-const SKETCH_SYMBOL: Record<SketchConstraintKind, string> = {
+/**
+ * Badge symbol per sketch-constraint kind (drawn in the glyph pill). `null` means the
+ * glyph is vector art instead of a character — see `drawBadgeGlyph`.
+ */
+const SKETCH_SYMBOL: Record<SketchConstraintKind, string | null> = {
   coincident: "◎",
   horizontal: "H",
   vertical: "V",
   parallel: "∥",
   perpendicular: "⊥",
   equal: "=",
+  fixed: null, // a padlock, drawn — see drawLockGlyph
 };
+
+/**
+ * The Fixed badge's padlock, centred on the pill: the same icon as its toolbar button,
+ * so the badge and the tool teach each other. Drawn rather than typed — every character
+ * that means "locked" is either an emoji (which ignores the badge colour) or another
+ * shape-inside-a-shape, indistinguishable from the coincident ◎ at this size.
+ */
+function drawLockGlyph(ctx: CanvasRenderingContext2D, cx: number, cy: number, color: string, bold: boolean): void {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = bold ? 1.5 : 1.1;
+  ctx.beginPath();
+  ctx.roundRect(cx - 3.6, cy - 0.6, 7.2, 5.4, 1.2); // the body
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy - 1.2, 2.3, Math.PI, 0); // the shackle
+  ctx.stroke();
+}
 
 /**
  * Compact value text: one decimal, trailing zero dropped; degrees get a ° suffix and
@@ -1555,10 +1577,15 @@ function drawSketchBadge(
   ctx.strokeStyle = color;
   ctx.lineWidth = bold ? 1.6 : 1;
   ctx.stroke();
-  ctx.fillStyle = color;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(SKETCH_SYMBOL[kind], sx, sy + 0.5);
+  const sym = SKETCH_SYMBOL[kind];
+  if (sym === null) {
+    drawLockGlyph(ctx, sx, sy, color, bold);
+  } else {
+    ctx.fillStyle = color;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(sym, sx, sy + 0.5);
+  }
   ctx.restore();
 }
 

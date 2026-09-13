@@ -77,7 +77,10 @@ motion; actuators / motors animate.
 - **Measurements** and **sketch constraints** share `MeasureRef` (joint, vertex, edge, bodyPoint,
   rail, guidePoint, guideLine, patternAxis, centre; vertex/edge refs carry an optional `hole`).
   Refs always name **elements**, never coordinates. Dimensions may be `driving` (with `target` and
-  a held `side`).
+  a held `side`). The **one** exception to "never coordinates" is the `fixed` constraint: a lock
+  in place *is* a coordinate and there is no element to name it with, so it carries `at` (the
+  point, or a point on the locked line) and — line form only — `angle`. `angle !== undefined`
+  is what tells the two forms apart.
 - The `bodies` array **is** the z-order (drawn first→last, picked last→first).
 
 ## Design decisions and invariants (with reasons)
@@ -116,7 +119,8 @@ motion; actuators / motors animate.
   red. Multi-pass write-back (`APPLY_PASSES`) re-solves from the applied state before rejecting,
   because the rigid carry itself can move items the iteration left satisfied.
 - **Mobility ranks** decide who moves: 0 construction (guide points) < 1 geometry < 1.5 tied guides
-  < 2 drag-anchored < 3 component-instance geometry (immovable — its shape belongs to the def).
+  < 2 drag-anchored < 3 immovable (component-instance geometry — its shape belongs to the def —
+  and points held by a `fixed` lock).
   Corrections flow to the lowest rank. Consequences: a guide with one demand moves alone; a guide
   tied to geometry or carrying several demands becomes a reference (geometry moves to it); a
   guides-as-reference fallback pass runs when the construction-first pass fails.
@@ -135,6 +139,15 @@ motion; actuators / motors animate.
   demotes conflicting driving size dims to driven.
 - **Pattern members ride with their seed** through rigid-offset couplings (an immovable rank
   deadlocked any solve that needed a patterned body to shift).
+- **`fixed` is enforced unconditionally, not by rank**: its item writes the lock back every sweep
+  whatever the ranks say, so a locked point resists even the drag and two locks that disagree
+  never settle — the edit is then rejected, which is what an impossible lock should do (rank 3
+  is there only so corrections flow away from a locked point in one step). A locked **line**
+  stores the whole infinite line and projects *both* ends onto it: the ends keep their normal
+  rank, so they stay free to slide along the line and stretch it, and only the line is frozen.
+  Deliberate whole-element transforms that don't live-solve (`mirrorBody` / `mirrorBodies`)
+  call `recaptureFixed` — the reflection is a move the user asked for, so the lock re-anchors
+  instead of fighting it; drags and rotations need nothing, they solve live and the lock wins.
 - **Regular polygons are an invariant, not constraints**: rigid weighted fit per solve (a similarity
   fit let pinching corrections shrink it sweep after sweep); H/V/parallel/perpendicular on an edge
   turn it in one step; **a dimension never turns a regular polygon** (that solver item could stall
@@ -202,6 +215,11 @@ motion; actuators / motors animate.
   geometry unless the guide is tied / multiply demanded (see ranks).
 
 ### UI conventions
+- **Sketch badges** are 11 px pills carrying one glyph; `SKETCH_SYMBOL` maps a kind to a
+  character, or to `null` when the glyph is vector art (today only `fixed`'s padlock,
+  `drawLockGlyph` — it matches the tool's toolbar icon, and every character that means "locked"
+  is either an emoji, which ignores the badge colour, or another shape-in-a-shape that reads as
+  the coincident ◎ at that size). `SvgRecorder` replays the drawn glyph fine.
 - Tools are **one-shot** (Rotate is a mode; the polyline/body draft spans clicks). Toolbar wiring is
   by id / `data-*` / class, never button text **and never by position** — the user reorders the
   groups. All user-facing warnings go through `notify`.
@@ -229,7 +247,7 @@ motion; actuators / motors animate.
   vs `featureSel` (vertices + joints of one body). Ctrl+G is a group toggle; plain G is Ground.
 - Two-click slider start pair: a press grabs the **rail joint** in draw mode, the **rider** in sim.
 - Text shortcuts: plain letters in `TOOL_KEYS`, Shift+letter shape tools in `SHIFT_TOOL_KEYS`
-  (main.ts); plain `L` is unbound; the whole shortcut map is due for a remap.
+  (main.ts); plain `L` arms Fixed; the whole shortcut map is due for a remap.
 - View rotation is purely visual (world axes for constraints, grid and snapping).
 
 ## Serialization history (`load` accepts everything ≤ 21)
@@ -237,14 +255,16 @@ v5 control polygons · v6 actuators/motors · v7 measurements · v8 sketch const
 v9 groups · v10 grounded bodies · v11 guides · v12 units · v13 holes (baked) · v14 components +
 group joints · v15 per-corner radii · v16 editable holes · v17 locked riders · v18 welds ·
 v19 patterns · v20 guide union + `startRiders` · v21 regular polygons, infinite guideline dropped.
-Optional fields added without a bump: `Measurement.side`, `mirrored`, `rigid`. Load sanitizes
+Optional fields added without a bump: `Measurement.side`, `mirrored`, `rigid`, the `fixed`
+sketch-constraint kind with its `at` / `angle`. Load sanitizes
 every list invariant (locked ⊆ riders, pattern members exist, mismatched regular counts dropped).
 
 ## Tests (`scripts/`, one line each)
 solver-smoke (slider-crank + end-stops) · free-rail · ground-drag · impossible-assembly ·
 persistence · build-body · shape-edit (fillet, containment, node↔joint link, radii, holes) ·
 edit-utils (rotate/mirror/copy/z-order) · actuators · measurements (incl. diameter/radius) ·
-sketch (constraints, dims, ranks, rigid carry, drift) · groups · group-joints · grounded-bodies ·
+sketch (constraints, dims, ranks, rigid carry, drift) · fixed-constraint (point / line locks,
+conflict rejects, mirror re-capture) · groups · group-joints · grounded-bodies ·
 freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression with solver stats) ·
 components · pose-dims · pose-constraints · split-combine · shapes (cut, references, v21 load) ·
 regular · guides · patterns · features · context-ghost · view · dxf · export.
@@ -261,6 +281,11 @@ it for the exact cases.
   live scene each frame (the group-drift bug).
 - A single stalled solver item rejects the whole scene's sketch — prefer invariants / direct
   parameter setting over items that can stall.
+- **A line-vs-line conflict has an escape hatch: collapse.** `projectParallel` and the H/V line
+  items are satisfied by a zero-length line, so "vertical on a horizontal edge" (and a parallel
+  between two locked lines) *converges* by shrinking the edge to a point instead of rejecting.
+  Long-standing, not specific to any one kind — don't write tests that assume such a pair
+  rejects, and treat it as the candidate root cause if a degenerate edge ever appears.
 - Gauss-Seidel propagates one link per sweep: chains of pairwise constraints must become composites.
 - Errors with non-unique zeros (`sin`) allow flipped poses to read as satisfied.
 - Guards that live only in one entry point (the instance-ownership check that lived in
@@ -273,8 +298,11 @@ it for the exact cases.
   every manual-relevant change is logged in HANDOFF.md ("pending manual updates") for one later pass.
   Currently pending there: guideline removal, parametric polygons and the "n sides" tag,
   projected corner-pair size dimensions, single-click line dimensions, the two-candidate /
-  point-on-point implicit constraints with their new toolbar switch, and stale what's-this strings.
-- Plain `L` is unbound; a full shortcut remap is planned.
+  point-on-point implicit constraints with their new toolbar switch, the Fixed constraint, and
+  stale what's-this strings. One manual exception so far: a **text-only** `tool-fixed` topic had
+  to be written, because `npm run manual` hard-fails on a topic the app can ask for and every
+  `data-tool` button implies one — it still needs the illustration pass like the rest.
+- Plain `L` arms the Fixed constraint (F was already fit-view); a full shortcut remap is planned.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.
 - The toolbar was regrouped into draggable groups for **draw mode**; sim mode inherits the rack
   but its own grouping (Animation + solver tuning) has not been designed yet — see HANDOFF.md.
@@ -299,7 +327,12 @@ it for the exact cases.
   carried by copy/paste; a refused pose constraint gives no feedback (nothing to flash).
 - **Sketch**: driving angle dimensions; radius dim on a sharp corner can't be picked. Implicit
   constraints have no keyboard shortcut for their switch, and no point-on-point coincident between
-  a dragged *line* and a candidate (lines only take point-on-line).
+  a dragged *line* and a candidate (lines only take point-on-line). **Fixed** takes points and
+  lines only — there is no "lock this whole body" (two locks pin one rigidly, but a body click
+  would be the obvious gesture); a locked element gets no styling of its own beyond its badge, so
+  a body deforming around a lock under a drag is only explained by the badge.
+- **Tangential and Symmetrical** are still dimmed placeholders in the Constraints group (as are
+  Subtract / Intersect in Boolean).
 - **Context ghost**: can't switch reference instance; no hotkey for the eyes; ghost drops parent
   guides; temp dims are per session.
 - **Sliders / welds**: Connect tool doesn't create welds; second click of a two-click slider snaps
