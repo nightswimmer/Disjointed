@@ -1,11 +1,141 @@
-# Handoff — shape tools & roles
+# Handoff — open work
 
-Design notes and open items for the **shape tools + roles** feature (phase 1 shipped
-2026-09-13, format v20). Read together with PROJECT_INSTRUCTIONS.md (current state) — this
-file holds what was **discussed and decided but not built yet**, so a future session can
-pick the next phase up without re-doing the brainstorm.
+What has been **discussed and decided but not built yet**. Read with PROJECT_INSTRUCTIONS.md
+(current state); this file holds only the unfinished part, so a future session can pick a piece
+up without re-doing the brainstorm. In order: the **command registry + keymap file** (next up),
+the **shape tools + roles** roadmap (phase 1 shipped 2026-09-13, format v20), the Tangential
+follow-up, the sim-mode toolbar, and the **pending manual updates** list.
 
-## Decisions already made (don't re-open)
+## Command registry + keymap file — next up (spec, 2026-09-14)
+
+### Why
+
+A shortcut letter is written down in at least four places today: `TOOL_KEYS` /
+`SHIFT_TOOL_KEYS` (`src/main.ts:8005`), the hand-written `if` ladder under them
+(`src/main.ts:8040-8283`), the `(J)` suffix inside about forty `title=` strings in
+`index.html`, and the shortcut lists in README.md and `public/help/index.html#shortcuts`.
+Changing one key means five edits and usually leaves one stale. The registry makes a binding
+**data**: one table in code, one file on disk, everything else generated.
+
+It also kills a bug class. `F` and `N` are tested before the Shift+letter table and never check
+`e.shiftKey`, so `Shift+F` and `Shift+N` are unreachable today. Exact slot resolution removes
+the ordering problem entirely — and with it the "guard" warning the KeyMapper board shows.
+
+### The file
+
+`public/keymap.json`, schema **`keymap/1`** — the format is the contract shared with the
+**KeyMapper** project and is documented normatively in that repo's README. Do not restate it
+here. Disjointed adds two extension fields (the format preserves unknown fields verbatim):
+
+- `tool` — a `Tool` id. The command arms that tool; covers 31 commands and is everything the
+  old two maps ever said.
+- `whileTyping: true` — the command answers even while focus is in an input / select /
+  textarea. Exactly four have it: Save, Save as, Open, Manual (`F1`). If a second project ever
+  needs this, promote it into `keymap/2` rather than keeping it private.
+
+Shipped defaults live in the file; a user's changes go to `localStorage["disjointed:keymap"]`
+as a whole `{commandId: bindings[]}` map — not a diff, because a diff against a moving default
+is a migration problem nobody wants. Import / Export / Reset buttons go in the File group.
+
+### Where the code goes
+
+- **`src/keymap.ts`** (new) — the format: types, parse / validate, merge overrides, event
+  normalization, slot resolution. Knows nothing about app state, so it is testable headless.
+- **The registry literal stays in `src/main.ts`**, beside the handler it replaces. Every
+  `run()` closes over module-level state (`tool`, `selection`, `mode`, `view`, `scene`,
+  `leftDrag`…); handing all of that to another module needs a facade bigger than the win.
+  Resist moving it — the split is *format* vs *behaviour*, not file size.
+
+```ts
+type Command = {
+  id: string;                        // stable; the file keys on it
+  label: string;                     // tooltips and the manual read this
+  description: string;               // one line, shared with the manual
+  group: string;
+  context: "draw" | "sim" | "any";
+  tool?: Tool;                       // arm this tool …
+  run?: () => void;                  // … or do this
+  enabled?: () => boolean;           // optional guard, e.g. "a body is selected"
+  whileTyping?: boolean;
+};
+```
+
+### Event normalization — get this right first
+
+The lookup slot is `KEY + "|" + ["ctrl","shift","alt"].filter(held).join("+")`. How `KEY` is
+spelled decides whether `?` can ever match:
+
+- **a–z** → the uppercase letter, and Shift **is** recorded (`B` and `Shift+B` are different
+  slots).
+- **Named keys** — `Tab Enter Esc Space Backspace Delete Insert Home End PageUp PageDown`,
+  `F1`…`F12`, and the arrows written `↑ ↓ ← →` — the name, Shift recorded.
+- **Every other printable character** (`?`, brackets, punctuation, digits) → the character
+  itself, and Shift is **not** recorded: the character already encodes it. `?` arrives as
+  `e.key === "?"` with `shiftKey` true, so recording Shift would make the slot `?|shift`, which
+  nothing would ever match.
+- `ctrl` means `e.ctrlKey || e.metaKey` (Cmd on Mac); `alt` is `e.altKey`.
+
+### Dispatch
+
+Build `Map<slot, Command[]>` once per keymap change. On keydown: normalize → look up → take the
+first command whose `context` matches the current mode (`any` matches both) and whose
+`enabled?.()` is not false → `preventDefault()`, run. `whileTyping` commands resolve **before**
+the focus-in-a-field bail-out; everything else after it.
+
+Five commands keep internal branching and must stay **one** command each — do not model their
+states as separate bindings:
+
+- `Esc` — the layered cancel (export panel → view dial → newest armed auto-constraint → disarm
+  the tool → leave an open group → leave a component).
+- `Delete` — measurement vs selection, and it answers in both modes.
+- `↑` / `↓` — the armed polygon tool vs a selected regular polygon or hole.
+- `Enter` — close a polyline vs commit a pattern count.
+- `[` / `]` — needs a selected body, and a disk takes a different path.
+
+### Generated from the registry
+
+- **Tooltips.** Give every button a `data-cmd="<id>"` (tool buttons already carry `data-tool`,
+  which maps to the command); strip the `(J)` / `(Shift+B)` suffixes out of `index.html` so each
+  `title` holds only its base text, and append the current shortcut at startup.
+- **Docs.** The manual's `#shortcuts` list and the README table's Shortcut column both come from
+  the file. Fold it into `npm run manual` (or a small `npm run keymap:docs`) — that ends the
+  recurring "the shortcut list is stale" entry in this file.
+
+### Tests — `scripts/keymap.ts`
+
+Ids unique; every `tool` is a real `Tool`; no two commands share a slot with overlapping
+contexts (`any` overlaps everything); `public/keymap.json` and the registry agree exactly
+(generate the file from the registry, then assert); every `data-cmd` in `index.html` resolves.
+
+### Order of work
+
+1. `src/keymap.ts` + types + normalization + its tests. No behaviour change yet.
+2. The registry literal, and dispatch replacing the ladder — **with today's bindings**, so the
+   only acceptable visible change is none. Confirm by eye.
+3. Generate `public/keymap.json` from the registry; add the agreement test.
+4. Tooltips from `data-cmd`, then the README / manual generators.
+5. Import / Export / Reset and the localStorage override.
+6. Only then apply the new layout.
+
+### The remap to apply, once the user calls it final
+
+Designed on the KeyMapper board (artifact `cc79ffcf-efa4-4d38-9bd7-e2aade7901a4`) — export the
+file from there rather than copying numbers out of this paragraph. As of 2026-09-14 it held
+seven changes — Fixed `L`→`F`, Circle `Shift+C`→`C`, Reference line `Shift+L`→`L`, Reference arc
+`Shift+A`→`A`, Connect `C`→`Shift+C`, Fit view `F`→`Shift+F`, Linear actuator unassigned — and
+was **not** finished. `Shift+F` only works after step 2.
+
+### Watch out
+
+- **21 commands have no keydown branch at all**: Export, Mirror H / V, the grid / snap /
+  constraint-badge / measurement toggles, theme, zoom in / out, Create component, Component
+  browser, Auto-pause, Delete everything, the two grid menus, Auto constraints. Giving one of
+  them a key is a small **new feature**, not a remap — each needs its `run()` written. Subtract
+  and Intersect cannot be wired at all until the boolean ops exist.
+- Out of scope here: chords / key sequences, predicates expressed in the file (they stay in code
+  as `enabled()`), and rebinding pointer gestures.
+
+## Shape tools & roles — decisions already made (don't re-open)
 
 - **Roles are explicit and sticky** (toolbar switch, keys 1 / 2 / 3), never inferred from
   where a click lands: bodies routinely overlap other bodies, so "first click inside a body
@@ -379,3 +509,10 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   end and the line's end — makes the line touch the arc exactly at the shared end, and
   dragging that end swings the line. The *Constraints* overview now counts **nine** tools
   and its badge list gains the tangent glyph. README.md is already updated.
+
+- **Coincident toolbar icon gained a crosshair (2026-09-13).** The Coincident button's glyph
+  (ring + centre dot) was almost indistinguishable from the **Joint** tool's at 22 px, so it
+  became a reticle: the ring plus four short ticks outside it, north / south / east / west.
+  Nothing about the tool changed, and the on-canvas coincident **badge** (`◎`) is untouched —
+  but the manual's generated glyph table (`glyphs.js`) and the Constraints group's toolbar
+  illustration both render the toolbar icon, so both need reshooting with `npm run manual`.

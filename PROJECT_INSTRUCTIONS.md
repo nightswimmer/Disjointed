@@ -9,8 +9,8 @@ Where things are documented:
   behaviour question comes up, read it there; do not duplicate it here.
 - **public/help/** — the in-app manual (same content as README, illustrated). Its updates are
   currently **deferred** (see *In flight*).
-- **HANDOFF.md** — the agreed roadmap for shape tools (phases 2–4), smaller follow-ups, and the
-  list of pending manual edits.
+- **HANDOFF.md** — unfinished work: the **command registry + keymap file** build spec (next up),
+  the shape-tools roadmap (phases 2–4), smaller follow-ups, and the list of pending manual edits.
 - Code comments carry the local *why* for most non-obvious branches; `scripts/*.ts` are the
   executable spec.
 
@@ -455,9 +455,21 @@ it for the exact cases.
   `tool-fixed`, `tool-symmetric` and `tool-tangent` topics had to be written, because
   `npm run manual` hard-fails on a topic the app can ask for and every `data-tool` button
   implies one — all three still need the illustration pass like the rest.
-- Plain `L` arms the Fixed constraint (F was already fit-view), `Y` the Symmetrical one
-  (S is the slider) and `Z` the Tangential one (T is perpendicular); a full shortcut remap
-  is planned.
+- **The shortcuts are being remapped.** Every plain letter is bound, and the constraints that arrived last
+  took whatever was free (`L` Fixed, `Y` Symmetrical, `Z` Tangential), so the layout is being
+  reworked on an external board — a KeyMapper artifact, see HANDOFF.md for its id — rather than
+  in the code. The next piece of work is the **command registry + `public/keymap.json`** that
+  turns a binding into data; the full build spec is in HANDOFF.md. Until then, don't hand-edit
+  `TOOL_KEYS` or the `(J)` inside a tooltip: that duplication is exactly what the registry
+  deletes, and a remap applied by hand would be thrown away twice.
+- The **`keymapper/`** folder is **not part of this project**. It is the seed for **KeyMapper**,
+  the standalone shortcut-remapping tool that grew out of this work: its README (which carries
+  the `keymap/1` schema), its own PROJECT_INSTRUCTIONS.md and CLAUDE.md, and scaffolding copied
+  from here (`.gitignore`, `tsconfig.json`, `vite.config.ts`, `LICENSE`) plus a thin
+  `package.json`. It is staged for the user to copy into KeyMapper's own repo and should be
+  deleted from here once that repo exists — nothing in the build or the tests looks at it. The
+  `keymap/1` schema is the contract this app's keymap file will follow, and the only thing the
+  two projects share.
 - The **Tangential constraint shipped but needs another pass**: the user's field tests with
   a two-line-and-an-arc scene of their own found it still wanting. HANDOFF.md lists the known weak spots (three-point
   arcs, the line swinging in a blend, no held side, coverage); ask what was seen before
