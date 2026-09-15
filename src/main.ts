@@ -67,20 +67,21 @@ import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolat
 import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView, GridStyle, GRID_STYLES, dimensionLabelHit, dimensionLabelWidth, LabelHit } from "./renderer";
 import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize, perp, roundedConvexBody, filletCornerArcs, distToSegment, distToLine, distToArc, regularPolygon, arcThrough, sampleArc } from "./geometry";
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt, rotateViewTo, rotateToScreen, rotateToWorld } from "./view";
+import {
+  COMMAND_IDS, COMMAND_LIST, CommandId, CommandSpec, SHAPE_TOOLS, ShapeRole, ShapeTool, Tool,
+  commandById, defaultBindings, toKeymapFile,
+} from "./commands";
+import {
+  Binding, KeymapOverrides, findConflicts, formatChord, overridesOfFile, parseKeymap,
+  parseOverrides, slotOf, slotOfEvent,
+} from "./keymap";
 import { installHelp } from "./help";
 import { installToolbar } from "./toolbar";
 import { CanvasTopic } from "./helpmap";
 
 type Mode = "draw" | "sim";
-type Tool =
-  | ShapeTool | "split" | "joint" | "weld" | "connect" | "ground" | "rail" | "slider" | "rotate"
-  | "linearActuator" | "motor" | "measure" | "patternLinear" | "patternCircular"
-  | SketchConstraintKind; // each sketch-constraint kind is its own one-shot tool
-/** The shape tools: role-neutral geometry that the armed role turns into a body, a cut or a reference. */
-const SHAPE_TOOLS = ["polyline", "rect", "circle", "polygon", "slot", "line", "arc", "text"] as const;
-type ShapeTool = (typeof SHAPE_TOOLS)[number];
-/** What a finished shape becomes. */
-type ShapeRole = "body" | "cut" | "reference";
+/** `Tool`, `ShapeTool`, `SHAPE_TOOLS` and `ShapeRole` live in `commands.ts`: the command
+ *  registry has to name the tool each command arms, and must stay free of the DOM. */
 /** Shape tools whose product is always reference geometry (no material role). */
 const REFERENCE_ONLY: ReadonlySet<string> = new Set(["line", "arc", "text"]);
 /** An existing element picked in normal/select mode. */
@@ -90,6 +91,22 @@ type Selection = { kind: "body" | "joint" | "rail" | "measure" | "sketch" | "gui
 const CONSTRAINT_TOOLS = new Set<Tool>([
   "coincident", "horizontal", "vertical", "parallel", "perpendicular", "equal", "fixed", "symmetric", "tangent",
 ]);
+
+/**
+ * The user's own keymap, if they have one: the whole `{commandId: bindings[]}` map (see
+ * the Shortcuts panel near the key handler). It lives up here because titles are
+ * generated during start-up, long before that block runs.
+ */
+const KEYMAP_KEY = "disjointed:keymap";
+let keymapOverrides: KeymapOverrides = (() => {
+  try {
+    return parseOverrides(localStorage.getItem(KEYMAP_KEY)) ?? {};
+  } catch {
+    return {};
+  }
+})();
+/** slot → the commands bound to it, in registry order (built by `rebuildKeymap`). */
+let commandSlots = new Map<string, CommandSpec[]>();
 
 /** Pick / close thresholds in screen (CSS) pixels — converted to world units via the view. */
 const PICK_RADIUS = 12;
@@ -579,10 +596,11 @@ function closeGridStyleMenu(): void {
   gridStyleBtn.setAttribute("aria-expanded", "false");
   gridStyleBtn.classList.remove("active");
 }
-gridStyleBtn.addEventListener("click", () => {
+function toggleGridStyleMenu(): void {
   if (gridStyleMenu.classList.contains("hidden")) openGridStyleMenu();
   else closeGridStyleMenu();
-});
+}
+gridStyleBtn.addEventListener("click", toggleGridStyleMenu);
 for (const opt of gridStyleList.querySelectorAll<HTMLButtonElement>(".gs-opt")) {
   opt.addEventListener("click", () => {
     const v = opt.dataset.style as GridStyle;
@@ -2366,16 +2384,17 @@ textSizeInput.addEventListener("change", () => {
   if (Number.isFinite(v) && v > 0) textSize = v;
   else textSizeInput.value = String(textSize);
 });
-document.getElementById("clear-btn")!.addEventListener("click", () => {
+/** Empty the document — in a definition context, only that definition's content (the
+ *  document's component list survives); at the root, the whole document. */
+function clearDocument(): void {
   if (mode === "sim") return;
-  // In a definition context, clear only that definition's content (the document's
-  // component list survives); at the root, clear the whole document.
   scene.clear(editPath.length === 0);
-  if (editPath.length === 0) setDocFile(null, null); // a fresh document: Ctrl+S asks where to save
+  if (editPath.length === 0) setDocFile(null, null); // a fresh document: Save asks where to put it
   resetTransient();
   markDirty();
   updateCompPanel();
-});
+}
+document.getElementById("clear-btn")!.addEventListener("click", clearDocument);
 document.getElementById("fit-btn")!.addEventListener("click", fitView);
 rotateViewBtn.addEventListener("click", () => setViewRotateOpen(viewRotate === null));
 document.getElementById("save-btn")!.addEventListener("click", (e) => void saveToFile(e.shiftKey));
@@ -2449,21 +2468,22 @@ profileToggle.querySelectorAll<HTMLButtonElement>("button").forEach((btn) => {
   });
 });
 
-gridBtn.addEventListener("click", () => {
+function toggleGrid(): void {
   gridVisible = !gridVisible;
   gridBtn.classList.toggle("active", gridVisible);
-});
-snapBtn.addEventListener("click", () => {
+}
+function toggleSnap(): void {
   snapEnabled = !snapEnabled;
   snapBtn.classList.toggle("active", snapEnabled);
-});
-osnapBtn.addEventListener("click", () => {
+}
+function toggleObjectSnap(): void {
   objSnapEnabled = !objSnapEnabled;
   osnapBtn.classList.toggle("active", objSnapEnabled);
-});
-autoConBtn.addEventListener("click", () => {
-  setAutoConstrain(!autoConstrain);
-});
+}
+gridBtn.addEventListener("click", toggleGrid);
+snapBtn.addEventListener("click", toggleSnap);
+osnapBtn.addEventListener("click", toggleObjectSnap);
+autoConBtn.addEventListener("click", () => setAutoConstrain(!autoConstrain));
 sketchVisBtn.addEventListener("click", () => setSketchVisible(!sketchVisible));
 measureVisBtn.addEventListener("click", () => setMeasureVisible(!measureVisible));
 const GRID_MIN = 1;
@@ -2553,10 +2573,11 @@ function closeGridSizeMenu(): void {
   gridSizeBtn.setAttribute("aria-expanded", "false");
   gridSizeBtn.classList.remove("active");
 }
-gridSizeBtn.addEventListener("click", () => {
+function toggleGridSizeMenu(): void {
   if (gridSizeMenu.classList.contains("hidden")) openGridSizeMenu();
   else closeGridSizeMenu();
-});
+}
+gridSizeBtn.addEventListener("click", toggleGridSizeMenu);
 // Adding a custom value applies it immediately and (if new) keeps it in the list.
 gridSizeAddForm.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -2625,10 +2646,10 @@ function setMode(next: Mode): void {
 function syncModeToggle(): void {
   const other = mode === "draw" ? "sim" : "draw";
   modeToggle.dataset.mode = other;
-  modeToggle.title =
-    other === "sim"
-      ? "Simulate mode — drag to drive the mechanism"
-      : "Draw mode — build the mechanism";
+  applyShortcutTitle(
+    modeToggle,
+    other === "sim" ? "Simulate mode — drag to drive the mechanism" : "Draw mode — build the mechanism"
+  );
   modeToggle.setAttribute("aria-label", other === "sim" ? "Switch to simulate mode" : "Switch to draw mode");
   modeCap.textContent = mode === "draw" ? "Draw" : "Simulate";
 }
@@ -2899,7 +2920,7 @@ function setDocModified(on: boolean): void {
 function updateDocTitle(): void {
   document.title = `${docModified ? "• " : ""}${docName ?? "Untitled"} — Disjointed`;
   const target = docHandle ? `to ${docHandle.name}` : "mechanism to a file";
-  saveBtn.title = `Save ${target} (Ctrl+S) — Shift-click or Ctrl+Shift+S to save as a new file`;
+  applyShortcutTitle(saveBtn, `Save ${target} — Shift-click to save as a new file`);
 }
 
 /** The document on disk now matches `text`: clear the modified mark, nothing to back up. */
@@ -7998,286 +8019,436 @@ canvas.addEventListener("dblclick", (e) => {
   }
 });
 
-/** Draw-tool shortcuts: mostly the first letter of the tool's name (G is Ground; L is
- *  free since the infinite guideline tool was retired — the whole map is due for a
- *  remap). B and U are presets handled in the key handler: the polyline tool in the
- *  Body / Cut role. */
-const TOOL_KEYS: Record<string, Tool> = {
-  i: "patternLinear", // repeat a hole / joint along one or two directions (Instances)
-  q: "patternCircular", // ...or around a centre
-  x: "split", // cut a body in two along a drawn path
-  j: "joint",
-  w: "weld",
-  c: "connect",
-  g: "ground",
-  s: "slider", // S is the slider itself (the prismatic carriage that rides a rail)
-  k: "rail", // the tracK the sliders ride along (S belongs to the slider)
-  r: "rotate",
-  a: "linearActuator",
-  m: "motor",
-  d: "measure",
-  o: "coincident",
-  h: "horizontal",
-  v: "vertical",
-  p: "parallel",
-  t: "perpendicular",
-  e: "equal",
-  l: "fixed", // Lock in place — F was already "fit the view"
-  y: "symmetric", // sYmmetrical — S is the slider
-  z: "tangent", // the last free letter (T is perpendicular) — see the planned remap
-};
-/** Shift + letter: the point-defined shape tools (the plain letters were all taken). */
-const SHIFT_TOOL_KEYS: Record<string, Tool> = {
-  b: "rect", // Box
-  c: "circle",
-  p: "polygon",
-  s: "slot",
-  l: "line", // a finite reference segment
-  a: "arc",
-  t: "text",
+// --- the command registry's other half: what each command does ---------------
+/**
+ * The table of what the app can be *asked* to do — ids, labels, groups, contexts, the
+ * tool a command arms and the keys it ships with — is `src/commands.ts`, and
+ * `public/keymap.json` is generated from it. The **actions** stay here, where the key
+ * handler they replace used to be: every one of them closes over this module's state
+ * (`tool`, `selection`, `mode`, `view`, `scene`, `leftDrag`…), and handing all of that to
+ * another module would need a facade far bigger than the win. `Record<CommandId, …>` is
+ * what holds the two halves together — add a command to the table and the compiler asks
+ * for its action here.
+ *
+ * `run` wins over the spec's `tool`, so a command can arm a tool *and* do something first
+ * (the two polyline presets set the role). `enabled` guards a command: when it says no
+ * the keystroke is left alone rather than swallowed, and the handful of commands that
+ * branch internally — Esc, Delete, ↑ / ↓, Enter, [ / ] — stay **one** command each
+ * rather than several bindings that would race each other.
+ */
+interface CommandAction {
+  run?: () => void;
+  enabled?: () => boolean;
+}
+
+/** Esc: step back out of whatever is innermost. */
+function cancelOrStepOut(): void {
+  if (!keymapPanel.classList.contains("hidden")) {
+    setKeymapPanelVisible(false);
+    return;
+  }
+  if (!exportPanel.classList.contains("hidden")) {
+    setExportPanelVisible(false);
+    return;
+  }
+  if (viewRotate) {
+    setViewRotateOpen(false);
+    return;
+  }
+  // Mid-drag with armed alignment candidates: Esc only drops the newest one — the drag
+  // goes on, and its release creates whatever is still armed (press Esc again to clear
+  // that too). Parking the hover timer at +∞ keeps the same element from re-arming
+  // while the cursor still rests on it; the re-run re-previews what is left.
+  if (leftDrag && "align" in leftDrag && leftDrag.align?.cands.length) {
+    const al = leftDrag.align;
+    al.cands.pop();
+    if (al.hover) al.hover.since = Infinity;
+    updateDragAlign(leftDrag, al, performance.now());
+    return;
+  }
+  // Abort the current placement / drag and return to the mode's normal state
+  // (in sim this also disarms the measure tool). With nothing armed or selected,
+  // Esc steps out one level: first out of an open group, then out of a component
+  // definition.
+  const idle =
+    tool === null && selection === null && multiSel === null && pendingInsert === null &&
+    draftBody.length === 0 && jointDraftIds.length === 0 && !leftDrag && !rotateDrag;
+  disarmTool();
+  if (idle && mode === "draw") {
+    if (groupEdit !== null) leaveGroup();
+    else if (editPath.length > 0) exitComponent(1);
+  }
+}
+
+/** Enter: close the polyline being drawn, or commit a pattern's count. */
+function finishDraft(): void {
+  if (tool === "polyline") finishPolyline();
+  else if (isPatternTool(tool)) finishPatternTool();
+}
+
+/** Delete: a measurement goes in either mode; anything else needs draw mode and no tool. */
+function canDeleteSelection(): boolean {
+  if (selection?.kind === "measure" || selection?.kind === "tempDim") return true;
+  return mode === "draw" && tool === null && (selection !== null || multiSel !== null);
+}
+
+/** ↑ / ↓: the armed polygon tool's side count, else the selected regular polygon's. */
+function regularSidesTarget(): { body: Body; hole: number | null } | null {
+  if (tool !== null || selection?.kind !== "body") return null;
+  const body = scene.getBody(selection.id);
+  const target = regularEditTarget(body);
+  return body && target ? { body, hole: target.hole } : null;
+}
+function nudgeSides(delta: number): void {
+  if (tool === "polygon") {
+    setPolySides(polySides + delta);
+    return;
+  }
+  const t = regularSidesTarget();
+  if (t) applyRegularSides(t.body.id, t.hole, scene.outlineRegular(t.body, t.hole)! + delta);
+}
+const canNudgeSides = (): boolean => tool === "polygon" || regularSidesTarget() !== null;
+
+/** [ and ]: round or un-round the selected body a step (a disk resizes from its rim). */
+function nudgeCornerRadius(step: number): void {
+  const body = selection?.kind === "body" ? scene.getBody(selection.id) : undefined;
+  if (!body) return;
+  const disk = scene.diskOfRef({ kind: "vertex", bodyId: body.id, index: 0 });
+  if (disk) {
+    scene.setDiskRadius(body.id, disk.r + step); // from the *effective* radius
+    demoteSizeDims(body.id, null, null); // a direct resize overrides a driving diameter
+  } else {
+    scene.setBodyRadius(body.id, body.radius + step);
+    // The default moved: radius dimensions on corners without their own override
+    // were just overridden directly (overridden corners didn't change).
+    demoteSizeDims(body.id, null, (i) => typeof body.radii?.[i] !== "number");
+  }
+  markDirty();
+}
+const hasSelectedBody = (): boolean =>
+  mode === "draw" && tool === null && selection?.kind === "body" && !!scene.getBody(selection.id);
+
+/** Zoom about the middle of the canvas, the way the wheel does about the cursor. */
+function zoomStep(factor: number): void {
+  zoomAt(view, vec(canvas.clientWidth / 2, canvas.clientHeight / 2), factor);
+}
+
+const COMMAND_ACTIONS: Record<CommandId, CommandAction> = {
+  // --- File ---
+  "file.open": { run: () => void openFile() },
+  "file.save": { run: () => void saveToFile(false) },
+  "file.saveAs": { run: () => void saveToFile(true) },
+  "file.export": { run: () => setExportPanelVisible(exportPanel.classList.contains("hidden")) },
+  "file.backup": { run: () => setBackupPanelVisible(backupPanel.classList.contains("hidden")) },
+  "file.clear": { run: clearDocument },
+  "file.shortcuts": { run: () => setKeymapPanelVisible(keymapPanel.classList.contains("hidden")) },
+
+  // --- Edit ---
+  "edit.undo": { run: undo },
+  "edit.redo": { run: redo },
+  "edit.copy": { run: copySelection, enabled: () => selection?.kind === "body" || multiSel !== null },
+  "edit.paste": { run: () => pasteAt(cursor), enabled: () => clipboard !== null },
+  "edit.group": { run: toggleGroupSelection },
+  "edit.delete": { run: deleteSelection, enabled: canDeleteSelection },
+  "edit.cancel": { run: cancelOrStepOut },
+  "edit.finish": { run: finishDraft, enabled: () => tool === "polyline" || isPatternTool(tool) },
+  "edit.cornerRadiusUp": { run: () => nudgeCornerRadius(RADIUS_STEP), enabled: hasSelectedBody },
+  "edit.cornerRadiusDown": { run: () => nudgeCornerRadius(-RADIUS_STEP), enabled: hasSelectedBody },
+
+  // --- Mode & animation ---
+  "mode.toggle": { run: () => setMode(mode === "draw" ? "sim" : "draw") },
+  "anim.run": { run: () => setAnimating(!animating) },
+  "anim.autoPause": { run: () => setPauseOnImpossible(!pauseOnImpossible) },
+
+  // --- Shape role ---
+  "role.body": { run: () => setRole("body") },
+  "role.cut": { run: () => setRole("cut") },
+  "role.reference": { run: () => setRole("reference") },
+
+  // --- Shapes (the rest arm their spec's tool) ---
+  "shape.polylineBody": { run: () => { setRole("body"); setTool("polyline"); } },
+  "shape.polylineCut": { run: () => { setRole("cut"); setTool("polyline"); } },
+  "shape.rect": {},
+  "shape.circle": {},
+  "shape.polygon": {},
+  "shape.slot": {},
+  "shape.line": {},
+  "shape.arc": {},
+  "shape.text": {},
+  "shape.sidesMore": { run: () => nudgeSides(1), enabled: canNudgeSides },
+  "shape.sidesFewer": { run: () => nudgeSides(-1), enabled: canNudgeSides },
+
+  // --- Patterns ---
+  "tool.patternLinear": {},
+  "tool.patternCircular": {},
+
+  // --- Body operations ---
+  "tool.split": {},
+  "edit.combine": { run: combineSelection },
+  "boolean.subtract": {}, // tagged "planned": nothing to run until the boolean ops exist
+  "boolean.intersect": {},
+
+  // --- Joints & mating ---
+  "tool.joint": {},
+  "tool.weld": {},
+  "tool.connect": {},
+  "tool.ground": {},
+  "tool.rail": {},
+  "tool.slider": {},
+
+  // --- Actuators ---
+  "tool.linearActuator": {},
+  "tool.motor": {},
+
+  // --- Transform ---
+  "edit.mirrorH": { run: () => mirrorSelection("h") },
+  "edit.mirrorV": { run: () => mirrorSelection("v") },
+  "edit.sendBack": { run: () => reorderSelection("back"), enabled: () => selection?.kind === "body" || multiSel !== null },
+  "edit.bringFront": { run: () => reorderSelection("front"), enabled: () => selection?.kind === "body" || multiSel !== null },
+  "tool.rotate": {},
+
+  // --- Components ---
+  "component.create": { run: makeComponentFromSelection },
+  "component.browser": { run: () => setCompPanelVisible(!compPanelVisible) },
+
+  // --- Constraints ---
+  "sketch.autoConstraints": { run: () => setAutoConstrain(!autoConstrain) },
+  "tool.coincident": {},
+  "tool.equal": {},
+  "tool.horizontal": {},
+  "tool.vertical": {},
+  "tool.parallel": {},
+  "tool.perpendicular": {},
+  "tool.tangent": {},
+  "tool.symmetric": {},
+  "tool.fixed": {},
+  "sketch.badges": { run: () => setSketchVisible(!sketchVisible) },
+
+  // --- Grid, measure, snapping ---
+  "grid.show": { run: toggleGrid },
+  "grid.size": { run: toggleGridSizeMenu },
+  "grid.style": { run: toggleGridStyleMenu },
+  "tool.measure": {},
+  "measure.show": { run: () => setMeasureVisible(!measureVisible) },
+  "snap.grid": { run: toggleSnap },
+  "snap.object": { run: toggleObjectSnap },
+
+  // --- View ---
+  "view.fit": { run: fitView },
+  "view.rotate": { run: () => setViewRotateOpen(viewRotate === null) },
+  "view.rotateZero": { run: () => setViewAngle(0), enabled: () => viewRotate !== null },
+  "view.zoomIn": { run: () => zoomStep(1.25) },
+  "view.zoomOut": { run: () => zoomStep(1 / 1.25) },
+  "view.theme": { run: toggleTheme },
+
+  // --- Help ---
+  "help.toggle": { run: () => help.toggle() },
+  "help.contents": { run: () => help.open("toc") },
 };
 
+const actionOf = (c: CommandSpec): CommandAction =>
+  (COMMAND_ACTIONS as Record<string, CommandAction | undefined>)[c.id] ?? {};
+
+/** A command with neither an action nor a tool is a placeholder (tagged "planned"). */
+const isRunnable = (c: CommandSpec): boolean => !!actionOf(c).run || !!c.tool;
+
+function runCommand(c: CommandSpec): void {
+  const action = actionOf(c);
+  if (action.run) action.run();
+  else if (c.tool) setTool(c.tool);
+}
+
+// --- the keymap: defaults, the user's overrides, dispatch --------------------
+/** The shortcuts a command answers to now: the user's, else the ones it ships with. */
+function bindingsOf(c: CommandSpec): Binding[] {
+  return keymapOverrides[c.id] ?? defaultBindings(c);
+}
+
+/** Index every binding by slot, so a keystroke is one map lookup. */
+function rebuildKeymap(): void {
+  commandSlots = new Map();
+  for (const c of COMMAND_LIST) {
+    for (const b of bindingsOf(c)) {
+      const slot = slotOf(b);
+      const list = commandSlots.get(slot);
+      if (list) list.push(c);
+      else commandSlots.set(slot, [c]);
+    }
+  }
+  applyShortcutTitles();
+}
+
+/**
+ * The command a slot runs right now: the first one whose context matches the mode
+ * (`any` matches both) and whose guard is happy. `typing` narrows the field to the
+ * commands that answer from inside an input.
+ */
+function commandForSlot(slot: string, typing: boolean): CommandSpec | null {
+  for (const c of commandSlots.get(slot) ?? []) {
+    if (typing && !c.whileTyping) continue;
+    if (c.context !== "any" && c.context !== mode) continue;
+    if (!isRunnable(c)) continue;
+    const enabled = actionOf(c).enabled;
+    if (enabled && !enabled()) continue;
+    return c;
+  }
+  return null;
+}
+
 window.addEventListener("keydown", (e) => {
-  // Ctrl/Cmd+S saves (Shift: save as…), Ctrl/Cmd+O opens — from anywhere, fields included,
-  // and always intercepted so the browser doesn't offer to save the web page itself.
-  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
-    e.preventDefault();
-    void saveToFile(e.shiftKey);
-    return;
-  }
-  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "o") {
-    e.preventDefault();
-    void openFile();
-    return;
-  }
-  // F1 opens the manual at its table of contents (from anywhere, fields included).
-  if (e.key === "F1" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    help.open("toc");
-    return;
-  }
-  // Keys typed into a toolbar field (or the inline dimension editor) belong to that
-  // field — not to canvas shortcuts like Delete or the tool letters.
+  const slot = slotOfEvent(e);
+  if (!slot) return; // a bare modifier, or a key nothing can be bound to
+  // Keys typed into a toolbar field (or the inline dimension / label editor) belong to
+  // that field. Only the four commands marked `whileTyping` — save, save as, open and
+  // the manual — answer from there, and they preventDefault so the browser doesn't
+  // offer to save the web page itself.
   const t = e.target;
-  if (
-    t instanceof HTMLInputElement ||
-    t instanceof HTMLSelectElement ||
-    t instanceof HTMLTextAreaElement
-  ) {
-    return;
-  }
-  // ? toggles the help drawer; while it is open, clicking a control shows its topic.
-  if (e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    help.toggle();
-    return;
-  }
-  // Space toggles the actuator animation (sim mode only).
-  if (e.code === "Space" && mode === "sim" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    setAnimating(!animating);
-    return;
-  }
-  // Tab toggles between draw and simulate mode (kept away from the browser's focus cycle).
-  if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    setMode(mode === "draw" ? "sim" : "draw");
-    return;
-  }
-  // F fits the mechanism to the screen (both modes).
-  if (e.key.toLowerCase() === "f" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    fitView();
-    return;
-  }
-  // Shift+R opens / closes the view-rotation dial (both modes; plain R is the Rotate tool).
-  if (e.key.toLowerCase() === "r" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    setViewRotateOpen(viewRotate === null);
-    return;
-  }
-  if (viewRotate && e.key === "0" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    e.preventDefault();
-    setViewAngle(0);
-    return;
-  }
-  // Undo / redo: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y.
-  const mod = e.ctrlKey || e.metaKey;
-  if (mod && e.key.toLowerCase() === "z") {
-    e.preventDefault();
-    if (e.shiftKey) redo();
-    else undo();
-    return;
-  }
-  if (mod && e.key.toLowerCase() === "y") {
-    e.preventDefault();
-    redo();
-    return;
-  }
-  // Copy / paste the selection (draw mode). Paste lands at the cursor.
-  if (mod && e.key.toLowerCase() === "c" && mode === "draw" && (selection?.kind === "body" || multiSel)) {
-    e.preventDefault();
-    copySelection();
-    return;
-  }
-  if (mod && e.key.toLowerCase() === "v" && mode === "draw" && clipboard) {
-    e.preventDefault();
-    pasteAt(cursor);
-    return;
-  }
-  // Ctrl/Cmd+G toggles grouping: 2+ selected bodies group (merging any groups touched)
-  // unless the selection already is exactly one group, which dissolves — as does a
-  // single selected grouped body. Plain G is the Ground tool only (see TOOL_KEYS).
-  if (mod && e.key.toLowerCase() === "g" && mode === "draw") {
-    e.preventDefault();
-    toggleGroupSelection();
-    return;
-  }
-  if (e.key === "Escape") {
-    if (!exportPanel.classList.contains("hidden")) {
-      setExportPanelVisible(false);
-      return;
-    }
-    if (viewRotate) {
-      setViewRotateOpen(false);
-      return;
-    }
-    // Mid-drag with armed alignment candidates: Esc only drops the newest one — the drag
-    // goes on, and its release creates whatever is still armed (press Esc again to clear
-    // that too). Parking the hover timer at +∞ keeps the same element from re-arming
-    // while the cursor still rests on it; the re-run re-previews what is left.
-    if (leftDrag && "align" in leftDrag && leftDrag.align?.cands.length) {
-      const al = leftDrag.align;
-      al.cands.pop();
-      if (al.hover) al.hover.since = Infinity;
-      updateDragAlign(leftDrag, al, performance.now());
-      return;
-    }
-    // Abort the current placement / drag and return to the mode's normal state
-    // (in sim this also disarms the measure tool). With nothing armed or selected,
-    // Esc steps out one level: first out of an open group, then out of a component
-    // definition.
-    const idle =
-      tool === null && selection === null && multiSel === null && pendingInsert === null &&
-      draftBody.length === 0 && jointDraftIds.length === 0 && !leftDrag && !rotateDrag;
-    disarmTool();
-    if (idle && mode === "draw") {
-      if (groupEdit !== null) leaveGroup();
-      else if (editPath.length > 0) exitComponent(1);
-    }
-    return;
-  }
-  if (e.key === "Enter" && mode === "draw" && tool === "polyline") {
-    finishPolyline();
-    return;
-  }
-  // Shape roles: 1 Body, 2 Cut, 3 Reference (draw mode).
-  if (mode === "draw" && !mod && !e.altKey && (e.key === "1" || e.key === "2" || e.key === "3")) {
-    setRole(e.key === "1" ? "body" : e.key === "2" ? "cut" : "reference");
-    e.preventDefault();
-    return;
-  }
-  // Regular polygon: ↑ / ↓ change the side count while the tool is armed.
-  if (mode === "draw" && tool === "polygon" && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
-    setPolySides(polySides + (e.key === "ArrowUp" ? 1 : -1));
-    e.preventDefault();
-    return;
-  }
-  // A selected regular polygon (or its one selected regular hole): ↑ / ↓ change its side count.
-  if (mode === "draw" && tool === null && selection?.kind === "body" && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
-    const body = scene.getBody(selection.id);
-    const target = regularEditTarget(body);
-    if (body && target) {
-      const n = scene.outlineRegular(body, target.hole)!;
-      applyRegularSides(body.id, target.hole, n + (e.key === "ArrowUp" ? 1 : -1));
-      e.preventDefault();
-      return;
-    }
-  }
-  if (e.key === "Enter" && mode === "draw" && isPatternTool(tool)) {
-    finishPatternTool();
-    return;
-  }
-  // A selected measurement is deletable in either mode (sim keeps its own set).
-  if ((e.key === "Delete" || e.key === "Backspace") && (selection?.kind === "measure" || selection?.kind === "tempDim")) {
-    deleteSelection();
-    return;
-  }
-  if (
-    (e.key === "Delete" || e.key === "Backspace") &&
-    mode === "draw" &&
-    tool === null &&
-    (selection || multiSel)
-  ) {
-    deleteSelection();
-    return;
-  }
-  // PageDown / PageUp reorder the selection in the z-order (send to back / bring to front).
-  if (
-    (e.key === "PageDown" || e.key === "PageUp") &&
-    mode === "draw" &&
-    (selection?.kind === "body" || multiSel)
-  ) {
-    reorderSelection(e.key === "PageDown" ? "back" : "front");
-    e.preventDefault();
-    return;
-  }
-  // [ and ] adjust the selected body's corner radius (round / un-round it).
-  if ((e.key === "[" || e.key === "]") && mode === "draw" && tool === null && selection?.kind === "body") {
-    const body = scene.getBody(selection.id);
-    if (body) {
-      const step = e.key === "]" ? RADIUS_STEP : -RADIUS_STEP;
-      const disk = scene.diskOfRef({ kind: "vertex", bodyId: body.id, index: 0 });
-      if (disk) {
-        scene.setDiskRadius(body.id, disk.r + step); // from the *effective* radius
-        demoteSizeDims(body.id, null, null); // a direct resize overrides a driving diameter
-      } else {
-        scene.setBodyRadius(body.id, body.radius + step);
-        // The default moved: radius dimensions on corners without their own override
-        // were just overridden directly (overridden corners didn't change).
-        demoteSizeDims(body.id, null, (i) => typeof body.radii?.[i] !== "number");
-      }
-      markDirty();
-    }
-    e.preventDefault();
-    return;
-  }
-  // N combines the multi-selected bodies into one (an action on the selection, like mirror).
-  if (e.key.toLowerCase() === "n" && mode === "draw" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    combineSelection();
-    e.preventDefault();
-    return;
-  }
-  // Tool shortcuts (draw mode only; ignore browser/OS modifier combos).
-  if (mode === "draw" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    const key = e.key.toLowerCase();
-    if (e.shiftKey) {
-      const st = SHIFT_TOOL_KEYS[key];
-      if (st) {
-        setTool(st);
-        e.preventDefault();
-      }
-      return;
-    }
-    if (key === "b" || key === "u") {
-      // Presets: B draws a body, U cuts (a polyline in the Body / Cut role).
-      setRole(key === "b" ? "body" : "cut");
-      setTool("polyline");
-      e.preventDefault();
-      return;
-    }
-    const t = TOOL_KEYS[key];
-    if (t) {
-      setTool(t);
-      e.preventDefault();
-    }
-  }
-  // Measure is the one tool that also works in sim mode.
-  if (mode === "sim" && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "d") {
-    setTool("measure");
-    e.preventDefault();
-  }
+  const typing =
+    t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement;
+  const cmd = commandForSlot(slot, typing);
+  if (!cmd) return;
+  e.preventDefault();
+  runCommand(cmd);
 });
+
+// --- tooltips generated from the keymap -------------------------------------
+/**
+ * Every control that stands for a command carries `data-cmd` (tool buttons are matched
+ * by their `data-tool` instead), and its `title` in `index.html` holds only the base
+ * text: the shortcut is appended here, from the keymap in force. That is the whole
+ * reason a remap is one edit — no tooltip can go stale because none of them spells a
+ * key. A control that stands for several commands names each one, which is how
+ * "(B = body, U = cut)" writes itself.
+ */
+function shortcutSuffix(cmds: CommandSpec[]): string {
+  const parts: string[] = [];
+  for (const c of cmds) {
+    const chords = bindingsOf(c).map(formatChord);
+    if (!chords.length) continue;
+    parts.push(cmds.length > 1 ? `${chords.join(" / ")} = ${commandQualifier(c)}` : chords.join(" / "));
+  }
+  return parts.length ? ` (${parts.join(", ")})` : "";
+}
+
+/** How a command is named when a control carries several: "Polyline (body)" → "body". */
+function commandQualifier(c: CommandSpec): string {
+  return /\(([^)]+)\)\s*$/.exec(c.label)?.[1] ?? c.label;
+}
+
+/** The commands a control stands for: its `data-cmd` list, else whatever arms its tool. */
+function commandsOfElement(el: HTMLElement): CommandSpec[] {
+  const ids = el.dataset.cmd?.trim().split(/\s+/).filter(Boolean) ?? [];
+  if (ids.length) return ids.map(commandById).filter((c): c is CommandSpec => !!c);
+  const t = el.dataset.tool;
+  return t ? COMMAND_LIST.filter((c) => c.tool === t) : [];
+}
+
+/** Retitle one control. Callers that rewrite a title (the save button names the bound
+ *  file, the mode toggle names the other mode) pass the new base text through here. */
+function applyShortcutTitle(el: HTMLElement, base: string): void {
+  el.dataset.titleBase = base;
+  el.title = base + shortcutSuffix(commandsOfElement(el));
+}
+
+function applyShortcutTitles(): void {
+  for (const el of document.querySelectorAll<HTMLElement>("[data-cmd], [data-tool]")) {
+    if (!commandsOfElement(el).length) continue;
+    applyShortcutTitle(el, el.dataset.titleBase ?? el.title);
+  }
+}
+
+// --- the Shortcuts panel: import / export / reset ----------------------------
+/**
+ * A user's keymap is the whole `{commandId: bindings[]}` map in localStorage, not a diff
+ * against the shipped defaults — a diff against a moving default is a migration problem
+ * nobody wants. A command the map doesn't mention (one a later version adds) keeps its
+ * default. Export hands KeyMapper the effective keymap as a `keymap/1` file; import
+ * takes that file back.
+ */
+const keymapBtn = document.getElementById("keymap-btn") as HTMLButtonElement;
+const keymapPanel = document.getElementById("keymap-panel")!;
+const keymapStatus = document.getElementById("keymap-status")!;
+const keymapImport = document.getElementById("keymap-import") as HTMLButtonElement;
+const keymapExport = document.getElementById("keymap-export") as HTMLButtonElement;
+const keymapReset = document.getElementById("keymap-reset") as HTMLButtonElement;
+const keymapClose = document.getElementById("keymap-close") as HTMLButtonElement;
+const keymapInput = document.getElementById("keymap-input") as HTMLInputElement;
+
+function setKeymapPanelVisible(on: boolean): void {
+  keymapPanel.classList.toggle("hidden", !on);
+  keymapBtn.classList.toggle("active", on);
+  if (on) refreshKeymapPanel();
+}
+
+function refreshKeymapPanel(): void {
+  const custom = Object.keys(keymapOverrides).length > 0;
+  keymapStatus.textContent = custom
+    ? "Your own keymap (kept in this browser)"
+    : "The shortcuts Disjointed ships with";
+  keymapReset.disabled = !custom;
+}
+
+function saveKeymapOverrides(): void {
+  try {
+    if (Object.keys(keymapOverrides).length === 0) localStorage.removeItem(KEYMAP_KEY);
+    else localStorage.setItem(KEYMAP_KEY, JSON.stringify(keymapOverrides));
+  } catch {
+    /* a browser with storage turned off still gets the keymap, just not across reloads */
+  }
+  rebuildKeymap();
+  refreshKeymapPanel();
+}
+
+function exportKeymap(): void {
+  downloadText(JSON.stringify(toKeymapFile(bindingsOf), null, 2), "disjointed-keymap.json", "application/json");
+}
+
+async function importKeymap(file: File): Promise<void> {
+  let data: unknown;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    notify("That file isn't JSON.", "error");
+    return;
+  }
+  const { file: keymap, errors } = parseKeymap(data);
+  if (!keymap) {
+    notify(`Not a keymap this version can read: ${errors[0]?.message ?? "unknown format"}`, "error");
+    return;
+  }
+  const known = new Set(COMMAND_IDS);
+  keymapOverrides = overridesOfFile(keymap, known);
+  saveKeymapOverrides();
+  // Clashes are the editor's business, not a reason to refuse the file — but say so,
+  // because on a clashing slot only the first command in registry order answers.
+  const clashes = findConflicts(COMMAND_LIST.map((c) => ({ ...c, bindings: bindingsOf(c) })));
+  const missing = keymap.commands.filter((c) => !known.has(c.id)).length;
+  const notes = [
+    `${Object.keys(keymapOverrides).length} commands`,
+    ...(missing ? [`${missing} the app doesn't know, ignored`] : []),
+    ...(clashes.length ? [`${clashes.length} clashing ${clashes.length === 1 ? "key" : "keys"}`] : []),
+  ];
+  notify(`Keymap loaded — ${notes.join("; ")}.`, clashes.length ? "warn" : "info");
+}
+
+function resetKeymap(): void {
+  keymapOverrides = {};
+  saveKeymapOverrides();
+  notify("Shortcuts back to the shipped defaults.", "info");
+}
+
+keymapBtn.addEventListener("click", () => setKeymapPanelVisible(keymapPanel.classList.contains("hidden")));
+keymapClose.addEventListener("click", () => setKeymapPanelVisible(false));
+keymapExport.addEventListener("click", exportKeymap);
+keymapReset.addEventListener("click", resetKeymap);
+keymapImport.addEventListener("click", () => keymapInput.click());
+keymapInput.addEventListener("change", () => {
+  const file = keymapInput.files?.[0];
+  keymapInput.value = ""; // allow re-loading the same file later
+  if (file) void importKeymap(file);
+});
+
+rebuildKeymap();
 
 // --- actuators / motors --------------------------------------------------
 /** All linear-actuator constraints in the scene. */

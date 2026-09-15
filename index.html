@@ -18,19 +18,22 @@
         <div id="tb-sections">
           <section class="tb-sec" id="sec-file" data-sec="file">
             <div class="tb-grid">
-              <button id="load-btn" class="icon-btn" title="Load mechanism from a file (Ctrl+O)" aria-label="Load">
+              <button data-cmd="file.open" id="load-btn" class="icon-btn" title="Load mechanism from a file" aria-label="Load">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7a1 1 0 0 1 1-1h3l2 2h6a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg>
               </button>
-              <button id="save-btn" class="icon-btn" title="Save mechanism to a file (Ctrl+S) — Shift-click or Ctrl+Shift+S to save as a new file" aria-label="Save">
+              <button data-cmd="file.save file.saveAs" id="save-btn" class="icon-btn" title="Save mechanism to a file — Shift-click to save as a new file" aria-label="Save">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4h9l3 3v9H4z"/><path d="M7 4v4h6V5"/><rect x="7" y="11" width="6" height="5"/></svg>
               </button>
-              <button id="export-btn" class="icon-btn" title="Export a cut file (DXF / SVG) of the selected bodies — or all bodies when nothing is selected" aria-label="Export cut file">
+              <button data-cmd="file.export" id="export-btn" class="icon-btn" title="Export a cut file (DXF / SVG) of the selected bodies — or all bodies when nothing is selected" aria-label="Export cut file">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9"/><path d="M6.5 8.5 10 12l3.5-3.5"/><path d="M4 13v2.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V13"/></svg>
               </button>
-              <button id="backup-btn" class="icon-btn" title="Auto-backup: periodically write timestamped copies of the mechanism to a folder" aria-label="Auto-backup settings">
+              <button data-cmd="file.backup" id="backup-btn" class="icon-btn" title="Auto-backup: periodically write timestamped copies of the mechanism to a folder" aria-label="Auto-backup settings">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 10a6.5 6.5 0 1 0 1.9-4.6"/><path d="M3.2 3.6v3.2h3.2"/><path d="M10 6.5V10l2.6 1.6"/></svg>
               </button>
-              <button id="clear-btn" class="icon-btn icon-btn-danger" title="Delete everything" aria-label="Clear all">
+              <button data-cmd="file.shortcuts" id="keymap-btn" class="icon-btn" title="Keyboard shortcuts — import, export or reset the keymap" aria-label="Keyboard shortcuts">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="5.5" width="15" height="9" rx="1.5"/><line x1="5.5" y1="9" x2="6.5" y2="9"/><line x1="8.5" y1="9" x2="9.5" y2="9"/><line x1="11.5" y1="9" x2="12.5" y2="9"/><line x1="7" y1="11.8" x2="13" y2="11.8"/></svg>
+              </button>
+              <button data-cmd="file.clear" id="clear-btn" class="icon-btn icon-btn-danger" title="Delete everything" aria-label="Clear all">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="6" x2="15" y2="6"/><path d="M8 6V4h4v2"/><path d="M6.5 6l.7 10h5.6l.7-10"/><line x1="9" y1="9" x2="9" y2="13"/><line x1="11" y1="9" x2="11" y2="13"/></svg>
               </button>
             </div>
@@ -41,7 +44,7 @@
                theme button); the caption under it names the mode you are in. -->
           <section class="tb-sec" id="sec-mode" data-sec="mode">
             <div class="tb-grid">
-              <button id="mode-toggle" class="mode-btn icon-btn tb-tall tb-big" data-mode="sim" data-help="modes"
+              <button data-cmd="mode.toggle" id="mode-toggle" class="mode-btn icon-btn tb-tall tb-big" data-mode="sim" data-help="modes"
                 title="Simulate mode — drag to drive the mechanism" aria-label="Switch to simulate mode">
                 <svg class="icon-draw" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 17l1-4L14 3l3 3L7 16l-4 1z"/><path d="M12 5l3 3"/></svg>
                 <svg class="icon-sim" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l11 6-11 6z" fill="currentColor" stroke="none"/></svg>
@@ -53,11 +56,11 @@
           <!-- Sim mode only: the animation controls. -->
           <section class="tb-sec sim-only hidden" id="sec-anim" data-sec="anim">
             <div class="tb-grid">
-              <button id="run-btn" class="icon-btn" title="Run / pause actuator animation (Space)" aria-label="Run animation">
+              <button data-cmd="anim.run" id="run-btn" class="icon-btn" title="Run / pause actuator animation" aria-label="Run animation">
                 <svg class="icon-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l11 6-11 6z" fill="currentColor" stroke="none"/></svg>
                 <svg class="icon-pause" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="4" width="4" height="12" fill="currentColor" stroke="none"/><rect x="11" y="4" width="4" height="12" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button id="autopause-btn" class="icon-btn" title="Auto-pause the animation when the assembly is impossible" aria-label="Auto-pause on impossible assembly" aria-pressed="false">
+              <button data-cmd="anim.autoPause" id="autopause-btn" class="icon-btn" title="Auto-pause the animation when the assembly is impossible" aria-label="Auto-pause on impossible assembly" aria-pressed="false">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 L17 16 L3 16 Z"/><line x1="10" y1="8" x2="10" y2="12.5"/><circle cx="10" cy="14.5" r="0.9" fill="currentColor" stroke="none"/></svg>
               </button>
             </div>
@@ -69,13 +72,13 @@
           <section class="tb-sec draw-only" id="sec-role" data-sec="role">
             <div class="tb-grid">
               <div class="role-toggle tb-tall" id="role-group" role="group" aria-label="Shape role">
-                <button type="button" class="role-btn active" data-role="body" title="Body role — every shape you draw becomes a rigid body (1)" aria-label="Body role">
+                <button data-cmd="role.body" type="button" class="role-btn active" data-role="body" title="Body role — every shape you draw becomes a rigid body" aria-label="Body role">
                   <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="5" width="13" height="10" rx="1.5" fill="currentColor" fill-opacity="0.3"/></svg>
                 </button>
-                <button type="button" class="role-btn" data-role="cut" title="Cut role — every shape is subtracted from the body under it: a hole when it lies inside, a notch when it crosses the outline. Select the body first to choose the target (2)" aria-label="Cut role">
+                <button data-cmd="role.cut" type="button" class="role-btn" data-role="cut" title="Cut role — every shape is subtracted from the body under it: a hole when it lies inside, a notch when it crosses the outline. Select the body first to choose the target" aria-label="Cut role">
                   <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5h13v10h-13z M10 7.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 1 0 0-5.6z" fill="currentColor" fill-opacity="0.3" fill-rule="evenodd"/></svg>
                 </button>
-                <button type="button" class="role-btn" data-role="reference" title="Reference role — every shape becomes construction geometry: dash-dot, snappable, measurable, never simulated or exported (3)" aria-label="Reference role">
+                <button data-cmd="role.reference" type="button" class="role-btn" data-role="reference" title="Reference role — every shape becomes construction geometry: dash-dot, snappable, measurable, never simulated or exported" aria-label="Reference role">
                   <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3.5" y1="15.5" x2="16.5" y2="4.5" stroke-dasharray="4 1.5 1 1.5"/></svg>
                 </button>
               </div>
@@ -85,28 +88,28 @@
 
           <section class="tb-sec draw-only" id="sec-shapes" data-sec="shapes">
             <div class="tb-grid">
-              <button data-tool="line" class="tool-btn icon-btn" title="Line — a reference segment: click two points, or press and drag; points land on joints / corners / edges (Shift+L)" aria-label="Line tool">
+              <button data-tool="line" class="tool-btn icon-btn" title="Line — a reference segment: click two points, or press and drag; points land on joints / corners / edges" aria-label="Line tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="15.5" x2="16" y2="4.5" stroke-dasharray="4 1.5 1 1.5"/><circle cx="4" cy="15.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16" cy="4.5" r="1.3" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="polyline" class="tool-btn icon-btn" title="Polyline — click the corners of a free shape; click the first corner again, double-click or press Enter to close. In the Body role, start on joints to build a body around them (B = body, U = cut)" aria-label="Polyline tool">
+              <button data-cmd="shape.polylineBody shape.polylineCut" data-tool="polyline" class="tool-btn icon-btn" title="Polyline — click the corners of a free shape; click the first corner again, double-click or press Enter to close. In the Body role, start on joints to build a body around them" aria-label="Polyline tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 15.5L7 5l4.5 6.5L16.5 4.5"/><circle cx="3.5" cy="15.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="7" cy="5" r="1.3" fill="currentColor" stroke="none"/><circle cx="11.5" cy="11.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.5" cy="4.5" r="1.3" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="rect" class="tool-btn icon-btn" title="Rectangle — click two opposite corners, or press and drag; Shift for a square, Alt to draw from the centre (Shift+B)" aria-label="Rectangle tool">
+              <button data-tool="rect" class="tool-btn icon-btn" title="Rectangle — click two opposite corners, or press and drag; Shift for a square, Alt to draw from the centre" aria-label="Rectangle tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="5" width="13" height="10" rx="1" fill="currentColor" fill-opacity="0.18"/></svg>
               </button>
-              <button data-tool="circle" class="tool-btn icon-btn" title="Circle — click the centre, then a point on the rim; or press and drag the radius out (Shift+C)" aria-label="Circle tool">
+              <button data-tool="circle" class="tool-btn icon-btn" title="Circle — click the centre, then a point on the rim; or press and drag the radius out" aria-label="Circle tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="0.9" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="polygon" class="tool-btn icon-btn" title="Regular polygon — click the centre, then one corner; or press and drag. The side count shows beside the cursor: ↑ / ↓ change it (Shift+P)" aria-label="Regular polygon tool">
+              <button data-tool="polygon" class="tool-btn icon-btn" title="Regular polygon — click the centre, then one corner; or press and drag. The side count shows beside the cursor: ↑ / ↓ change it" aria-label="Regular polygon tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5l5.6 3.25v6.5L10 16.5l-5.6-3.25v-6.5z" fill="currentColor" fill-opacity="0.18"/></svg>
               </button>
-              <button data-tool="slot" class="tool-btn icon-btn" title="Slot — click where it starts and where it ends (or press and drag), then move out to set the width and click (Shift+S)" aria-label="Slot tool">
+              <button data-tool="slot" class="tool-btn icon-btn" title="Slot — click where it starts and where it ends (or press and drag), then move out to set the width and click" aria-label="Slot tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="14" height="6" rx="3" fill="currentColor" fill-opacity="0.18"/><circle cx="6" cy="10" r="0.9" fill="currentColor" stroke="none"/><circle cx="14" cy="10" r="0.9" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="arc" class="tool-btn icon-btn" title="Arc — a reference arc: click its start and end points, then a point it passes through (Shift+A)" aria-label="Arc tool">
+              <button data-tool="arc" class="tool-btn icon-btn" title="Arc — a reference arc: click its start and end points, then a point it passes through" aria-label="Arc tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 14.5A7.5 7.5 0 0 1 16 14.5" stroke-dasharray="4 1.5 1 1.5"/><circle cx="4" cy="14.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="16" cy="14.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="10" cy="6.9" r="1.3" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="text" class="tool-btn icon-btn" title="Text — a label: click where it goes (on a body it rides with that body), type, Enter. Double-click a label to edit it (Shift+T)" aria-label="Text tool">
+              <button data-tool="text" class="tool-btn icon-btn" title="Text — a label: click where it goes (on a body it rides with that body), type, Enter. Double-click a label to edit it" aria-label="Text tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5.5V4h10v1.5"/><path d="M10 4v12"/><path d="M7.5 16h5"/></svg>
               </button>
             </div>
@@ -124,10 +127,10 @@
 
           <section class="tb-sec draw-only" id="sec-pattern" data-sec="pattern">
             <div class="tb-grid">
-              <button data-tool="patternLinear" class="tool-btn icon-btn" title="Linear pattern — repeat a hole or a joint along one or two directions: click the hole / joint, then where the next instance goes; a second click adds a second direction (a grid). Count and spacing are edited on the canvas labels (I)" aria-label="Linear pattern tool">
+              <button data-tool="patternLinear" class="tool-btn icon-btn" title="Linear pattern — repeat a hole or a joint along one or two directions: click the hole / joint, then where the next instance goes; a second click adds a second direction (a grid). Count and spacing are edited on the canvas labels" aria-label="Linear pattern tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="5" r="2.2" fill="currentColor" fill-opacity="0.35"/><circle cx="11" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="17" cy="5" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="11" r="2.2" stroke-dasharray="2 1.6"/><circle cx="5" cy="17" r="2.2" stroke-dasharray="2 1.6"/></svg>
               </button>
-              <button data-tool="patternCircular" class="tool-btn icon-btn" title="Circular pattern — repeat a hole or a joint around a centre: click the hole / joint, then the centre of rotation. Count, angle and rotation are edited on the canvas labels (Q)" aria-label="Circular pattern tool">
+              <button data-tool="patternCircular" class="tool-btn icon-btn" title="Circular pattern — repeat a hole or a joint around a centre: click the hole / joint, then the centre of rotation. Count, angle and rotation are edited on the canvas labels" aria-label="Circular pattern tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="10" cy="4" r="2" fill="currentColor" fill-opacity="0.35"/><circle cx="15.2" cy="13" r="2" stroke-dasharray="2 1.6"/><circle cx="4.8" cy="13" r="2" stroke-dasharray="2 1.6"/><path d="M6.2 5.9a6 6 0 0 0-1.6 3.6" stroke-dasharray="1.5 1.5"/></svg>
               </button>
             </div>
@@ -136,16 +139,16 @@
 
           <section class="tb-sec draw-only" id="sec-boolean" data-sec="boolean">
             <div class="tb-grid">
-              <button data-tool="split" class="tool-btn icon-btn" title="Split a body — click a point on its outline, route the cut inside, click the outline again to cut it in two (X)" aria-label="Split tool">
+              <button data-tool="split" class="tool-btn icon-btn" title="Split a body — click a point on its outline, route the cut inside, click the outline again to cut it in two" aria-label="Split tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4h6a3 3 0 0 1 3 3v3a4 4 0 0 1-4 4H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3z" fill="currentColor" fill-opacity="0.18"/><path d="M8 3.5l3 4-2.5 3.5 3 4" stroke-dasharray="2.2 1.6"/></svg>
               </button>
-              <button id="combine-btn" class="icon-btn" title="Combine the selected bodies into one — they must overlap or share an edge; the first selected keeps its colour (N)" aria-label="Combine selected bodies">
+              <button data-cmd="edit.combine" id="combine-btn" class="icon-btn" title="Combine the selected bodies into one — they must overlap or share an edge; the first selected keeps its colour" aria-label="Combine selected bodies">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="9" height="9" rx="1.5" fill="currentColor" fill-opacity="0.18"/><rect x="8" y="8" width="9" height="9" rx="1.5" fill="currentColor" fill-opacity="0.18"/><path d="M8 12V8h4" fill="none"/></svg>
               </button>
-              <button id="subtract-btn" class="icon-btn todo-btn" data-todo="Subtract — cutting one selected body out of another" title="Subtract one body from another (not implemented yet)" aria-label="Subtract bodies">
+              <button data-cmd="boolean.subtract" id="subtract-btn" class="icon-btn todo-btn" data-todo="Subtract — cutting one selected body out of another" title="Subtract one body from another (not implemented yet)" aria-label="Subtract bodies">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h9v5H8v4H3z" fill="currentColor" fill-opacity="0.18"/><rect x="8" y="8" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/></svg>
               </button>
-              <button id="intersect-btn" class="icon-btn todo-btn" data-todo="Intersect — keeping only the overlap of the selected bodies" title="Keep the overlap of two bodies (not implemented yet)" aria-label="Intersect bodies">
+              <button data-cmd="boolean.intersect" id="intersect-btn" class="icon-btn todo-btn" data-todo="Intersect — keeping only the overlap of the selected bodies" title="Keep the overlap of two bodies (not implemented yet)" aria-label="Intersect bodies">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/><rect x="8" y="8" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/><rect x="8" y="8" width="4" height="4" fill="currentColor" fill-opacity="0.4"/></svg>
               </button>
             </div>
@@ -154,22 +157,22 @@
 
           <section class="tb-sec draw-only" id="sec-mating" data-sec="mating">
             <div class="tb-grid">
-              <button data-tool="joint" class="tool-btn icon-btn" title="Add a joint point to a body (J)" aria-label="Joint tool">
+              <button data-tool="joint" class="tool-btn icon-btn" title="Add a joint point to a body" aria-label="Joint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4.5"/><circle cx="10" cy="10" r="1.3" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="weld" class="tool-btn icon-btn" title="Weld — click where bodies overlap to lock them rigidly together at that point (no relative rotation); click a pinned joint to toggle weld ↔ pin (W)" aria-label="Weld tool">
+              <button data-tool="weld" class="tool-btn icon-btn" title="Weld — click where bodies overlap to lock them rigidly together at that point (no relative rotation); click a pinned joint to toggle weld ↔ pin" aria-label="Weld tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="4.5"/><rect x="8.4" y="8.4" width="3.2" height="3.2" fill="currentColor" stroke="none"/><rect x="3.5" y="3.5" width="13" height="13" rx="1.5" fill="none" stroke-dasharray="3 2"/></svg>
               </button>
-              <button data-tool="connect" class="tool-btn icon-btn" title="Pin two joints together (C)" aria-label="Connect tool">
+              <button data-tool="connect" class="tool-btn icon-btn" title="Pin two joints together" aria-label="Connect tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="15" r="2.5"/><circle cx="15" cy="5" r="2.5"/><line x1="6.8" y1="13.2" x2="13.2" y2="6.8"/></svg>
               </button>
-              <button data-tool="ground" class="tool-btn icon-btn" title="Ground a joint (fixed position, free rotation) or a body / group (fixed entirely); click again to unground (G)" aria-label="Ground tool">
+              <button data-tool="ground" class="tool-btn icon-btn" title="Ground a joint (fixed position, free rotation) or a body / group (fixed entirely); click again to unground" aria-label="Ground tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="4" r="1.6"/><line x1="10" y1="5.6" x2="10" y2="10"/><line x1="4" y1="10" x2="16" y2="10"/><line x1="6" y1="10" x2="4" y2="14"/><line x1="9" y1="10" x2="7" y2="14"/><line x1="12" y1="10" x2="10" y2="14"/><line x1="15" y1="10" x2="13" y2="14"/></svg>
               </button>
-              <button data-tool="rail" class="tool-btn icon-btn" title="Draw a rail — click two joints on the same body (a moving rail) or two free joints (a fixed track); joints placed on it ride along as pin-in-slots (K)" aria-label="Rail tool">
+              <button data-tool="rail" class="tool-btn icon-btn" title="Draw a rail — click two joints on the same body (a moving rail) or two free joints (a fixed track); joints placed on it ride along as pin-in-slots" aria-label="Rail tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="slider" class="tool-btn icon-btn" title="Slider — click a body where the travel starts (that body moves), then click where it ends: the body slides along the arrow without rotating. Over another body the track rides that body, else it is fixed in the world. Click an existing rail to add a slider there, or a rider to toggle its rotation lock (S)" aria-label="Slider tool">
+              <button data-tool="slider" class="tool-btn icon-btn" title="Slider — click a body where the travel starts (that body moves), then click where it ends: the body slides along the arrow without rotating. Over another body the track rides that body, else it is fixed in the world. Click an existing rail to add a slider there, or a rider to toggle its rotation lock" aria-label="Slider tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><rect x="6.5" y="6.5" width="7" height="7" rx="1.2" fill="currentColor" fill-opacity="0.18"/><circle cx="10" cy="10" r="1.3" fill="currentColor" stroke="none"/></svg>
               </button>
             </div>
@@ -178,10 +181,10 @@
 
           <section class="tb-sec draw-only" id="sec-actuator" data-sec="actuator">
             <div class="tb-grid">
-              <button data-tool="linearActuator" class="tool-btn icon-btn" title="Linear actuator — click a slider or rail to make it self-driving: its carriage travels back and forth in animation (A)" aria-label="Linear actuator tool">
+              <button data-tool="linearActuator" class="tool-btn icon-btn" title="Linear actuator — click a slider or rail to make it self-driving: its carriage travels back and forth in animation" aria-label="Linear actuator tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="7" x2="3" y2="13"/><line x1="17" y1="7" x2="17" y2="13"/><circle cx="10" cy="10" r="2.3" fill="currentColor" stroke="none"/><path d="M6 10l-2-1.6M6 10l-2 1.6" /><path d="M14 10l2-1.6M14 10l2 1.6" /></svg>
               </button>
-              <button data-tool="motor" class="tool-btn icon-btn" title="Create a motor on a body — pick pivot then crank pin; spins in animation (M)" aria-label="Motor tool">
+              <button data-tool="motor" class="tool-btn icon-btn" title="Create a motor on a body — pick pivot then crank pin; spins in animation" aria-label="Motor tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><circle cx="10" cy="10" r="1.5" fill="currentColor" stroke="none"/><line x1="10" y1="10" x2="15" y2="6.5"/><circle cx="15" cy="6.5" r="1.6" fill="currentColor" stroke="none"/></svg>
               </button>
             </div>
@@ -190,19 +193,19 @@
 
           <section class="tb-sec draw-only" id="sec-transform" data-sec="transform">
             <div class="tb-grid">
-              <button id="mirror-h-btn" class="icon-btn" title="Mirror the selection left↔right" aria-label="Mirror horizontally">
+              <button data-cmd="edit.mirrorH" id="mirror-h-btn" class="icon-btn" title="Mirror the selection left↔right" aria-label="Mirror horizontally">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="3" x2="10" y2="17" stroke-dasharray="2 2"/><path d="M8 6L4 10l4 4z" fill="currentColor" fill-opacity="0.18"/><path d="M12 6l4 4-4 4z" fill="currentColor" fill-opacity="0.18"/></svg>
               </button>
-              <button id="mirror-v-btn" class="icon-btn" title="Mirror the selection top↔bottom" aria-label="Mirror vertically">
+              <button data-cmd="edit.mirrorV" id="mirror-v-btn" class="icon-btn" title="Mirror the selection top↔bottom" aria-label="Mirror vertically">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="3" y1="10" x2="17" y2="10" stroke-dasharray="2 2"/><path d="M6 8l4-4 4 4z" fill="currentColor" fill-opacity="0.18"/><path d="M6 12l4 4 4-4z" fill="currentColor" fill-opacity="0.18"/></svg>
               </button>
-              <button id="send-back-btn" class="icon-btn" title="Send the selected body / selection behind everything else (PageDown)" aria-label="Send to back">
+              <button data-cmd="edit.sendBack" id="send-back-btn" class="icon-btn" title="Send the selected body / selection behind everything else" aria-label="Send to back">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><path d="M15.5 4.5v11M13.3 13.3l2.2 2.2 2.2-2.2"/></svg>
               </button>
-              <button id="bring-front-btn" class="icon-btn" title="Bring the selected body / selection in front of everything else (PageUp)" aria-label="Bring to front">
+              <button data-cmd="edit.bringFront" id="bring-front-btn" class="icon-btn" title="Bring the selected body / selection in front of everything else" aria-label="Bring to front">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="9" height="3.4" rx="1" fill="currentColor" fill-opacity="0.35"/><rect x="3" y="8.3" width="9" height="3.4" rx="1"/><rect x="3" y="13.1" width="9" height="3.4" rx="1"/><path d="M15.5 15.5v-11M13.3 6.7l2.2-2.2 2.2 2.2"/></svg>
               </button>
-              <button data-tool="rotate" class="tool-btn icon-btn" title="Rotate a body about its centroid, or a node (drag); snaps to 45° (R)" aria-label="Rotate tool">
+              <button data-tool="rotate" class="tool-btn icon-btn" title="Rotate a body about its centroid, or a node (drag); snaps to 45°" aria-label="Rotate tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15 7a6 6 0 1 0 1.3 4.2"/><path d="M15.4 3.6v3.6h-3.6"/></svg>
               </button>
             </div>
@@ -211,10 +214,10 @@
 
           <section class="tb-sec draw-only" id="sec-component" data-sec="component">
             <div class="tb-grid">
-              <button id="make-comp-btn" class="icon-btn" title="Create a component from the selection — packs it into a reusable definition and replaces it with an instance. With a component instance selected: fork it into a new independent component. With nothing selected: create an empty component and open it for editing" aria-label="Create component from selection">
+              <button data-cmd="component.create" id="make-comp-btn" class="icon-btn" title="Create a component from the selection — packs it into a reusable definition and replaces it with an instance. With a component instance selected: fork it into a new independent component. With nothing selected: create an empty component and open it for editing" aria-label="Create component from selection">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="6" width="10" height="10" rx="2" fill="currentColor" fill-opacity="0.18"/><line x1="15.5" y1="2.5" x2="15.5" y2="7.5"/><line x1="13" y1="5" x2="18" y2="5"/></svg>
               </button>
-              <button id="comp-panel-btn" class="icon-btn" title="Component browser — insert, edit, rename or delete component definitions" aria-label="Toggle component browser">
+              <button data-cmd="component.browser" id="comp-panel-btn" class="icon-btn" title="Component browser — insert, edit, rename or delete component definitions" aria-label="Toggle component browser">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="6" height="6" rx="1.4" fill="currentColor" fill-opacity="0.18"/><rect x="11" y="3" width="6" height="6" rx="1.4"/><rect x="3" y="11" width="6" height="6" rx="1.4"/><rect x="11" y="11" width="6" height="6" rx="1.4" fill="currentColor" fill-opacity="0.18"/></svg>
               </button>
             </div>
@@ -223,40 +226,40 @@
 
           <section class="tb-sec draw-only" id="sec-constraints" data-sec="constraints">
             <div class="tb-grid">
-              <button id="autocon-btn" class="icon-btn tb-tall tb-switch active" aria-pressed="true" title="Auto constraints while dragging (toggle) — hold a drag over a corner, joint, reference point or edge for about half a second to arm it, then release aligned with it (or on it) and the H / V / coincident constraint is created. Two references stay armed at once." aria-label="Toggle automatic constraints while dragging">
+              <button data-cmd="sketch.autoConstraints" id="autocon-btn" class="icon-btn tb-tall tb-switch active" aria-pressed="true" title="Auto constraints while dragging (toggle) — hold a drag over a corner, joint, reference point or edge for about half a second to arm it, then release aligned with it (or on it) and the H / V / coincident constraint is created. Two references stay armed at once." aria-label="Toggle automatic constraints while dragging">
                 <svg class="sw-glyph" viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="4" r="1.5" fill="currentColor" stroke="none"/><circle cx="16" cy="15" r="1.5" fill="currentColor" stroke="none"/><line x1="5" y1="6.2" x2="5" y2="12.6" stroke-dasharray="2.4 1.8"/><line x1="7.4" y1="15" x2="13.8" y2="15" stroke-dasharray="2.4 1.8"/><circle cx="5" cy="15" r="2.2"/></svg>
                 <span class="sw-track" aria-hidden="true"><span class="sw-knob"></span></span>
               </button>
-              <button data-tool="coincident" class="tool-btn icon-btn" title="Coincident — click two points to make them share a position, or a point and a line to hold the point on it (O)" aria-label="Coincident constraint tool">
+              <button data-tool="coincident" class="tool-btn icon-btn" title="Coincident — click two points to make them share a position, or a point and a line to hold the point on it" aria-label="Coincident constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="5.2"/><circle cx="10" cy="10" r="1.6" fill="currentColor" stroke="none"/><line x1="1.6" y1="10" x2="3.6" y2="10"/><line x1="16.4" y1="10" x2="18.4" y2="10"/><line x1="10" y1="1.6" x2="10" y2="3.6"/><line x1="10" y1="16.4" x2="10" y2="18.4"/></svg>
               </button>
-              <button data-tool="equal" class="tool-btn icon-btn" title="Equal length — click two lines (edges or rails) (E)" aria-label="Equal constraint tool">
+              <button data-tool="equal" class="tool-btn icon-btn" title="Equal length — click two lines (edges or rails)" aria-label="Equal constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="5" y1="8" x2="15" y2="8"/><line x1="5" y1="12" x2="15" y2="12"/></svg>
               </button>
-              <button data-tool="horizontal" class="tool-btn icon-btn" title="Horizontal — click an edge or rail, or two points (H)" aria-label="Horizontal constraint tool">
+              <button data-tool="horizontal" class="tool-btn icon-btn" title="Horizontal — click an edge or rail, or two points" aria-label="Horizontal constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="10" x2="16" y2="10"/><circle cx="4" cy="10" r="1.6" fill="currentColor" stroke="none"/><circle cx="16" cy="10" r="1.6" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="vertical" class="tool-btn icon-btn" title="Vertical — click an edge or rail, or two points (V)" aria-label="Vertical constraint tool">
+              <button data-tool="vertical" class="tool-btn icon-btn" title="Vertical — click an edge or rail, or two points" aria-label="Vertical constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="4" x2="10" y2="16"/><circle cx="10" cy="4" r="1.6" fill="currentColor" stroke="none"/><circle cx="10" cy="16" r="1.6" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="parallel" class="tool-btn icon-btn" title="Parallel — click two lines (edges or rails) (P)" aria-label="Parallel constraint tool">
+              <button data-tool="parallel" class="tool-btn icon-btn" title="Parallel — click two lines (edges or rails)" aria-label="Parallel constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="6" y1="16" x2="11" y2="4"/><line x1="10.5" y1="16" x2="15.5" y2="4"/></svg>
               </button>
-              <button data-tool="perpendicular" class="tool-btn icon-btn" title="Perpendicular — click two lines (edges or rails) (T)" aria-label="Perpendicular constraint tool">
+              <button data-tool="perpendicular" class="tool-btn icon-btn" title="Perpendicular — click two lines (edges or rails)" aria-label="Perpendicular constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="4" y1="15" x2="16" y2="15"/><line x1="10" y1="15" x2="10" y2="4"/></svg>
               </button>
-              <button data-tool="tangent" class="tool-btn icon-btn" title="Tangential — click a circle or arc (a disk's rim, a round hole, a reference circle or arc) and a line (body edge, rail or reference segment), either order: the line becomes tangent to it (Z)" aria-label="Tangential constraint tool">
+              <button data-tool="tangent" class="tool-btn icon-btn" title="Tangential — click a circle or arc (a disk's rim, a round hole, a reference circle or arc) and a line (body edge, rail or reference segment), either order: the line becomes tangent to it" aria-label="Tangential constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="9.5" cy="11.5" r="5"/><line x1="2.5" y1="6.5" x2="17.5" y2="6.5"/><circle cx="9.5" cy="6.5" r="1.2" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button data-tool="symmetric" class="tool-btn icon-btn" title="Symmetrical — click two points (or two lines), then the mirror line: they become mirror images across it (Y)" aria-label="Symmetrical constraint tool">
+              <button data-tool="symmetric" class="tool-btn icon-btn" title="Symmetrical — click two points (or two lines), then the mirror line: they become mirror images across it" aria-label="Symmetrical constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="10" y1="3" x2="10" y2="17" stroke-dasharray="2 2"/><circle cx="4.2" cy="10" r="1.6" fill="currentColor" stroke="none"/><circle cx="15.8" cy="10" r="1.6" fill="currentColor" stroke="none"/><path d="M6.4 10h1.8M11.8 10h1.8"/></svg>
               </button>
-              <button data-tool="fixed" class="tool-btn icon-btn" title="Fixed — click a point to lock it where it is, or a line to lock the line itself (its ends still slide along it) (L)" aria-label="Fixed constraint tool">
+              <button data-tool="fixed" class="tool-btn icon-btn" title="Fixed — click a point to lock it where it is, or a line to lock the line itself (its ends still slide along it)" aria-label="Fixed constraint tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4.5" y="9" width="11" height="7.5" rx="1.5" fill="currentColor" fill-opacity="0.18"/><path d="M7.2 9V6.9a2.8 2.8 0 0 1 5.6 0V9"/><circle cx="10" cy="12.6" r="1" fill="currentColor" stroke="none"/></svg>
               </button>
             </div>
             <div class="tb-cap">Constraints
-              <button id="sketch-vis-btn" class="cap-eye active" title="Show or hide all constraint badges (toggle)" aria-label="Toggle constraint badge visibility">
+              <button data-cmd="sketch.badges" id="sketch-vis-btn" class="cap-eye active" title="Show or hide all constraint badges (toggle)" aria-label="Toggle constraint badge visibility">
                 <svg class="icon-eye" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.2"/></svg>
                 <svg class="icon-eye-off" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z" stroke-opacity="0.45"/><circle cx="10" cy="10" r="2.2" stroke-opacity="0.45"/><line x1="4" y1="16" x2="16" y2="4"/></svg>
               </button>
@@ -270,7 +273,7 @@
                    the square colour chip leaves, so both rows fill the same width. -->
               <div class="tb-row">
                 <div class="combo" id="grid-size-combo">
-                  <button id="grid-size-btn" class="combo-btn" title="Grid spacing in working units (1–200) — pick a preset or add your own" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid size">
+                  <button data-cmd="grid.size" id="grid-size-btn" class="combo-btn" title="Grid spacing in working units (1–200) — pick a preset or add your own" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid size">
                     <span id="grid-size-value">40</span>
                     <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
                   </button>
@@ -293,7 +296,7 @@
               </div>
               <div class="tb-row">
                 <div class="combo" id="grid-style-combo">
-                  <button id="grid-style-btn" class="combo-btn gs-solid" title="Grid line style — solid, dashed or dotted lines, or a dot at each intersection" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid line style">
+                  <button data-cmd="grid.style" id="grid-style-btn" class="combo-btn gs-solid" title="Grid line style — solid, dashed or dotted lines, or a dot at each intersection" aria-haspopup="listbox" aria-expanded="false" aria-label="Grid line style">
                     <span class="gs-preview" aria-hidden="true"></span>
                     <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.5 4l2.5 2.5L7.5 4"/></svg>
                   </button>
@@ -328,7 +331,7 @@
               </div>
             </div>
             <div class="tb-cap">Grid
-              <button id="grid-btn" class="cap-eye active" title="Show or hide the grid (toggle)" aria-label="Toggle grid">
+              <button data-cmd="grid.show" id="grid-btn" class="cap-eye active" title="Show or hide the grid (toggle)" aria-label="Toggle grid">
                 <svg class="icon-eye" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.2"/></svg>
                 <svg class="icon-eye-off" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z" stroke-opacity="0.45"/><circle cx="10" cy="10" r="2.2" stroke-opacity="0.45"/><line x1="4" y1="16" x2="16" y2="4"/></svg>
               </button>
@@ -337,12 +340,12 @@
 
           <section class="tb-sec" id="sec-measure" data-sec="measure">
             <div class="tb-grid">
-              <button data-tool="measure" class="tool-btn icon-btn tb-mid" title="Measure — click a line for its own length, or two references (points or lines), then place the value (D)" aria-label="Measure tool">
+              <button data-tool="measure" class="tool-btn icon-btn tb-mid" title="Measure — click a line for its own length, or two references (points or lines), then place the value" aria-label="Measure tool">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="7.5" width="15" height="5.5" rx="1"/><line x1="6" y1="7.5" x2="6" y2="10.2"/><line x1="9.5" y1="7.5" x2="9.5" y2="10.2"/><line x1="13" y1="7.5" x2="13" y2="10.2"/></svg>
               </button>
             </div>
             <div class="tb-cap">Measure
-              <button id="measure-vis-btn" class="cap-eye active" title="Show or hide all measurements (toggle)" aria-label="Toggle measurement visibility">
+              <button data-cmd="measure.show" id="measure-vis-btn" class="cap-eye active" title="Show or hide all measurements (toggle)" aria-label="Toggle measurement visibility">
                 <svg class="icon-eye" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z"/><circle cx="10" cy="10" r="2.2"/></svg>
                 <svg class="icon-eye-off" viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3.2-5 8-5 8 5 8 5-3.2 5-8 5-8-5-8-5z" stroke-opacity="0.45"/><circle cx="10" cy="10" r="2.2" stroke-opacity="0.45"/><line x1="4" y1="16" x2="16" y2="4"/></svg>
               </button>
@@ -351,10 +354,10 @@
 
           <section class="tb-sec" id="sec-snap" data-sec="snap">
             <div class="tb-grid">
-              <button id="snap-btn" class="icon-btn" title="Snap placement and dragging to the grid (toggle)" aria-label="Toggle snap to grid">
+              <button data-cmd="snap.grid" id="snap-btn" class="icon-btn" title="Snap placement and dragging to the grid (toggle)" aria-label="Toggle snap to grid">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><line x1="7" y1="3" x2="7" y2="17" stroke-opacity="0.45"/><line x1="13" y1="3" x2="13" y2="17" stroke-opacity="0.45"/><line x1="3" y1="7" x2="17" y2="7" stroke-opacity="0.45"/><line x1="3" y1="13" x2="17" y2="13" stroke-opacity="0.45"/><circle cx="13" cy="7" r="2.6" fill="currentColor" stroke="none"/></svg>
               </button>
-              <button id="osnap-btn" class="icon-btn" title="Object snap (toggle): drag a body by the corner, edge midpoint, edge or centre nearest the grab (highlighted) and it snaps onto the same features of other objects, rails and reference geometry" aria-label="Toggle object snap">
+              <button data-cmd="snap.object" id="osnap-btn" class="icon-btn" title="Object snap (toggle): drag a body by the corner, edge midpoint, edge or centre nearest the grab (highlighted) and it snaps onto the same features of other objects, rails and reference geometry" aria-label="Toggle object snap">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="8" height="10"/><line x1="11" y1="3" x2="11" y2="11"/><line x1="11" y1="7" x2="17" y2="7"/><circle cx="11" cy="7" r="2.2"/></svg>
               </button>
             </div>
@@ -363,13 +366,13 @@
 
           <section class="tb-sec" id="sec-view" data-sec="view">
             <div class="tb-grid">
-              <button id="rotate-view-btn" class="icon-btn" title="Rotate the view — drag the ring or a crosshair arm to turn the whole picture (snaps to 5°, Shift for any angle); type an exact angle under the centre; double-click the centre for 0° (Shift+R)" aria-label="Rotate the view">
+              <button data-cmd="view.rotate" id="rotate-view-btn" class="icon-btn" title="Rotate the view — drag the ring or a crosshair arm to turn the whole picture (snaps to 5°, Shift for any angle); type an exact angle under the centre; double-click the centre for 0°" aria-label="Rotate the view">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><g transform="rotate(-30 10 10)"><line x1="10" y1="2" x2="10" y2="18"/><line x1="2" y1="10" x2="18" y2="10"/></g></svg>
               </button>
-              <button id="fit-btn" class="icon-btn" title="Fit the mechanism to the screen (F)" aria-label="Fit to screen">
+              <button data-cmd="view.fit" id="fit-btn" class="icon-btn" title="Fit the mechanism to the screen" aria-label="Fit to screen">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7"/><path d="M13 3h2.5A1.5 1.5 0 0 1 17 4.5V7"/><path d="M17 13v2.5a1.5 1.5 0 0 1-1.5 1.5H13"/><path d="M7 17H4.5A1.5 1.5 0 0 1 3 15.5V13"/><rect x="7" y="8" width="6" height="4" rx="1" fill="currentColor" fill-opacity="0.18"/></svg>
               </button>
-              <button id="theme-btn" class="icon-btn" title="Toggle light / dark theme" aria-label="Toggle light or dark theme">
+              <button data-cmd="view.theme" id="theme-btn" class="icon-btn" title="Toggle light / dark theme" aria-label="Toggle light or dark theme">
                 <svg class="icon-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/><line x1="4.3" y1="4.3" x2="5.7" y2="5.7"/><line x1="14.3" y1="14.3" x2="15.7" y2="15.7"/><line x1="4.3" y1="15.7" x2="5.7" y2="14.3"/><line x1="14.3" y1="5.7" x2="15.7" y2="4.3"/></svg>
                 <svg class="icon-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16 11.6A6.6 6.6 0 0 1 8.4 4 6.6 6.6 0 1 0 16 11.6z" fill="currentColor" stroke="none"/></svg>
               </button>
@@ -429,10 +432,11 @@
 
         <!-- Help (src/help.ts): opens the manual beside the canvas; while it is open,
              clicking any control shows its topic. ? toggles it too; F1 opens the contents. -->
-        <button id="help-btn" class="icon-btn" title="Help — open the manual; while it is open, click any control to read about it (?)" aria-label="Help">
+        <button data-cmd="help.toggle" id="help-btn" class="icon-btn" title="Help — open the manual; while it is open, click any control to read about it" aria-label="Help">
           <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .9-1 1.6v.4"/><circle cx="10" cy="14.6" r="0.9" fill="currentColor" stroke="none"/></svg>
         </button>
         <input id="file-input" type="file" accept=".json,application/json" hidden />
+      <input id="keymap-input" type="file" accept=".json,application/json" hidden />
       </header>
       <div id="canvas-wrap">
         <canvas id="scene"></canvas>
@@ -520,6 +524,23 @@
           <div class="export-actions">
             <button type="button" id="backup-now">Back up now</button>
             <button type="button" id="backup-close" class="active">Close</button>
+          </div>
+        </div>
+        <!-- Keyboard shortcuts: what the keymap is right now, and the keymap/1 file it
+             travels in. Rearranging a layout is KeyMapper's job, not this panel's. -->
+        <div id="keymap-panel" class="hidden" role="dialog" aria-label="Keyboard shortcuts">
+          <div class="export-head">Keyboard shortcuts</div>
+          <div class="export-scope" id="keymap-status">The shortcuts Disjointed ships with</div>
+          <div class="export-row keymap-note">
+            Every shortcut lives in one file. Export it, rearrange the keys in KeyMapper, then
+            import the result — tooltips follow by themselves. Your keymap is kept in this
+            browser, not in the mechanism file.
+          </div>
+          <div class="export-actions">
+            <button type="button" id="keymap-import">Import…</button>
+            <button type="button" id="keymap-export">Export</button>
+            <button type="button" id="keymap-reset">Reset</button>
+            <button type="button" id="keymap-close" class="active">Close</button>
           </div>
         </div>
         <nav id="crumb-bar" class="hidden" aria-label="Component editing path"></nav>

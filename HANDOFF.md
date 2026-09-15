@@ -2,138 +2,101 @@
 
 What has been **discussed and decided but not built yet**. Read with PROJECT_INSTRUCTIONS.md
 (current state); this file holds only the unfinished part, so a future session can pick a piece
-up without re-doing the brainstorm. In order: the **command registry + keymap file** (next up),
-the **shape tools + roles** roadmap (phase 1 shipped 2026-09-13, format v20), the Tangential
-follow-up, the sim-mode toolbar, and the **pending manual updates** list.
+up without re-doing the brainstorm. In order: **the keymap file as the source of the shipped
+defaults** (next up), the rest of the **shortcut remap**, the **shape tools + roles** roadmap
+(phase 1 shipped 2026-09-13, format v20), the Tangential follow-up, the sim-mode toolbar, and the
+**pending manual updates** list.
 
-## Command registry + keymap file — next up (spec, 2026-09-14)
+## Make `public/keymap.json` the shipped defaults — next up
 
-### Why
+**Why this is here.** The registry shipped with the defaults in `keys` in `src/commands.ts` and
+the file as *generated output*. The user then replaced `public/keymap.json` with a board export
+and found the app unchanged — the obvious expectation, and the one the original spec had
+("shipped defaults live in the file"). Today the file is only an export for KeyMapper and the
+thing `npm test` diffs against. Worth closing, because "replace the file, get new shortcuts" is
+how everyone will expect this to work.
 
-A shortcut letter is written down in at least four places today: `TOOL_KEYS` /
-`SHIFT_TOOL_KEYS` (`src/main.ts:8005`), the hand-written `if` ladder under them
-(`src/main.ts:8040-8283`), the `(J)` suffix inside about forty `title=` strings in
-`index.html`, and the shortcut lists in README.md and `public/help/index.html#shortcuts`.
-Changing one key means five edits and usually leaves one stale. The registry makes a binding
-**data**: one table in code, one file on disk, everything else generated.
+**The design** (decided, not built). A **build-time import**, not a fetch: no async start-up, no
+"which one won" race, and the app still works from `file://`.
 
-It also kills a bug class. `F` and `N` are tested before the Shift+letter table and never check
-`e.shiftKey`, so `Shift+F` and `Shift+N` are unreachable today. Exact slot resolution removes
-the ordering problem entirely — and with it the "guard" warning the KeyMapper board shows.
+1. `resolveJsonModule: true` in tsconfig; `import keymapJson from "../public/keymap.json"` in
+   `src/commands.ts` (Vite serves JSON imports natively, and the file is already in `public/`, so
+   it stays fetchable by KeyMapper too).
+2. **Delete `keys` from `CommandSpec`.** `defaultBindings(c)` reads the imported file by id
+   instead. That keeps one source of truth for a binding — the registry keeps ids, labels,
+   descriptions, groups, contexts and tools; the file keeps bindings and nothing else that
+   matters.
+3. **Invert `npm run keymap:file`**: today it writes the file from `keys`; it must instead rewrite
+   the *metadata* of each command (label, description, group, context, tool, tags) while
+   **preserving the bindings already in the file**, and append any command the file is missing
+   with an empty `bindings`. That makes it safe to run after adding a command, which is the only
+   reason to run it once bindings live in the file.
+4. **Change what `scripts/keymap.ts` asserts.** Drop "the file is what the registry generates"
+   (it can no longer be true) and put in its place: every registry id appears in the file exactly
+   once, the file names no id the app doesn't know, every non-binding field matches the registry,
+   and the file's own bindings are conflict-free. That is the same guarantee, minus the bindings.
+5. Precedence becomes `localStorage` overrides → the file → nothing. A command the file leaves
+   out simply has no key, which is a legitimate state and needs no fallback.
 
-### The file
+**Watch out.** A hand-edited file can now break the app's shortcuts, so the parse failure path
+matters more than it does today: if the file is unreadable the app must fall back to *no*
+bindings rather than throwing, and say so — a toast, since the Shortcuts panel may not be
+reachable without a pointer. And `npm run keymap:docs` must run after any file edit, or the
+README goes stale; consider having `npm test` run `keymap-docs --check --readme` so it can't.
 
-`public/keymap.json`, schema **`keymap/1`** — the format is the contract shared with the
-**KeyMapper** project and is documented normatively in that repo's README. Do not restate it
-here. Disjointed adds two extension fields (the format preserves unknown fields verbatim):
+## The rest of the shortcut remap
 
-- `tool` — a `Tool` id. The command arms that tool; covers 31 commands and is everything the
-  old two maps ever said.
-- `whileTyping: true` — the command answers even while focus is in an input / select /
-  textarea. Exactly four have it: Save, Save as, Open, Manual (`F1`). If a second project ever
-  needs this, promote it into `keymap/2` rather than keeping it private.
+The 2026-09-15 remap is **applied and shipped** — Fixed `F`, Circle `C`, Line `L`, Arc `A`,
+Fit view `Shift+F`, Rotate view `Ctrl+R`, Polyline (cut) `Ctrl+U`, Connect `Ctrl+Shift+C`,
+Linear actuator `Shift+A`, Motor `Shift+M`, Rail unassigned. What is left:
 
-Shipped defaults live in the file; a user's changes go to `localStorage["disjointed:keymap"]`
-as a whole `{commandId: bindings[]}` map — not a diff, because a diff against a moving default
-is a migration problem nobody wants. Import / Export / Reset buttons go in the File group.
+- **Rail lost its key and nothing took `K`.** The board did that; the earlier plan had *Linear
+  actuator* as the one to drop. Ask before assuming it was meant — `K` is free either way.
+- **Connect is now `Ctrl+Shift+C`**, a three-key chord for a tool used constantly. Worth a
+  second look on the board.
+- **23 commands have no key at all** (`public/keymap.json`, empty `bindings`): Export, the
+  mirrors, the grid / snap / badge / measurement toggles, zoom in / out, theme, Create component,
+  Component browser, Auto-pause, Delete everything, the two grid menus, Rail, and the Shortcuts
+  panel itself. All have a working `run()`, so the board can hand any of them a letter and it
+  works. Subtract and Intersect are tagged `planned` and do nothing until the boolean ops exist.
 
-### Where the code goes
+### Working with the board
 
-- **`src/keymap.ts`** (new) — the format: types, parse / validate, merge overrides, event
-  normalization, slot resolution. Knows nothing about app state, so it is testable headless.
-- **The registry literal stays in `src/main.ts`**, beside the handler it replaces. Every
-  `run()` closes over module-level state (`tool`, `selection`, `mode`, `view`, `scene`,
-  `leftDrag`…); handing all of that to another module needs a facade bigger than the win.
-  Resist moving it — the split is *format* vs *behaviour*, not file size.
+**Seed KeyMapper from `public/keymap.json`, never from an older capture.** The board's original
+file was hand-written on 2026-09-14 by reading the old `if`-ladder (`"source":
+"src/main.ts:8005-8283"`), and its ids were its own invention — `save`, `polybody`, `refline`,
+`radplus`, `sidesup`. None of them match a registry id, so importing that file applies *nothing*
+(the panel says "0 commands; 80 the app doesn't know, ignored"). The generated file carries the
+real ids; load that, rearrange, bring it back. The artifact is
+`cc79ffcf-efa4-4d38-9bd7-e2aade7901a4`.
 
-```ts
-type Command = {
-  id: string;                        // stable; the file keys on it
-  label: string;                     // tooltips and the manual read this
-  description: string;               // one line, shared with the manual
-  group: string;
-  context: "draw" | "sim" | "any";
-  tool?: Tool;                       // arm this tool …
-  run?: () => void;                  // … or do this
-  enabled?: () => boolean;           // optional guard, e.g. "a body is selected"
-  whileTyping?: boolean;
-};
-```
+### How to apply a layout
 
-### Event normalization — get this right first
+1. **To ship it:** edit `keys` in `src/commands.ts` (chords as `"Shift+B"`, `"Ctrl+S"`, `"↑"`,
+   `"?"`), then `npm run keymap:file`, then `npm run keymap:docs --readme` (the manual is
+   deferred — see the pending-updates section). Bring the letters in `scripts/keymap-live.ts`
+   into line — they are written out by hand on purpose — and run `npm run keymap:live`. Also
+   sweep README prose *outside* the tools table: the generator only owns the Shortcut column, and
+   the Navigate / Help sections name keys in sentences. `npm test` fails if the file, the
+   tooltips or the README table are behind, and refuses two commands on one slot in overlapping
+   contexts, so a clash cannot ship. (Once the section above lands, step one becomes "drop the
+   file in".)
+2. **To try one:** import it through the Shortcuts panel (File group). That writes
+   `localStorage["disjointed:keymap"]` for this browser only; Reset undoes it.
 
-The lookup slot is `KEY + "|" + ["ctrl","shift","alt"].filter(held).join("+")`. How `KEY` is
-spelled decides whether `?` can ever match:
-
-- **a–z** → the uppercase letter, and Shift **is** recorded (`B` and `Shift+B` are different
-  slots).
-- **Named keys** — `Tab Enter Esc Space Backspace Delete Insert Home End PageUp PageDown`,
-  `F1`…`F12`, and the arrows written `↑ ↓ ← →` — the name, Shift recorded.
-- **Every other printable character** (`?`, brackets, punctuation, digits) → the character
-  itself, and Shift is **not** recorded: the character already encodes it. `?` arrives as
-  `e.key === "?"` with `shiftKey` true, so recording Shift would make the slot `?|shift`, which
-  nothing would ever match.
-- `ctrl` means `e.ctrlKey || e.metaKey` (Cmd on Mac); `alt` is `e.altKey`.
-
-### Dispatch
-
-Build `Map<slot, Command[]>` once per keymap change. On keydown: normalize → look up → take the
-first command whose `context` matches the current mode (`any` matches both) and whose
-`enabled?.()` is not false → `preventDefault()`, run. `whileTyping` commands resolve **before**
-the focus-in-a-field bail-out; everything else after it.
-
-Five commands keep internal branching and must stay **one** command each — do not model their
-states as separate bindings:
-
-- `Esc` — the layered cancel (export panel → view dial → newest armed auto-constraint → disarm
-  the tool → leave an open group → leave a component).
-- `Delete` — measurement vs selection, and it answers in both modes.
-- `↑` / `↓` — the armed polygon tool vs a selected regular polygon or hole.
-- `Enter` — close a polyline vs commit a pattern count.
-- `[` / `]` — needs a selected body, and a disk takes a different path.
-
-### Generated from the registry
-
-- **Tooltips.** Give every button a `data-cmd="<id>"` (tool buttons already carry `data-tool`,
-  which maps to the command); strip the `(J)` / `(Shift+B)` suffixes out of `index.html` so each
-  `title` holds only its base text, and append the current shortcut at startup.
-- **Docs.** The manual's `#shortcuts` list and the README table's Shortcut column both come from
-  the file. Fold it into `npm run manual` (or a small `npm run keymap:docs`) — that ends the
-  recurring "the shortcut list is stale" entry in this file.
-
-### Tests — `scripts/keymap.ts`
-
-Ids unique; every `tool` is a real `Tool`; no two commands share a slot with overlapping
-contexts (`any` overlaps everything); `public/keymap.json` and the registry agree exactly
-(generate the file from the registry, then assert); every `data-cmd` in `index.html` resolves.
-
-### Order of work
-
-1. `src/keymap.ts` + types + normalization + its tests. No behaviour change yet.
-2. The registry literal, and dispatch replacing the ladder — **with today's bindings**, so the
-   only acceptable visible change is none. Confirm by eye.
-3. Generate `public/keymap.json` from the registry; add the agreement test.
-4. Tooltips from `data-cmd`, then the README / manual generators.
-5. Import / Export / Reset and the localStorage override.
-6. Only then apply the new layout.
-
-### The remap to apply, once the user calls it final
-
-Designed on the KeyMapper board (artifact `cc79ffcf-efa4-4d38-9bd7-e2aade7901a4`) — export the
-file from there rather than copying numbers out of this paragraph. As of 2026-09-14 it held
-seven changes — Fixed `L`→`F`, Circle `Shift+C`→`C`, Reference line `Shift+L`→`L`, Reference arc
-`Shift+A`→`A`, Connect `C`→`Shift+C`, Fit view `F`→`Shift+F`, Linear actuator unassigned — and
-was **not** finished. `Shift+F` only works after step 2.
+An imported keymap that clashes is **accepted, not refused** — the toast counts the clashes, and
+on a clashing slot the first command in registry order answers. Deliberate: refusing a file is
+worse than showing the user what they did.
 
 ### Watch out
 
-- **21 commands have no keydown branch at all**: Export, Mirror H / V, the grid / snap /
-  constraint-badge / measurement toggles, theme, zoom in / out, Create component, Component
-  browser, Auto-pause, Delete everything, the two grid menus, Auto constraints. Giving one of
-  them a key is a small **new feature**, not a remap — each needs its `run()` written. Subtract
-  and Intersect cannot be wired at all until the boolean ops exist.
-- Out of scope here: chords / key sequences, predicates expressed in the file (they stay in code
-  as `enabled()`), and rebinding pointer gestures.
+- **Ids are the contract.** Renaming a `CommandSpec.id` silently drops that command's binding
+  from every saved keymap. Rename labels freely, never ids.
+- **Spelling rules are shared with KeyMapper** and specified in its README, not here: Shift is
+  part of a letter's or named key's slot and never part of a character's (`?` arrives as `"?"`
+  with shiftKey true). `src/keymap.ts` implements them; a change has to happen in both projects.
+- Still out of scope, as decided: chords / key sequences, predicates expressed in the file (they
+  stay in code as `enabled()`), and rebinding pointer gestures.
 
 ## Shape tools & roles — decisions already made (don't re-open)
 
@@ -196,9 +159,9 @@ was **not** finished. `Shift+F` only works after step 2.
   holes). Still missing: point-on-circle, concentric, circle–circle tangency, and an arc's
   centre as a reference *point* (derived, not a solver var — a `guideCircle` ref resolves to
   it, but nothing can be made coincident with it).
-- **Shortcuts** for the new tools are Shift+letter picks (Shift+B rectangle, Shift+C circle,
-  Shift+P polygon, Shift+S slot, Shift+L line, Shift+A arc, Shift+T text) — easy to change
-  in `SHIFT_TOOL_KEYS` (src/main.ts) and the manual's shortcut list.
+- **Shortcuts** for the new tools were Shift+letter picks; the 2026-09-15 remap moved Circle to
+  `C`, Line to `L` and Arc to `A`, leaving Shift+B rectangle, Shift+P polygon, Shift+S slot,
+  Shift+T text. Each is one edit in `keys` in `src/commands.ts`, everything else generated.
 - Manual: the new tool topics are text-only; gesture illustrations (before / mid / after)
   for the shape tools would fit the existing `scripts/manual/shots.ts` pipeline (the
   role-styled preview is exposed through `RenderInput.shapeDraft`).
@@ -257,6 +220,25 @@ touches something the manual describes gets a line here instead; a later session
 them all in one go. Add to this list as you go — one bullet per change, say which manual topic
 / illustration / shortcut entry is affected and what the new behaviour is.
 
+**Start that pass with `npm run keymap:docs`.** The `#shortcuts` list in
+`public/help/index.html` is now generated from the command registry, so every "add / drop the
+`X` row of the shortcut list" note below is done by running it — do not hand-edit those lines,
+and do not re-add a marker comment, the generator finds the `<ul>` by itself. It rewrites the
+list as one line per command group (File, Edit, Mode, …, Help), which is a different shape from
+today's hand-written eight lines: read the result before committing it, and if the grouping
+reads badly, change `shortcutList` in `scripts/keymap-docs.ts` rather than the HTML. It also
+fixes what is already wrong there — the list still offers `L` for the guideline tool, which was
+retired. README.md's Shortcut column is generated by the same command and is already correct,
+so running it changes nothing there.
+
+- **The Shortcuts panel is new (2026-09-15).** The File group gained a keyboard button that
+  opens Import / Export / Reset for the keymap. Manual: it needs a topic (and therefore a
+  what's-this entry — `npm run manual` hard-fails on a missing one), covering the `keymap/1`
+  file, the round trip through KeyMapper, that a keymap lives in the browser rather than in the
+  mechanism file, and that about twenty commands ship with no key and can be given one. The
+  README's new *Keyboard shortcuts* section is the text to adapt. Tooltips are now generated
+  from the keymap, which is worth a line in the toolbar topic.
+
 - **Infinite construction guidelines removed (2026-09-13).** The Guideline tool (toolbar
   button, key `L`, `guide` tool id) is gone; the finite **reference line** (Shift+L, `line`
   tool) replaces it. Manual: drop the "Guideline" tool topic / its what's-this entry and the
@@ -269,8 +251,11 @@ them all in one go. Add to this list as you go — one bullet per change, say wh
   point onto its neighbour is refused (the edge keeps a direction). The what's-this strings
   in `src/main.ts` (`measure`, `coincident`, `horizontal`, `vertical`, `parallel`,
   `perpendicular`) still say "guideline" — reword them in the same pass.
-- Plain **`L` now arms the Fixed constraint** (it was left unbound when the Guideline tool
-  went away). The whole shortcut map is still due for a redo.
+- **The shortcuts were remapped (2026-09-15).** The manual's whole `#shortcuts` list is stale;
+  `npm run keymap:docs` rewrites it (see the note at the top of this section). Prose elsewhere in
+  the manual that names a key has to be swept by hand: Fixed is `F`, Circle `C`, reference line
+  `L`, reference arc `A`, fit view `Shift+F`, view dial `Ctrl+R`, polyline-as-cut `Ctrl+U`,
+  Connect `Ctrl+Shift+C`, actuator `Shift+A`, motor `Shift+M`, and **Rail has no key at all**.
 - **Regular polygons are now parametric (2026-09-13, format v21).** Manual: rewrite the
   Polygon tool topic — the side count is no longer a toolbar field: it shows beside the
   cursor badge while the tool is armed (↑ / ↓ change it) and, once the polygon exists, as

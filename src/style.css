@@ -1198,7 +1198,8 @@ input[type="color"].color-chip::-webkit-color-swatch {
 
 /* --- cut-file export panel (src/export.ts) --------------------------------- */
 #export-panel,
-#backup-panel {
+#backup-panel,
+#keymap-panel {
   position: absolute;
   top: 10px;
   right: 12px;
@@ -1215,20 +1216,24 @@ input[type="color"].color-chip::-webkit-color-swatch {
   user-select: none;
 }
 #export-panel.hidden,
-#backup-panel.hidden {
+#backup-panel.hidden,
+#keymap-panel.hidden {
   display: none;
 }
 #export-panel .export-head,
-#backup-panel .export-head {
+#backup-panel .export-head,
+#keymap-panel .export-head {
   font-weight: 600;
 }
 #export-panel .export-scope,
-#backup-panel .export-scope {
+#backup-panel .export-scope,
+#keymap-panel .export-scope {
   color: var(--text-dim);
   margin-top: -6px;
 }
 #export-panel .export-row,
-#backup-panel .export-row {
+#backup-panel .export-row,
+#keymap-panel .export-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1251,7 +1256,8 @@ input[type="color"].color-chip::-webkit-color-swatch {
   cursor: text;
 }
 #export-panel .export-actions,
-#backup-panel .export-actions {
+#backup-panel .export-actions,
+#keymap-panel .export-actions {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
@@ -1287,6 +1293,19 @@ input[type="color"].color-chip::-webkit-color-swatch {
 }
 #backup-btn.paused {
   color: #f0b441;
+}
+
+/* Keyboard shortcuts panel: the keymap in force, and the file it travels in. */
+#keymap-panel {
+  width: 300px;
+}
+#keymap-panel .keymap-note {
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+#keymap-panel .export-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* --- in-app help (src/help.ts) ------------------------------------------------- */

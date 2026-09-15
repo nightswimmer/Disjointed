@@ -1,0 +1,1125 @@
+{
+  "schema": "keymap/1",
+  "app": {
+    "name": "Disjointed"
+  },
+  "contexts": [
+    {
+      "id": "draw",
+      "label": "Draw mode"
+    },
+    {
+      "id": "sim",
+      "label": "Simulate mode"
+    },
+    {
+      "id": "any",
+      "label": "Anywhere"
+    }
+  ],
+  "groups": [
+    {
+      "id": "file",
+      "label": "File"
+    },
+    {
+      "id": "edit",
+      "label": "Edit"
+    },
+    {
+      "id": "mode",
+      "label": "Mode"
+    },
+    {
+      "id": "anim",
+      "label": "Animation"
+    },
+    {
+      "id": "role",
+      "label": "Shape role"
+    },
+    {
+      "id": "shapes",
+      "label": "Shapes"
+    },
+    {
+      "id": "pattern",
+      "label": "Patterns"
+    },
+    {
+      "id": "boolean",
+      "label": "Body operations"
+    },
+    {
+      "id": "mating",
+      "label": "Joints & mating"
+    },
+    {
+      "id": "actuator",
+      "label": "Actuators"
+    },
+    {
+      "id": "transform",
+      "label": "Transform"
+    },
+    {
+      "id": "component",
+      "label": "Components"
+    },
+    {
+      "id": "constraints",
+      "label": "Constraints"
+    },
+    {
+      "id": "grid",
+      "label": "Grid"
+    },
+    {
+      "id": "measure",
+      "label": "Measure"
+    },
+    {
+      "id": "snap",
+      "label": "Snapping"
+    },
+    {
+      "id": "view",
+      "label": "View"
+    },
+    {
+      "id": "help",
+      "label": "Help"
+    }
+  ],
+  "commands": [
+    {
+      "id": "file.open",
+      "label": "Open…",
+      "description": "Load a mechanism from a file.",
+      "group": "file",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "O",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ],
+      "whileTyping": true
+    },
+    {
+      "id": "file.save",
+      "label": "Save",
+      "description": "Write the mechanism to its file.",
+      "group": "file",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "S",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ],
+      "whileTyping": true
+    },
+    {
+      "id": "file.saveAs",
+      "label": "Save as…",
+      "description": "Write the mechanism to a new file.",
+      "group": "file",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "S",
+          "mods": [
+            "ctrl",
+            "shift"
+          ]
+        }
+      ],
+      "whileTyping": true
+    },
+    {
+      "id": "file.export",
+      "label": "Export cut file",
+      "description": "Open the cut-file panel — DXF or SVG of the selected bodies, or of all of them.",
+      "group": "file",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "file.backup",
+      "label": "Auto-backup",
+      "description": "Open the auto-backup settings: timestamped copies written to a folder.",
+      "group": "file",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "file.clear",
+      "label": "Delete everything",
+      "description": "Empty the document — inside a component, only that definition.",
+      "group": "file",
+      "context": "draw",
+      "bindings": []
+    },
+    {
+      "id": "file.shortcuts",
+      "label": "Shortcuts…",
+      "description": "Open the keyboard-shortcut panel: import, export or reset the keymap.",
+      "group": "file",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "edit.undo",
+      "label": "Undo",
+      "description": "Take back the last change.",
+      "group": "edit",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "Z",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "edit.redo",
+      "label": "Redo",
+      "description": "Put back the change that was taken back.",
+      "group": "edit",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "Z",
+          "mods": [
+            "ctrl",
+            "shift"
+          ]
+        },
+        {
+          "key": "Y",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "edit.copy",
+      "label": "Copy",
+      "description": "Copy the selected body or selection.",
+      "group": "edit",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "C",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "edit.paste",
+      "label": "Paste",
+      "description": "Paste the copied bodies at the cursor.",
+      "group": "edit",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "V",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "edit.group",
+      "label": "Group / ungroup",
+      "description": "Group the selected bodies — or dissolve the group that is selected.",
+      "group": "edit",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "G",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "edit.delete",
+      "label": "Delete",
+      "description": "Delete the selection, or the selected measurement (either mode).",
+      "group": "edit",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "Delete",
+          "mods": []
+        },
+        {
+          "key": "Backspace",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "edit.cancel",
+      "label": "Cancel",
+      "description": "Step back out: close a panel, drop an armed constraint, disarm the tool, leave a group or component.",
+      "group": "edit",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "Esc",
+          "mods": []
+        }
+      ],
+      "fixed": true
+    },
+    {
+      "id": "edit.finish",
+      "label": "Finish",
+      "description": "Close the shape being drawn, or accept a pattern's count.",
+      "group": "edit",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "Enter",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "edit.cornerRadiusUp",
+      "label": "More corner radius",
+      "description": "Round the selected body's corners one step further (a disk grows).",
+      "group": "edit",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "]",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "edit.cornerRadiusDown",
+      "label": "Less corner radius",
+      "description": "Take a step of rounding off the selected body's corners (a disk shrinks).",
+      "group": "edit",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "[",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "mode.toggle",
+      "label": "Draw / Simulate",
+      "description": "Switch between building the mechanism and running it.",
+      "group": "mode",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "Tab",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "anim.run",
+      "label": "Run / pause animation",
+      "description": "Start or stop the actuators and motors.",
+      "group": "anim",
+      "context": "sim",
+      "bindings": [
+        {
+          "key": "Space",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "anim.autoPause",
+      "label": "Auto-pause",
+      "description": "Pause the animation as soon as the assembly becomes impossible.",
+      "group": "anim",
+      "context": "sim",
+      "bindings": []
+    },
+    {
+      "id": "role.body",
+      "label": "Body role",
+      "description": "Every shape drawn from now on becomes a rigid body.",
+      "group": "role",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "1",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "role.cut",
+      "label": "Cut role",
+      "description": "Every shape is subtracted from the body under it — a hole inside, a notch across the outline.",
+      "group": "role",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "2",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "role.reference",
+      "label": "Reference role",
+      "description": "Every shape becomes construction geometry: snappable and measurable, never simulated or exported.",
+      "group": "role",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "3",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "shape.polylineBody",
+      "label": "Polyline (body)",
+      "description": "Draw a free shape corner by corner, in the Body role.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "B",
+          "mods": []
+        }
+      ],
+      "tool": "polyline"
+    },
+    {
+      "id": "shape.polylineCut",
+      "label": "Polyline (cut)",
+      "description": "Draw a free shape corner by corner, in the Cut role.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "U",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ],
+      "tool": "polyline"
+    },
+    {
+      "id": "shape.rect",
+      "label": "Rectangle",
+      "description": "Two opposite corners — Shift for a square, Alt to draw from the centre.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "B",
+          "mods": [
+            "shift"
+          ]
+        }
+      ],
+      "tool": "rect"
+    },
+    {
+      "id": "shape.circle",
+      "label": "Circle",
+      "description": "Centre, then the rim: a disk, a round hole or a reference circle.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "C",
+          "mods": []
+        }
+      ],
+      "tool": "circle"
+    },
+    {
+      "id": "shape.polygon",
+      "label": "Regular polygon",
+      "description": "Centre, then a corner; the side count shows beside the cursor.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "P",
+          "mods": [
+            "shift"
+          ]
+        }
+      ],
+      "tool": "polygon"
+    },
+    {
+      "id": "shape.slot",
+      "label": "Slot",
+      "description": "Both ends, then the width — a capsule.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "S",
+          "mods": [
+            "shift"
+          ]
+        }
+      ],
+      "tool": "slot"
+    },
+    {
+      "id": "shape.line",
+      "label": "Line",
+      "description": "A reference segment between two points.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "L",
+          "mods": []
+        }
+      ],
+      "tool": "line"
+    },
+    {
+      "id": "shape.arc",
+      "label": "Arc",
+      "description": "A reference arc: its two ends, then a point it passes through.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "A",
+          "mods": []
+        }
+      ],
+      "tool": "arc"
+    },
+    {
+      "id": "shape.text",
+      "label": "Text",
+      "description": "A label; clicked on a body it rides with that body.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "T",
+          "mods": [
+            "shift"
+          ]
+        }
+      ],
+      "tool": "text"
+    },
+    {
+      "id": "shape.sidesMore",
+      "label": "More sides",
+      "description": "One more side on the armed polygon tool, or on the selected regular polygon.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "↑",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "shape.sidesFewer",
+      "label": "Fewer sides",
+      "description": "One side fewer on the armed polygon tool, or on the selected regular polygon.",
+      "group": "shapes",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "↓",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "tool.patternLinear",
+      "label": "Linear pattern",
+      "description": "Repeat a hole or a joint along one or two directions.",
+      "group": "pattern",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "I",
+          "mods": []
+        }
+      ],
+      "tool": "patternLinear"
+    },
+    {
+      "id": "tool.patternCircular",
+      "label": "Circular pattern",
+      "description": "Repeat a hole or a joint around a centre.",
+      "group": "pattern",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "Q",
+          "mods": []
+        }
+      ],
+      "tool": "patternCircular"
+    },
+    {
+      "id": "tool.split",
+      "label": "Split",
+      "description": "Cut a body in two along a path drawn across it.",
+      "group": "boolean",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "X",
+          "mods": []
+        }
+      ],
+      "tool": "split"
+    },
+    {
+      "id": "edit.combine",
+      "label": "Combine",
+      "description": "Merge the selected bodies into one — they must overlap or share an edge.",
+      "group": "boolean",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "N",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "boolean.subtract",
+      "label": "Subtract",
+      "description": "Cut one selected body out of another.",
+      "group": "boolean",
+      "context": "draw",
+      "bindings": [],
+      "tags": [
+        "planned"
+      ]
+    },
+    {
+      "id": "boolean.intersect",
+      "label": "Intersect",
+      "description": "Keep only the overlap of the selected bodies.",
+      "group": "boolean",
+      "context": "draw",
+      "bindings": [],
+      "tags": [
+        "planned"
+      ]
+    },
+    {
+      "id": "tool.joint",
+      "label": "Joint",
+      "description": "Add a joint point to a body, where two bodies overlap, or free in space.",
+      "group": "mating",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "J",
+          "mods": []
+        }
+      ],
+      "tool": "joint"
+    },
+    {
+      "id": "tool.weld",
+      "label": "Weld",
+      "description": "Lock overlapping bodies rigidly together at a point, or toggle a pin weld ↔ revolute.",
+      "group": "mating",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "W",
+          "mods": []
+        }
+      ],
+      "tool": "weld"
+    },
+    {
+      "id": "tool.connect",
+      "label": "Connect",
+      "description": "Pin two joints together, or attach a joint to a rail as a rider.",
+      "group": "mating",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "C",
+          "mods": [
+            "ctrl",
+            "shift"
+          ]
+        }
+      ],
+      "tool": "connect"
+    },
+    {
+      "id": "tool.ground",
+      "label": "Ground",
+      "description": "Fix a joint's position, or a whole body; click again to release it.",
+      "group": "mating",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "G",
+          "mods": []
+        }
+      ],
+      "tool": "ground"
+    },
+    {
+      "id": "tool.rail",
+      "label": "Rail",
+      "description": "Draw a track for pin-in-slot riders between two joints.",
+      "group": "mating",
+      "context": "draw",
+      "bindings": [],
+      "tool": "rail"
+    },
+    {
+      "id": "tool.slider",
+      "label": "Slider",
+      "description": "Make a body slide along an arrow without rotating.",
+      "group": "mating",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "S",
+          "mods": []
+        }
+      ],
+      "tool": "slider"
+    },
+    {
+      "id": "tool.linearActuator",
+      "label": "Linear actuator",
+      "description": "Make a slider or rail self-driving: its carriage travels back and forth in animation.",
+      "group": "actuator",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "A",
+          "mods": [
+            "shift"
+          ]
+        }
+      ],
+      "tool": "linearActuator"
+    },
+    {
+      "id": "tool.motor",
+      "label": "Motor",
+      "description": "Spin a crank pin about a pivot on the same body.",
+      "group": "actuator",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "M",
+          "mods": [
+            "shift"
+          ]
+        }
+      ],
+      "tool": "motor"
+    },
+    {
+      "id": "edit.mirrorH",
+      "label": "Mirror left↔right",
+      "description": "Flip the selection horizontally.",
+      "group": "transform",
+      "context": "draw",
+      "bindings": []
+    },
+    {
+      "id": "edit.mirrorV",
+      "label": "Mirror top↔bottom",
+      "description": "Flip the selection vertically.",
+      "group": "transform",
+      "context": "draw",
+      "bindings": []
+    },
+    {
+      "id": "edit.sendBack",
+      "label": "Send to back",
+      "description": "Put the selection behind everything else.",
+      "group": "transform",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "PageDown",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "edit.bringFront",
+      "label": "Bring to front",
+      "description": "Put the selection in front of everything else.",
+      "group": "transform",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "PageUp",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "tool.rotate",
+      "label": "Rotate",
+      "description": "Drag a body to turn it about its centroid, or a node to turn it about that node.",
+      "group": "transform",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "R",
+          "mods": []
+        }
+      ],
+      "tool": "rotate"
+    },
+    {
+      "id": "component.create",
+      "label": "Create component",
+      "description": "Pack the selection into a reusable definition — or fork the selected instance.",
+      "group": "component",
+      "context": "draw",
+      "bindings": []
+    },
+    {
+      "id": "component.browser",
+      "label": "Component browser",
+      "description": "Insert, edit, rename or delete component definitions.",
+      "group": "component",
+      "context": "draw",
+      "bindings": []
+    },
+    {
+      "id": "sketch.autoConstraints",
+      "label": "Auto constraints",
+      "description": "Arm alignment constraints by holding a drag over a corner, joint or edge.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": []
+    },
+    {
+      "id": "tool.coincident",
+      "label": "Coincident",
+      "description": "Make two points share a position, or hold a point on a line.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "O",
+          "mods": []
+        }
+      ],
+      "tool": "coincident"
+    },
+    {
+      "id": "tool.equal",
+      "label": "Equal length",
+      "description": "Give two lines the same length.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "E",
+          "mods": []
+        }
+      ],
+      "tool": "equal"
+    },
+    {
+      "id": "tool.horizontal",
+      "label": "Horizontal",
+      "description": "Hold a line — or two points — horizontal.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "H",
+          "mods": []
+        }
+      ],
+      "tool": "horizontal"
+    },
+    {
+      "id": "tool.vertical",
+      "label": "Vertical",
+      "description": "Hold a line — or two points — vertical.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "V",
+          "mods": []
+        }
+      ],
+      "tool": "vertical"
+    },
+    {
+      "id": "tool.parallel",
+      "label": "Parallel",
+      "description": "Hold two lines parallel.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "P",
+          "mods": []
+        }
+      ],
+      "tool": "parallel"
+    },
+    {
+      "id": "tool.perpendicular",
+      "label": "Perpendicular",
+      "description": "Hold two lines at a right angle.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "T",
+          "mods": []
+        }
+      ],
+      "tool": "perpendicular"
+    },
+    {
+      "id": "tool.tangent",
+      "label": "Tangential",
+      "description": "Hold a line tangent to a circle or arc.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "Z",
+          "mods": []
+        }
+      ],
+      "tool": "tangent"
+    },
+    {
+      "id": "tool.symmetric",
+      "label": "Symmetrical",
+      "description": "Make two points, or two lines, mirror images across a third line.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "Y",
+          "mods": []
+        }
+      ],
+      "tool": "symmetric"
+    },
+    {
+      "id": "tool.fixed",
+      "label": "Fixed",
+      "description": "Lock a point where it is, or lock a line's angle and position.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": [
+        {
+          "key": "F",
+          "mods": []
+        }
+      ],
+      "tool": "fixed"
+    },
+    {
+      "id": "sketch.badges",
+      "label": "Constraint badges",
+      "description": "Show or hide every constraint badge.",
+      "group": "constraints",
+      "context": "draw",
+      "bindings": []
+    },
+    {
+      "id": "grid.show",
+      "label": "Show the grid",
+      "description": "Show or hide the grid.",
+      "group": "grid",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "grid.size",
+      "label": "Grid size",
+      "description": "Open the grid-spacing list.",
+      "group": "grid",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "grid.style",
+      "label": "Grid line style",
+      "description": "Open the grid line-style list: solid, dashed, dotted or points.",
+      "group": "grid",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "tool.measure",
+      "label": "Measure",
+      "description": "Dimension a line, or the distance between two references — in either mode.",
+      "group": "measure",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "D",
+          "mods": []
+        }
+      ],
+      "tool": "measure"
+    },
+    {
+      "id": "measure.show",
+      "label": "Show measurements",
+      "description": "Show or hide every measurement.",
+      "group": "measure",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "snap.grid",
+      "label": "Snap to grid",
+      "description": "Snap placement and dragging to the grid.",
+      "group": "snap",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "snap.object",
+      "label": "Object snap",
+      "description": "Snap onto corners, edges, midpoints and centres of other objects.",
+      "group": "snap",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "view.fit",
+      "label": "Fit to screen",
+      "description": "Frame the whole mechanism.",
+      "group": "view",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "F",
+          "mods": [
+            "shift"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "view.rotate",
+      "label": "Rotate the view",
+      "description": "Open or close the dial that turns the whole picture.",
+      "group": "view",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "R",
+          "mods": [
+            "ctrl"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "view.rotateZero",
+      "label": "View upright",
+      "description": "Turn the view back to 0° (while the dial is open).",
+      "group": "view",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "0",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "view.zoomIn",
+      "label": "Zoom in",
+      "description": "Zoom in about the middle of the canvas.",
+      "group": "view",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "view.zoomOut",
+      "label": "Zoom out",
+      "description": "Zoom out about the middle of the canvas.",
+      "group": "view",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "view.theme",
+      "label": "Light / dark theme",
+      "description": "Switch between the light and dark themes.",
+      "group": "view",
+      "context": "any",
+      "bindings": []
+    },
+    {
+      "id": "help.toggle",
+      "label": "Help drawer",
+      "description": "Open or close the manual beside the canvas; while it is open, clicking a control explains it.",
+      "group": "help",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "?",
+          "mods": []
+        }
+      ]
+    },
+    {
+      "id": "help.contents",
+      "label": "Manual contents",
+      "description": "Open the manual at its table of contents.",
+      "group": "help",
+      "context": "any",
+      "bindings": [
+        {
+          "key": "F1",
+          "mods": []
+        }
+      ],
+      "whileTyping": true
+    }
+  ]
+}

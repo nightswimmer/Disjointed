@@ -9,8 +9,11 @@ Where things are documented:
   behaviour question comes up, read it there; do not duplicate it here.
 - **public/help/** — the in-app manual (same content as README, illustrated). Its updates are
   currently **deferred** (see *In flight*).
-- **HANDOFF.md** — unfinished work: the **command registry + keymap file** build spec (next up),
-  the shape-tools roadmap (phases 2–4), smaller follow-ups, and the list of pending manual edits.
+- **HANDOFF.md** — unfinished work: making **`public/keymap.json` the shipped defaults** (next
+  up), the rest of the shortcut remap, the shape-tools roadmap (phases 2–4), smaller follow-ups,
+  and the list of pending manual edits.
+- **public/keymap.json** — every shortcut, as data. **Generated** from the registry today, so
+  hand-editing it changes nothing in the app; making it the source is the next job.
 - Code comments carry the local *why* for most non-obvious branches; `scripts/*.ts` are the
   executable spec.
 
@@ -27,8 +30,14 @@ motion; actuators / motors animate.
 - `npm run dev` / `build` / `preview`; `npm test` runs every `scripts/*.ts` (tsx, headless, no DOM);
   `npm run manual` regenerates the manual's SVG illustrations + glyph tables with Playwright driving
   the **installed Chrome** (`channel: "chrome"`), and fails if a topic the app can ask for is missing.
-- The interactive canvas is not covered by tests: confirm UI changes by eye (or with a throwaway
-  Playwright script against `npm run dev` with `?automation`, which exposes `window.__disjointed`).
+- Keymap scripts, all driven by the registry in `src/commands.ts`: `npm run keymap:file` writes
+  `public/keymap.json` (run it after touching the registry — `npm test` fails if the file is
+  behind), `npm run keymap:docs` rewrites the shortcut lists in README.md and the manual
+  (`--check` reports staleness instead), `npm run keymap:live` presses every shortcut in the real
+  app under Chrome.
+- The interactive canvas is not covered by `npm test`: confirm UI changes by eye (or with a
+  throwaway Playwright script against `npm run dev` with `?automation`, which exposes
+  `window.__disjointed` — `scripts/keymap-live.ts` is a worked example of that pattern).
 - Field-repro scenes in the repo root: `FrontPanelHinge.json`, `gate hinge tests.json` (the
   "Door Assembly 6" pattern/dimension case). The tangent / line-blends-into-arc repro is
   **not** kept as a scene: its geometry is embedded in `scripts/tangent-constraint.ts`.
@@ -47,7 +56,9 @@ motion; actuators / motors animate.
 | `dxf.ts` / `export.ts` | DXF reader with fillet reconstruction; DXF R12 / SVG cut-file writer with exact arcs |
 | `renderer.ts` | Canvas drawing from a `RenderInput`; theme palette; screen-space labels |
 | `view.ts` | Camera (`screen = R(angle)·world·scale + t`) |
-| `main.ts` | Everything UI: tools, drags, snapping, selection, history, persistence, backup, component contexts, animation loop |
+| `main.ts` | Everything UI: tools, drags, snapping, selection, history, persistence, backup, component contexts, animation loop; the command **actions** and the key handler |
+| `commands.ts` | The command registry as data (id, label, description, group, context, tool, default keys) + the `Tool` / `ShapeRole` vocabulary. DOM-free |
+| `keymap.ts` | The `keymap/1` format: chord spelling, event → slot normalization, validation, conflicts, the user's overrides. DOM-free |
 | `notify.ts` | Toasts — the project-wide replacement for `alert` |
 | `filestore.ts` | File System Access API wrappers + IndexedDB handle storage |
 | `toolbar.ts` | Toolbar section rack: drag a group by its caption to reorder (live FLIP reflow), order in localStorage |
@@ -382,9 +393,37 @@ motion; actuators / motors animate.
   identical warnings go through `notifyThrottled`. `SKETCH_FLASH_MS` is long enough (4 s) to find
   the flashing items after reading the toast that named them.
 - Two-click slider start pair: a press grabs the **rail joint** in draw mode, the **rider** in sim.
-- Text shortcuts: plain letters in `TOOL_KEYS`, Shift+letter shape tools in `SHIFT_TOOL_KEYS`
-  (main.ts); plain `L` arms Fixed, `Y` Symmetrical and `Z` Tangential (the last free letter);
-  the whole shortcut map is due for a remap.
+- **A shortcut is data, written down once.** `src/commands.ts` is the registry (one entry per
+  command: id, label, one-line description, group, context, the tool it arms, the keys it ships
+  with); `src/main.ts` holds the matching `COMMAND_ACTIONS`, because every `run()` closes over
+  module state that no facade would carry cheaply. The two halves are keyed by id and
+  `Record<CommandId, CommandAction>` makes the compiler demand an action for each — that type is
+  the only thing keeping them in step, so don't widen it. Everything else is generated:
+  `public/keymap.json`, the tooltips (a button's `title` in `index.html` carries **base text
+  only**; `data-cmd` — or `data-tool` — names its commands and the key is appended at startup),
+  and the README / manual lists.
+  - **Dispatch** is one map lookup on a *slot*: `KEY|mods`, mods always `ctrl+shift+alt`. Shift is
+    part of the slot for letters and named keys, never for a character (`?` arrives as `"?"` with
+    shiftKey true — recording Shift would build a slot nothing can produce). Exact slots are why
+    ordering bugs are gone: `Shift+F` and `Shift+N` were unreachable under the old `if` ladder,
+    which is why the remap could hand `Shift+F` to Fit view the same day.
+    Resolution: first command on the slot whose `context` matches the mode (`any`
+    matches both) and whose `enabled()` is happy; a refused command is **not** swallowed, so the
+    keystroke still reaches the browser.
+  - Five commands **branch internally and must stay one command each** — `Esc` (the layered
+    cancel), `Delete` (measurement vs selection, both modes), `↑` / `↓` (armed polygon tool vs
+    selected regular polygon), `Enter` (close a polyline vs commit a pattern count), `[` / `]`
+    (disk vs corner radius). Modelling their states as separate bindings would put them back in
+    a race.
+  - Four commands carry `whileTyping` (save, save as, open, `F1`): they resolve *before* the
+    focus-in-a-field bail-out. Note that `#export-panel` / `#backup-panel` / the grid menus stop
+    propagation for their own fields, so a key pressed while focus is still inside one never
+    reaches the handler at all.
+  - A user's keymap is the whole `{commandId: bindings[]}` map in `localStorage`
+    (`disjointed:keymap`), **not a diff** — a diff against a moving default is a migration problem.
+    A command the map doesn't mention keeps its default, so adding one is always safe. The
+    Shortcuts panel (File group) imports / exports / resets it; rearranging a layout is
+    KeyMapper's job, not this app's.
 - View rotation is purely visual (world axes for constraints, grid and snapping).
 
 ## Serialization history (`load` accepts everything ≤ 21)
@@ -415,9 +454,14 @@ sweep count, an H-held line, point-on-line pinning and a drag of the shared end)
 moves, follow-the-line remaps, load) · groups · group-joints · grounded-bodies ·
 freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression with solver stats) ·
 components · pose-dims · pose-constraints · split-combine · shapes (cut, references, v21 load) ·
-regular · guides · patterns · features · context-ghost · view · dxf · export.
-`solver-bench.ts` is a benchmark, not in `npm test`. Each script is a plain assertion list — read
-it for the exact cases.
+regular · guides · patterns · features · context-ghost · view · dxf · export ·
+keymap (key spelling, slots, conflicts, file parsing, overrides; then the three agreements:
+the registry with itself, `public/keymap.json` with the registry, `index.html`'s `data-cmd` /
+`data-tool` and its shortcut-free tooltips with both).
+`solver-bench.ts` is a benchmark, not in `npm test`; `keymap-live.ts` (`npm run keymap:live`)
+needs Chrome, so it isn't either — it is the only coverage **dispatch** can have, and its letters
+are written out by hand on purpose: if it and the registry disagree, one of them is wrong.
+Each script is a plain assertion list — read it for the exact cases.
 
 ## Lessons from past bugs (root causes to not repeat)
 - Index-based refs must be remapped on every reordering of a control polygon (mirror reverses
@@ -441,9 +485,10 @@ it for the exact cases.
 - Solver instrumentation exists (`solverConfig`, `SolveStats`, sim-mode tuning sliders, per-run
   animation stats in the console); use it before guessing at convergence problems.
 
-## In flight (2026-09-13)
+## In flight (2026-09-15)
 - A run of **UI-tweak commits**. During it the in-app manual is deliberately **not** updated;
   every manual-relevant change is logged in HANDOFF.md ("pending manual updates") for one later pass.
+  The shortcut list in that pass is now a **generator run** (`npm run keymap:docs`), not an edit.
   Currently pending there: guideline removal, parametric polygons and the "n sides" tag,
   projected corner-pair size dimensions, single-click line dimensions, the two-candidate /
   point-on-point implicit constraints with their new toolbar switch, the Fixed constraint,
@@ -455,21 +500,20 @@ it for the exact cases.
   `tool-fixed`, `tool-symmetric` and `tool-tangent` topics had to be written, because
   `npm run manual` hard-fails on a topic the app can ask for and every `data-tool` button
   implies one — all three still need the illustration pass like the rest.
-- **The shortcuts are being remapped.** Every plain letter is bound, and the constraints that arrived last
-  took whatever was free (`L` Fixed, `Y` Symmetrical, `Z` Tangential), so the layout is being
-  reworked on an external board — a KeyMapper artifact, see HANDOFF.md for its id — rather than
-  in the code. The next piece of work is the **command registry + `public/keymap.json`** that
-  turns a binding into data; the full build spec is in HANDOFF.md. Until then, don't hand-edit
-  `TOOL_KEYS` or the `(J)` inside a tooltip: that duplication is exactly what the registry
-  deletes, and a remap applied by hand would be thrown away twice.
-- The **`keymapper/`** folder is **not part of this project**. It is the seed for **KeyMapper**,
-  the standalone shortcut-remapping tool that grew out of this work: its README (which carries
-  the `keymap/1` schema), its own PROJECT_INSTRUCTIONS.md and CLAUDE.md, and scaffolding copied
-  from here (`.gitignore`, `tsconfig.json`, `vite.config.ts`, `LICENSE`) plus a thin
-  `package.json`. It is staged for the user to copy into KeyMapper's own repo and should be
-  deleted from here once that repo exists — nothing in the build or the tests looks at it. The
-  `keymap/1` schema is the contract this app's keymap file will follow, and the only thing the
-  two projects share.
+- **The shortcuts were remapped (2026-09-15) and the layout is not settled.** The registry
+  shipped first with the bindings untouched, then the board's layout was applied on top of it as
+  eleven edits to `keys` in `src/commands.ts` — Fixed `F`, Circle `C`, Line `L`, Arc `A`, fit view
+  `Shift+F`, view dial `Ctrl+R`, polyline-as-cut `Ctrl+U`, Connect `Ctrl+Shift+C`, actuator
+  `Shift+A`, motor `Shift+M`, **Rail unassigned** — with the file, the tooltips and the README
+  following by themselves. Two of those want a second opinion (HANDOFF.md): Rail lost its key
+  where the earlier plan dropped the actuator's, and Connect became a three-key chord.
+  Rearranging happens on the KeyMapper board, which must be **seeded from the generated
+  `public/keymap.json`** — the board's original hand-written file used its own ids and applies
+  nothing.
+- **KeyMapper now lives in its own repo** (`../KeyMapper`), and the empty `keymapper/` folder that
+  staged it is gone. Its README specifies `keymap/1` normatively — the only thing the two projects
+  share. `src/keymap.ts` implements that spec and must not restate it; if a rule needs changing,
+  change it there first, in both projects.
 - The **Tangential constraint shipped but needs another pass**: the user's field tests with
   a two-line-and-an-arc scene of their own found it still wanting. HANDOFF.md lists the known weak spots (three-point
   arcs, the line swinging in a blend, no held side, coverage); ask what was seen before
@@ -496,8 +540,9 @@ it for the exact cases.
 - **Components**: no per-instance scaling; no ports; per-instance actuator/motor speed overrides are
   lost on cascade; no thumbnails / drag-to-place in the browser; pose dims between instances aren't
   carried by copy/paste; a refused pose constraint gives no feedback (nothing to flash).
-- **Sketch**: driving angle dimensions; radius dim on a sharp corner can't be picked. Implicit
-  constraints have no keyboard shortcut for their switch, and no point-on-point coincident between
+- **Sketch**: driving angle dimensions; radius dim on a sharp corner can't be picked. The implicit
+  constraints' switch ships with no key (it is `sketch.autoConstraints` in the registry, so giving
+  it one is now a line in the keymap rather than a code change), and there is no point-on-point coincident between
   a dragged *line* and a candidate (lines only take point-on-line). Midpoints are drag / placement
   inferences only: neither the constraint tools nor the Measure tool pick them (a Measure pick
   would need the dimension items to go through `PointHandle` too), and midpoints are not drawn
