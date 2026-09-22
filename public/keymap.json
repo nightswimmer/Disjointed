@@ -618,13 +618,10 @@
     {
       "id": "boolean.subtract",
       "label": "Subtract",
-      "description": "Cut one selected body out of another.",
+      "description": "Cut the other selected bodies out of the first-selected one.",
       "group": "boolean",
       "context": "draw",
-      "bindings": [],
-      "tags": [
-        "planned"
-      ]
+      "bindings": []
     },
     {
       "id": "boolean.intersect",
@@ -632,10 +629,7 @@
       "description": "Keep only the overlap of the selected bodies.",
       "group": "boolean",
       "context": "draw",
-      "bindings": [],
-      "tags": [
-        "planned"
-      ]
+      "bindings": []
     },
     {
       "id": "tool.joint",

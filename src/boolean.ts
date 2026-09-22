@@ -1,6 +1,7 @@
 /**
  * Polygon booleans: union for the Combine tool, difference for the shape tools' Cut
- * role (and segment helpers shared with Split).
+ * role and the Subtract tool, intersection for the Intersect tool (and segment helpers
+ * shared with Split).
  *
  * The union works on a planar straight-line graph: every input edge is split where it
  * crosses, touches or overlaps another one, coincident vertices are merged, and each
@@ -140,6 +141,17 @@ export function differenceRegions(subject: PolyRegion, cutters: PolyRegion[]): U
 }
 
 /**
+ * Intersection: the material common to **every** input (the Intersect tool). Same
+ * result shape as the union — several pieces when the common region is disconnected,
+ * `null` when the inputs share no area (touching along an edge or at a corner is no
+ * overlap).
+ */
+export function intersectRegions(inputs: PolyRegion[]): UnionResult | null {
+  if (inputs.length === 0) return null;
+  return booleanRegions(inputs, (p) => inputs.every((r) => inRegion(p, r)));
+}
+
+/**
  * The shared planar-graph boolean: every input loop's edges are split where they meet,
  * and an edge survives when `filled` differs between its two sides (material on the
  * left → kept as is, on the right → reversed). `filled` is the set operation.
@@ -236,15 +248,33 @@ function booleanRegions(inputs: PolyRegion[], filled: (p: Vec2) => boolean): Uni
   const P = pool.points;
 
   // --- classify: keep edges with material on exactly one side, directed material-left ---
+  // The samples sit `delta` off the midpoint, or half the edge's length when that is
+  // shorter: a sliver edge (a body vertex a hair outside another body's edge splits that
+  // edge into pieces of the hair's size) probed from `delta` away reads the regions
+  // beyond its neighbours, not its own two sides.
   const directed: { from: number; to: number; used: boolean }[] = [];
   for (const [u, v] of edges) {
-    const d = normalize(sub(P[v], P[u]));
-    const n = perp(d);
+    const dv = sub(P[v], P[u]);
+    const n = perp(normalize(dv));
     const m = scale(add(P[u], P[v]), 0.5);
-    const left = filled(add(m, scale(n, delta)));
-    const right = filled(sub(m, scale(n, delta)));
+    const off = Math.min(delta, len(dv) / 2);
+    const left = filled(add(m, scale(n, off)));
+    const right = filled(sub(m, scale(n, off)));
     if (left && !right) directed.push({ from: u, to: v, used: false });
     else if (right && !left) directed.push({ from: v, to: u, used: false });
+  }
+  // Boundary edges close into loops, so an edge with no way on at its head (or no way in
+  // at its tail) is a misread — a sample that landed across a feature thinner than its
+  // offset. Drop such edges, and whatever they leave dangling, so a stray spur neither
+  // breaks a chain nor fakes a pinch.
+  for (let pruned = true; pruned;) {
+    pruned = false;
+    const outs = new Set<number>(), ins = new Set<number>();
+    for (const e of directed) { outs.add(e.from); ins.add(e.to); }
+    for (let i = directed.length - 1; i >= 0; i--) {
+      const e = directed[i];
+      if (!outs.has(e.to) || !ins.has(e.from)) { directed.splice(i, 1); pruned = true; }
+    }
   }
   if (directed.length === 0) return null;
 

@@ -14,9 +14,10 @@
  * markup against each other headless.
  *
  * Adding a command: add it here, then add its action in `main.ts` (the compiler will ask
- * for it), give its button a `data-cmd`, and run `npm run keymap:file` — which brings the
- * keymap file's *metadata* back in line and gives the new command an empty binding list
- * for someone to fill in.
+ * for it), give its button a `data-cmd` **and** a click listener in `main.ts` next to the
+ * others (`data-cmd` only feeds tooltips and shortcut titles — it wires no click), and run
+ * `npm run keymap:file` — which brings the keymap file's *metadata* back in line and gives
+ * the new command an empty binding list for someone to fill in.
  *
  * The **id is the contract** — a saved user keymap keys on it, and so does the keymap
  * file. Rename a label freely; never rename an id.
@@ -276,11 +277,11 @@ export const COMMANDS = [
     description: "Merge the selected bodies into one — they must overlap or share an edge.",
   },
   {
-    id: "boolean.subtract", label: "Subtract", group: "boolean", context: "draw", tags: ["planned"],
-    description: "Cut one selected body out of another.",
+    id: "boolean.subtract", label: "Subtract", group: "boolean", context: "draw",
+    description: "Cut the other selected bodies out of the first-selected one.",
   },
   {
-    id: "boolean.intersect", label: "Intersect", group: "boolean", context: "draw", tags: ["planned"],
+    id: "boolean.intersect", label: "Intersect", group: "boolean", context: "draw",
     description: "Keep only the overlap of the selected bodies.",
   },
 

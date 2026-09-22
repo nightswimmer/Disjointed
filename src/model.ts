@@ -34,7 +34,7 @@ import {
   arcThrough,
   distToArc,
 } from "./geometry";
-import { unionRegions, differenceRegions, segmentsCross, pointOnSegment, PolyRegion } from "./boolean";
+import { unionRegions, differenceRegions, intersectRegions, segmentsCross, pointOnSegment, PolyRegion } from "./boolean";
 
 /**
  * A joint exactly coincident with a body control vertex is "stuck" to it — they move
@@ -261,8 +261,11 @@ function rotateLayout(l: PatternLayout, ang: number): PatternLayout {
 /** Outcome of `Scene.splitBody`: the two sides (A keeps the original id), or why it was refused. */
 export type SplitResult = { ok: true; a: Body; b: Body } | { ok: false; reason: string };
 
-/** Outcome of `Scene.combineBodies`: the surviving (first) body, or why it was refused. */
+/** Outcome of `Scene.combineBodies` / `Scene.booleanBodies`: the surviving (first) body, or why it was refused. */
 export type CombineResult = { ok: true; body: Body } | { ok: false; reason: string };
+
+/** The two selection booleans besides Combine — see `Scene.booleanBodies`. */
+export type BooleanOp = "subtract" | "intersect";
 /**
  * The size measures of a regular-polygon outline a driving dimension can set directly:
  * a chord between corners `k` apart (k = 1 the edge length, k = n/2 across corners), the
@@ -2802,6 +2805,84 @@ export class Scene {
   }
 
   /**
+   * Subtract / Intersect over a selection: the first id is the **subject** and survives
+   * (id, colour, z-position, joints, grounding, group membership); every other body is
+   * a **tool** — subtracted from the subject, or intersected with it — and is removed
+   * afterwards together with its joints and their constraints (`removeBody`). Both work
+   * on the editable outlines (offset-mode bodies baked, see `editableOutline`) and hand
+   * the result to `applyRegion` like Combine: unchanged corners keep their radii, new
+   * ones are sharp, an untouched hole keeps its exact spec, refs remap by world geometry
+   * (a tool corner that becomes a subject corner carries its dimension over), the
+   * subject's patterns dissolve. A tool's holes are holes in the tool — the material
+   * under one is neither subtracted nor kept — and a tool that becomes a hole *whole*
+   * (a disk subtracted from the middle of a plate) lends that hole its own editable
+   * spec, so a disk stays a disk. The subject's joints are left where they are, as
+   * after a Cut. Refused (scene untouched, reason returned) with fewer than two bodies,
+   * on component-instance material, when a tool doesn't overlap the subject (sharing an
+   * edge is not overlapping), or when the result is empty, comes in several pieces
+   * (subtract: "use Split") or is pinched at a point.
+   */
+  booleanBodies(op: BooleanOp, ids: number[]): CombineResult {
+    const verb = op === "subtract" ? "subtract" : "intersect";
+    const bodies: Body[] = [];
+    for (const id of ids) {
+      const b = this.getBody(id);
+      if (b && !bodies.includes(b)) bodies.push(b);
+    }
+    if (bodies.length < 2) return { ok: false, reason: `Select at least two bodies to ${verb}.` };
+    if (bodies.some((b) => this.instanceOfBody(b.id))) {
+      return { ok: false, reason: `Component instances can't be ${verb}ed — edit the definition, or fork the instance first.` };
+    }
+    const shapes = bodies.map((b) => this.editableOutline(b));
+    const regions: PolyRegion[] = shapes.map((s) => ({
+      outer: s.outer.map((c) => c.p),
+      holes: s.holes.map((h) => h.control.map((c) => c.p)),
+    }));
+    const tol = Scene.shapeTol(regions.flatMap((r) => [r.outer, ...r.holes])) * 10;
+    const [subject, ...tools] = regions;
+    // Every tool must actually overlap the subject: one that doesn't would be consumed
+    // for nothing (subtract) or is the reason the result is empty (intersect).
+    const idle = tools.filter((t) => !intersectRegions([subject, t])).length;
+    if (idle > 0) {
+      const who = idle > 1 ? `${idle} of the other bodies don't` : tools.length > 1 ? "One of the other bodies doesn't" : "The other body doesn't";
+      return {
+        ok: false,
+        reason: op === "subtract"
+          ? `${who} overlap the first — there is nothing to subtract there.`
+          : `${who} overlap the first — there is no overlap to keep.`,
+      };
+    }
+    const result = op === "subtract" ? differenceRegions(subject, tools) : intersectRegions(regions);
+    if (!result) {
+      return {
+        ok: false,
+        reason: op === "subtract"
+          ? "Subtracting would remove the whole body."
+          : "The bodies have no area in common — there is nothing to keep.",
+      };
+    }
+    if (result.regions.length > 1) {
+      const n = result.regions.length;
+      return {
+        ok: false,
+        reason: op === "subtract"
+          ? `Subtracting would split the body into ${n} pieces — use the Split tool for that.`
+          : `The common shape comes in ${n} separate pieces — a body can only be one piece.`,
+      };
+    }
+    if (result.pinched) return { ok: false, reason: "The result would touch itself at a single point." };
+
+    const survivor = bodies[0];
+    this.dissolvePatternsOfBody(survivor.id); // hole indices are rebuilt below
+    this.applyRegion(survivor, bodies, shapes, result.regions[0], tol);
+    // The tools are consumed: their joints, constraints, patterns and group memberships go too.
+    for (const b of bodies.slice(1)) this.removeBody(b.id);
+    this.pruneMeasurements();
+    this.pruneSketch();
+    return { ok: true, body: survivor };
+  }
+
+  /**
    * Cut a shape out of a body — the shape tools' **Cut** role. `spec` is a world-coord
    * hole spec (a plain loop, or a control polygon + rounding — a one-point offset spec is
    * a disk). A cutter that lies entirely inside the material, clear of the outline and of
@@ -2890,8 +2971,9 @@ export class Scene {
    * (whose editable outlines are `shapes`, in the same order — the survivor among them).
    * Corner radii: a result corner that is an unchanged input corner keeps that corner's
    * radius, a new one is sharp. Holes: a result hole identical to an input hole keeps
-   * that hole's exact editable spec (a disk stays a disk), others become radius-0
-   * outlines. Vertex / edge measurement + sketch refs on the sources remap by matching
+   * that hole's exact editable spec (a disk stays a disk), one identical to another
+   * source's whole outline (a tool subtracted from inside the subject) takes that
+   * outline's spec, others become radius-0 outlines. Vertex / edge measurement + sketch refs on the sources remap by matching
    * world geometry (an edge survives only whole), refs on kept holes keep following
    * them, `bodyPoint` refs re-anchor in the survivor's frame; unmatched refs are dropped.
    * Joints are not touched (the caller moves them first when bodies merge).
@@ -2943,6 +3025,23 @@ export class Scene {
             origin: { bodyId: b.id, hole: hi },
           };
         }
+      }
+      // A source swallowed whole as a hole (a tool body subtracted from inside the
+      // subject) lends the hole its outline's editable spec — a disk body cuts a disk.
+      for (let bi = 0; bi < sources.length; bi++) {
+        const b = sources[bi];
+        if (b === survivor || !sameLoop(loop, shapes[bi].outer.map((c) => c.p))) continue;
+        const baked = b.round === "offset";
+        return {
+          spec: {
+            control: baked ? this.bodyControlWorld(b) : shapes[bi].outer.map((c) => c.p),
+            radius: b.radius,
+            radii: b.radii ? [...b.radii] : undefined,
+            round: baked ? "offset" : undefined,
+            regular: b.regular,
+          },
+          origin: null,
+        };
       }
       return { spec: { control: loop, radius: 0, radii: Scene.overrides(radiiOf(loop), 0) }, origin: null };
     });

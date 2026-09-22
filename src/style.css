@@ -313,16 +313,6 @@ body.tb-dragging-on * {
   display: block;
 }
 
-/* Placeholders for tools that are not built yet: dimmed, and a click says so. */
-.todo-btn {
-  opacity: 0.38;
-}
-
-.todo-btn:hover {
-  opacity: 0.6;
-  background: var(--control);
-}
-
 /* Status bar: the hint line for the armed tool / current selection. One line —
    the full text is on the element's tooltip. */
 #statusbar {

@@ -145,10 +145,10 @@
               <button data-cmd="edit.combine" id="combine-btn" class="icon-btn" title="Combine the selected bodies into one — they must overlap or share an edge; the first selected keeps its colour" aria-label="Combine selected bodies">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="9" height="9" rx="1.5" fill="currentColor" fill-opacity="0.18"/><rect x="8" y="8" width="9" height="9" rx="1.5" fill="currentColor" fill-opacity="0.18"/><path d="M8 12V8h4" fill="none"/></svg>
               </button>
-              <button data-cmd="boolean.subtract" id="subtract-btn" class="icon-btn todo-btn" data-todo="Subtract — cutting one selected body out of another" title="Subtract one body from another (not implemented yet)" aria-label="Subtract bodies">
+              <button data-cmd="boolean.subtract" id="subtract-btn" class="icon-btn" title="Subtract the other selected bodies from the first selected — it keeps its colour and joints, the others are removed; a body lying inside becomes a hole of its own shape" aria-label="Subtract bodies">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 3h9v5H8v4H3z" fill="currentColor" fill-opacity="0.18"/><rect x="8" y="8" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/></svg>
               </button>
-              <button data-cmd="boolean.intersect" id="intersect-btn" class="icon-btn todo-btn" data-todo="Intersect — keeping only the overlap of the selected bodies" title="Keep the overlap of two bodies (not implemented yet)" aria-label="Intersect bodies">
+              <button data-cmd="boolean.intersect" id="intersect-btn" class="icon-btn" title="Keep only the overlap of the selected bodies — the first selected takes the shape they all share, the others are removed" aria-label="Intersect bodies">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/><rect x="8" y="8" width="9" height="9" rx="1.5" stroke-dasharray="2.6 1.8"/><rect x="8" y="8" width="4" height="4" fill="currentColor" fill-opacity="0.4"/></svg>
               </button>
             </div>

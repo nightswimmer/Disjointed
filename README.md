@@ -102,8 +102,7 @@ The **mode button** is the big one: it shows the mode it switches *to* (▶ whil
 you simulate), and the caption under it names the mode you are in. A group whose drawing can be
 hidden carries a small **eye** on its caption — **Grid**, **Constraints** (the badges) and
 **Measure** (the dimensions); a struck-through eye means that group's drawing is hidden, never
-that it stopped working. Buttons for tools that are not built yet (Subtract, Intersect) are
-dimmed placeholders and say so when clicked.
+that it stopped working.
 
 Fields that belong to a selection or an armed tool — text height, actuator / motor speed, the
 solver-tuning knobs — appear in a strip to the **right of the groups**, so nothing shifts when a
@@ -250,6 +249,23 @@ Shift+drag *on* a body or joint is still the rigid drag described above.
   holes not covered by the other bodies stay (a circular hole stays a true disk), and a region
   the union closes off becomes a new hole. Bodies built from joints are converted to an
   editable sharp outline first.
+- **Subtract** (the **Boolean** group) — cut the other **multi-selected bodies** out of the
+  **first-selected** one. Select the body to keep first (the one you Ctrl+click first — or, in
+  a box selection, the bottom-most in the stacking order), add the cutters, then press the
+  button. The first body survives with its colour, joints, grounding and group; the cutters
+  are consumed, and their joints and constraints go with them (copy a cutter first if you want
+  to keep it). A cutter lying entirely inside the body becomes a hole of the cutter's own
+  shape — a disk body punches a true round hole, a rounded rectangle a rounded one — and one
+  crossing the outline leaves a notch. Rounding, holes and dimensions carry over as for
+  Combine (a dimension on a cutter corner that becomes a corner of the result follows it).
+  Refused with a message when a cutter doesn't overlap the first body (touching along an edge
+  doesn't count), or when the cut would remove the body, split it into several pieces (use
+  **Split**) or leave it touching itself at a point.
+- **Intersect** (the **Boolean** group) — keep only the **overlap** of the multi-selected
+  bodies: the first-selected survives, reshaped to the region common to all of them, and the
+  others are consumed. Corners that survive keep their rounding, new ones are sharp, holes
+  inside the overlap stay (a disk stays a disk). Refused when a body doesn't overlap the
+  first, when the bodies share no area, or when the overlap comes in several separate pieces.
 - **Send to back / Bring to front** (the **Transform** group, or **PageDown / PageUp**) —
   move the selection to the bottom / top of the stacking order. Clicks always pick the topmost
   body, so this also decides what a click lands on: send a big imported reference body to the

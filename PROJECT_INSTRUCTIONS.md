@@ -51,7 +51,7 @@ motion; actuators / motors animate.
 | `solver.ts` | Sim solver (Gauss-Seidel positional impulses), groups/welds as rigid composites, break-and-exclude |
 | `sketch.ts` | Draw-mode shape solver for sketch constraints + driving dimensions |
 | `pose.ts` | Pose-level dimensions / constraints on component instances (rigid moves, not shape) |
-| `boolean.ts` | Polygon union (Combine) and difference (Cut role) over a planar graph |
+| `boolean.ts` | Polygon union (Combine), difference (Cut role, Subtract) and intersection (Intersect) over a planar graph |
 | `context.ts` | Context ghost: the enclosing assembly drawn faded inside a definition |
 | `analyzer.ts` | Topology diagnostic (islands, DOF, loop cores). Not wired to any UI |
 | `dxf.ts` / `export.ts` | DXF reader with fillet reconstruction; DXF R12 / SVG cut-file writer with exact arcs |
@@ -339,6 +339,19 @@ motion; actuators / motors animate.
   (disks stay parametric); the general path (`applyRegion`, shared with Combine) keeps unchanged
   corners' radii, new corners sharp, remaps refs by world geometry, and dissolves the body's
   patterns. A cut that would split or remove the body is refused ("use Split").
+- **Subtract / Intersect** (`booleanBodies`, 2026-09-22) follow Combine's convention — the
+  **first selected body survives**, the others are *tools* and are **consumed** (`removeBody`:
+  their joints and constraints go) — rather than offering a keep-tools option; copy the tool
+  first to keep it. A tool swallowed whole as a hole lends the hole its own spec (`applyRegion`
+  matches result holes against the tools' outers), so a disk body punches a parametric disk. A
+  tool that doesn't overlap the subject refuses the whole operation (it would be consumed for
+  nothing); a subtract that would sever the body is refused like a Cut ("use Split"), and so is
+  a disconnected intersection (no multi-body result).
+- `boolean.ts` classifies each planar-graph edge by sampling just left / right of its midpoint.
+  Since 2026-09-22 the sample offset is capped at half the edge's length and dangling boundary
+  spurs are pruned before the pinch test: a body vertex a hair (between the merge tolerance and
+  the sample offset) outside another body's edge makes a sliver edge that used to read as a
+  boundary and refuse the operation as "pinched" (seen with a disk snapped onto a plate corner).
 - Line, arc and text are reference-only; text is for labels (cut/engraved text is phase 4).
 - Offset-mode bodies are **baked** to fillet control polygons before Split / Combine / general cuts
   (their rounded shape is larger than their control polygon).
@@ -445,6 +458,9 @@ motion; actuators / motors animate.
   `title` in `index.html` carries **base text only**; `data-cmd` — or `data-tool` — names its
   commands and the key is appended at startup) and the README / manual lists are generated from
   the two together.
+  - **`data-cmd` wires no click.** Every button has its own `addEventListener` in `main.ts`
+    beside the others; filling in `COMMAND_ACTIONS` alone gives the key a target but leaves the
+    button dead (how Subtract / Intersect first shipped on 2026-09-22).
   - **Precedence is `localStorage` → the file → nothing.** A command neither binds has no key,
     which is a legitimate state (23 of 81 ship that way) — there is no third fallback under it.
     Build-time import, not a fetch: no async start-up, no race, and `file://` still works. The
@@ -510,7 +526,8 @@ pick, dimension, arc, instance, direct resize; classes; uniform vs mixed corners
 disk's tangent; conflicts untouched; the violated flag; remaps, load, copy/paste) · midpoint (midpoint refs: resolve, validate, solve, who
 moves, follow-the-line remaps, load) · groups · group-joints · grounded-bodies ·
 freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression with solver stats) ·
-components · pose-dims · pose-constraints · split-combine · shapes (cut, references, v21 load) ·
+components · pose-dims · pose-constraints · split-combine · boolean-ops (subtract / intersect:
+primitive, holes, refs, refusals) · shapes (cut, references, v21 load) ·
 regular · guides · patterns · features · context-ghost · view · dxf · export ·
 keymap (key spelling, slots, conflicts, file parsing, overrides; then the three agreements:
 the registry with itself, `public/keymap.json` with the registry — same command list, same
@@ -542,6 +559,10 @@ Each script is a plain assertion list — read it for the exact cases.
   `setMeasurementDriving`) get bypassed — validate at the model / solver boundary.
 - Solver instrumentation exists (`solverConfig`, `SolveStats`, sim-mode tuning sliders, per-run
   animation stats in the console); use it before guessing at convergence problems.
+- Point-sampled classification in `boolean.ts` must probe at a distance the edge itself
+  allows: a fixed offset read sub-tolerance sliver edges (a vertex a hair off another body's
+  edge) as boundary spurs and refused valid cuts as "pinched". Reproduce such cases from the
+  user's `test.json` headlessly before theorising — the synthetic exact-position cases all passed.
 
 ## In flight (2026-09-15)
 - A run of **UI-tweak commits**. During it the in-app manual is deliberately **not** updated;
@@ -576,6 +597,9 @@ Each script is a plain assertion list — read it for the exact cases.
   arcs, the line swinging in a blend, no held side, coverage); ask what was seen before
   changing anything.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.
+- **Subtract / Intersect shipped (2026-09-22)** with Combine's conventions (first selected
+  survives, tools consumed, one-piece results only, no keys); the un-discussed choices are listed
+  in HANDOFF.md as open questions. Their manual topics are pending with the rest.
 - The toolbar was regrouped into draggable groups for **draw mode**; sim mode inherits the rack
   but its own grouping (Animation + solver tuning) has not been designed yet — see HANDOFF.md.
 
@@ -613,8 +637,9 @@ Each script is a plain assertion list — read it for the exact cases.
   lines only — there is no "lock this whole body" (two locks pin one rigidly, but a body click
   would be the obvious gesture); a locked element gets no styling of its own beyond its badge, so
   a body deforming around a lock under a drag is only explained by the badge.
-- **Subtract / Intersect** are still dimmed placeholders in the Boolean group. **Tangential**
-  gaps: no circle–circle tangency; no tangent to a rounded corner's fillet arc (that arc is
+- **Subtract / Intersect**: the tools are always consumed (no keep-tools modifier), a result in
+  several pieces is refused rather than split into several bodies, and neither has a key.
+  **Tangential** gaps: no circle–circle tangency; no tangent to a rounded corner's fillet arc (that arc is
   derived from the corner radius and its two edges — a different beast); no point-on-circle
   or concentric constraints (a circle ref *resolves* to its centre, but the constraint tools
   never pick one as a point — coincident onto a disk's centre goes through its vertex / `c`

@@ -19,8 +19,8 @@ Linear actuator `Shift+A`, Motor `Shift+M`, Rail unassigned. What is left:
 - **23 commands have no key at all** (`public/keymap.json`, empty `bindings`): Export, the
   mirrors, the grid / snap / badge / measurement toggles, zoom in / out, theme, Create component,
   Component browser, Auto-pause, Delete everything, the two grid menus, Rail, and the Shortcuts
-  panel itself. All have a working `run()`, so the board can hand any of them a letter and it
-  works. Subtract and Intersect are tagged `planned` and do nothing until the boolean ops exist.
+  panel itself. All have a working `run()` — Subtract and Intersect too, since 2026-09-22 — so
+  the board can hand any of them a letter and it works.
 
 ### Working with the board
 
@@ -110,8 +110,9 @@ worse than showing the user what they did.
 ## Smaller follow-ups from phase 1
 
 - **Role conversions**: promote a closed reference polygon / circle to a body; extract a hole
-  as a body of the same shape (a peg for a hole); use a body as a cutter on another body
-  (difference of two bodies). All three make the initial role choice non-binding.
+  as a body of the same shape (a peg for a hole). Both make the initial role choice
+  non-binding. (The third one, a body as a cutter on another body, shipped as **Subtract** on
+  2026-09-22.)
 - **Cut several bodies at once** (a modifier on the closing click); today one target.
 - **General-path cuts dissolve the body's patterns** (hole indices are rebuilt). Keeping
   patterns whose seed and members are untouched would need index remapping.
@@ -131,6 +132,24 @@ worse than showing the user what they did.
 - Manual: the new tool topics are text-only; gesture illustrations (before / mid / after)
   for the shape tools would fit the existing `scripts/manual/shots.ts` pipeline (the
   role-styled preview is exposed through `RenderInput.shapeDraft`).
+
+## Subtract / Intersect — open questions (2026-09-22, not decided)
+
+Both shipped with Combine's conventions; none of these was discussed, they are the places a
+user might push back:
+
+- **Tools are always consumed.** A keep-tools variant (Shift on the button, or a second
+  command) would keep the cutter — useful when the cutter is a real part (a shaft cutting its
+  clearance into a plate). Today: copy the tool first.
+- **A result in several pieces is refused** ("use Split" / "a body can only be one piece").
+  Splitting into several bodies would follow `splitBody`'s pattern (new body per extra piece,
+  same colour / group / grounding, joints to the piece that contains them).
+- **No keys.** Both are among the unbound commands the board still has to place.
+- **Bodies with holes as tools**: a tool's hole is honoured (material under it is not
+  subtracted / not kept), which for Subtract always leaves an island and so a refusal — fine
+  mathematically, but a user may expect the tool's outline alone to cut.
+- Not click-tested in a browser this session (the model paths are covered by
+  `scripts/boolean-ops.ts`; the button wiring mirrors Combine's).
 
 ## Tangential constraint — needs another pass (2026-09-13)
 
@@ -324,15 +343,25 @@ so running it changes nothing there.
   they will have when it lands; the armed-tool **hint moved out
   of the toolbar into a status bar** along the bottom of the window (one line, full text on
   its tooltip); the text-size, actuator/motor and solver-tuning fields live in a fixed
-  properties strip right of the rack. Placeholder buttons (dimmed, "not implemented yet"
-  toast) now hold places for **Subtract**, **Intersect** and **Tangential** — the manual
-  should not describe them as working tools. (**Fixed**, **Symmetrical** and **Tangential**
-  were placeholders here too and are now real tools — see the entries below; only Subtract
-  and Intersect remain dimmed.) `GROUP_TOPICS` in
+  properties strip right of the rack. (The placeholder buttons this batch added — **Fixed**,
+  **Symmetrical**, **Tangential**, **Subtract**, **Intersect** — are all real tools now, the
+  last two since 2026-09-22, and the dimmed `.todo-btn` mechanism is gone.) `GROUP_TOPICS` in
   `src/helpmap.ts` now keys on the `sec-*` ids; the manual generator reads section membership
   through `.tb-sec[id], .group[id]` (`scripts/manual/shoot.ts`), so `glyphs.js` /
   `DISJOINTED_GROUPS` will change shape on the next `npm run manual`.
 
+- **Subtract and Intersect (2026-09-22).** Manual: the *Combine* topic (`#combine`) needs two
+  sibling topics — or one *Boolean operations* topic — for **Subtract** (the first selected
+  body survives, the others are cut out of it and consumed; a tool lying inside becomes a
+  hole with the tool's own spec, so a disk body punches a true disk; refused when a tool
+  doesn't overlap, or the cut would empty / sever / pinch the body) and **Intersect** (the
+  first selected keeps only the region common to all selected bodies, the others are
+  consumed; refused when there is no common area or it comes in several pieces). Wire
+  `subtract-btn` / `intersect-btn` in `ID_TOPICS` (`src/helpmap.ts`) to the new topic(s) —
+  today they fall through to the Boolean section's `combine`. The overview's "buttons for
+  tools that are not built yet" sentence must go (README.md already dropped it). The Split
+  topic's "Combine is the reverse" sentence could point at the two new ones. Neither command
+  has a key; the `#shortcuts` list is regenerated from the keymap anyway.
 - **Line midpoints as snap / constraint targets (2026-09-13).** Manual (*Grid & snapping* —
   the Object snap and *Implicit constraints while dragging* paragraphs; the *Reference
   geometry* "Placement snaps to existing elements" bullet; the Coincident / Horizontal /

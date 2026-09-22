@@ -56,6 +56,7 @@ import {
   PatternSeed,
   Guide,
   MidpointHost,
+  BooleanOp,
 } from "./model";
 import { buildContextGhost, GhostSource } from "./context";
 import { parseDxf, nestLoops, loopSignedArea } from "./dxf";
@@ -2251,7 +2252,7 @@ const HINTS: Record<Mode | Tool | "select" | "viewRotate", string> = {
   draw: "",
   viewRotate: "Rotate the view: drag the ring or a crosshair arm to turn the whole picture (snaps to 5°, hold Shift for any angle) · type an exact angle in the box under the centre · double-click the centre for 0° · click elsewhere, Esc or Shift+R to close. The drawing itself does not change.",
   sim: "Drag any joint, or part of a body, to drive the mechanism. Space to run / pause actuators.",
-  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · with a body selected, Shift+drag a box from empty space to select several of its corners / holes / joints (Ctrl+Shift adds) — drag any of them to move the set, Delete removes it, Ctrl+C copies its holes + joints (with their constraints) and Ctrl+V pastes them into the selected body at the cursor · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition (Ctrl+double-click shows the surrounding assembly faded in its frame — a context ghost to snap and dimension to; the breadcrumb eyes set how far out it reaches) · [ and ] round all corners · N combines the selected bodies into one · Delete to remove.",
+  select: "Click to select · drag to move · Shift+drag to move rigidly (sim-style: grounds hold, connections constrain, the rest stays put) · Object snap (toolbar) drags by the highlighted corner / midpoint / edge / centre nearest the grab and snaps it onto other objects · Ctrl+click or drag a box to select several bodies (they move together) · Ctrl+G groups them permanently / ungroups a group · with a body selected, Shift+drag a box from empty space to select several of its corners / holes / joints (Ctrl+Shift adds) — drag any of them to move the set, Delete removes it, Ctrl+C copies its holes + joints (with their constraints) and Ctrl+V pastes them into the selected body at the cursor · drag a selected body's corner handles to reshape · drag a round handle to round just that corner (double-click it to reset to the body's radius) · double-click an edge to add a node / a node to remove it · double-click a dimension to set its value · double-click a component instance to edit its definition (Ctrl+double-click shows the surrounding assembly faded in its frame — a context ghost to snap and dimension to; the breadcrumb eyes set how far out it reaches) · [ and ] round all corners · N combines the selected bodies into one, Subtract / Intersect (Boolean group) cut the others out of the first-selected body / keep only their overlap · Delete to remove.",
   polyline: "Click each corner; click the first corner again, double-click or press Enter to finish. Body role: start on existing joints to build a body around them (click a picked joint again to finish, then move out to set the margin and click).",
   rect: "Click one corner, then the opposite corner — or press and drag. Shift for a square, Alt to draw from the centre.",
   circle: "Click the centre, then a point on the rim — or press and drag the radius out.",
@@ -2381,10 +2382,6 @@ document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((btn) => {
 document.querySelectorAll<HTMLButtonElement>(".role-btn").forEach((btn) => {
   btn.addEventListener("click", () => setRole(btn.dataset.role as ShapeRole));
 });
-// Buttons that hold a place in the toolbar for a tool that is not built yet.
-document.querySelectorAll<HTMLButtonElement>(".todo-btn").forEach((btn) => {
-  btn.addEventListener("click", () => notify(`${btn.dataset.todo ?? "This"} is not implemented yet.`));
-});
 // Sections are draggable by their caption; the order is remembered across sessions.
 const toolbarApi = installToolbar({
   blocked: () => document.body.classList.contains("help-armed"),
@@ -2415,6 +2412,8 @@ document.getElementById("load-btn")!.addEventListener("click", () => void openFi
 document.getElementById("mirror-h-btn")!.addEventListener("click", () => mirrorSelection("h"));
 document.getElementById("mirror-v-btn")!.addEventListener("click", () => mirrorSelection("v"));
 document.getElementById("combine-btn")!.addEventListener("click", combineSelection);
+document.getElementById("subtract-btn")!.addEventListener("click", () => booleanSelection("subtract"));
+document.getElementById("intersect-btn")!.addEventListener("click", () => booleanSelection("intersect"));
 document.getElementById("send-back-btn")!.addEventListener("click", () => reorderSelection("back"));
 document.getElementById("bring-front-btn")!.addEventListener("click", () => reorderSelection("front"));
 
@@ -7469,6 +7468,34 @@ function combineSelection(): void {
   markDirty();
 }
 
+/**
+ * Subtract / Intersect over the multi-selected bodies (see `Scene.booleanBodies`): the
+ * first-selected body is the subject and survives, the others are the tools and are
+ * consumed. Explains a refusal.
+ */
+function booleanSelection(op: BooleanOp): void {
+  if (mode !== "draw") return;
+  const ids = multiSel ? [...multiSel.bodies] : [];
+  if (ids.length < 2) {
+    notify(op === "subtract"
+      ? "Select the body to keep first, then Ctrl+click the bodies to subtract from it."
+      : "Select two or more bodies (Ctrl+click, or drag a box) to keep only their overlap.");
+    return;
+  }
+  if (selectionTouchesInstance()) {
+    notify(`Component instances can't be ${op}ed — edit the definition, or fork the instance first.`);
+    return;
+  }
+  const result = scene.booleanBodies(op, ids);
+  if (!result.ok) {
+    notify(`Can't ${op}: ${result.reason}`);
+    return;
+  }
+  multiSel = null;
+  selection = { kind: "body", id: result.body.id };
+  markDirty();
+}
+
 // --- pointer events ------------------------------------------------------
 canvas.addEventListener("mousedown", (e) => {
   const world = eventWorld(e);
@@ -8325,8 +8352,8 @@ const COMMAND_ACTIONS: Record<CommandId, CommandAction> = {
   // --- Body operations ---
   "tool.split": {},
   "edit.combine": { run: combineSelection },
-  "boolean.subtract": {}, // tagged "planned": nothing to run until the boolean ops exist
-  "boolean.intersect": {},
+  "boolean.subtract": { run: () => booleanSelection("subtract") },
+  "boolean.intersect": { run: () => booleanSelection("intersect") },
 
   // --- Joints & mating ---
   "tool.joint": {},
