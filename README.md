@@ -734,18 +734,25 @@ npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
 npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, reference geometry, regular polygons, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed), the context ghost (the enclosing assembly mapped into a definition's frame), the keymap (key spelling, slot resolution, conflicts, and the registry against the file and the markup)
 npm run manual   # regenerate the manual's illustrations (public/help/img) and toolbar glyph tables, and check that every help topic exists
-npm run keymap:file   # rewrite public/keymap.json from the command registry
+npm run keymap:file   # bring public/keymap.json's metadata in line (bindings untouched)
 npm run keymap:docs   # rewrite the shortcut lists in this file and in the manual
 npm run keymap:live   # press every shortcut in the real app (Chrome) and read the tooltips back
 ```
 
-**Shortcuts are data.** `src/commands.ts` lists every command the app has — a stable id, a name,
-one line of description, the mode it belongs to and the keys it ships with — and `src/main.ts`
-holds the matching actions, next to the key handler. Everything else is generated from that
-table: `public/keymap.json`, the shortcut in each button's tooltip, and the shortcut lists in this
-README and the manual. Changing a key is one edit, and `npm test` fails if the file, the markup
-or the documentation has drifted. `src/keymap.ts` implements the `keymap/1` format, which is
-specified in [KeyMapper](https://github.com/nightswimmer/KeyMapper)'s README rather than here.
+**Shortcuts are data, and the data is a file you can replace.** `public/keymap.json` *is* the
+shipped keymap: `src/commands.ts` imports it at build time, so dropping a new file in — one
+exported from [KeyMapper](https://github.com/nightswimmer/KeyMapper), say — is all a remap takes.
+The registry in `src/commands.ts` owns everything else about a command (a stable id, a name, one
+line of description, the mode it belongs to, the tool it arms); `src/main.ts` holds the matching
+actions, next to the key handler. Tooltips and the shortcut lists in this README and the manual
+are generated from the two together, so no document can spell a key of its own.
+
+After editing the keymap file, run `npm run keymap:docs`. After *adding a command*, run
+`npm run keymap:file`, which rewrites the file's metadata from the registry, keeps every binding,
+and gives the new command an empty binding list to fill in. `npm test` fails if the file and the
+registry disagree about which commands exist, if two commands want one key in the same mode, or
+if the markup or the README has drifted. `src/keymap.ts` implements the `keymap/1` format, which
+is specified in KeyMapper's README rather than here.
 
 The manual lives in `public/help/` and is a static page. Its illustrations are generated, not
 drawn by hand: `scripts/manual/shoot.ts` drives the real app in your installed Chrome through

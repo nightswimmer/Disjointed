@@ -2,23 +2,28 @@
  * The command registry — everything the app can be *asked* to do, as data.
  *
  * One entry per command: a stable id, what it is called, one line saying what it does,
- * the group and mode it belongs to, the tool it arms (if any) and the keys it ships with.
- * `public/keymap.json` is generated from this table, tooltips and the documentation read
- * it, and `src/main.ts` supplies the other half — the `run()` that closes over the app's
- * state, keyed by the same ids and checked for completeness by the compiler.
+ * the group and mode it belongs to, and the tool it arms (if any). **The shortcuts are
+ * not here** — they live in `public/keymap.json`, which this module imports (see
+ * *The shipped shortcuts* at the foot of the file). Tooltips and the documentation read
+ * the two together, and `src/main.ts` supplies the other half — the `run()` that closes
+ * over the app's state, keyed by the same ids and checked for completeness by the
+ * compiler.
  *
  * The split is *data* vs *behaviour*, not file size: this module must stay free of the
  * DOM and of app state so `scripts/keymap.ts` can check the table, the file and the
  * markup against each other headless.
  *
  * Adding a command: add it here, then add its action in `main.ts` (the compiler will ask
- * for it), give its button a `data-cmd`, and run `npm run keymap:file`.
+ * for it), give its button a `data-cmd`, and run `npm run keymap:file` — which brings the
+ * keymap file's *metadata* back in line and gives the new command an empty binding list
+ * for someone to fill in.
  *
- * The **id is the contract** — a saved user keymap keys on it. Rename a label freely;
- * never rename an id.
+ * The **id is the contract** — a saved user keymap keys on it, and so does the keymap
+ * file. Rename a label freely; never rename an id.
  */
 import { CONSTRAINT_NAME, SketchConstraintKind } from "./model";
-import { Binding, KeymapFile, SCHEMA, parseChord } from "./keymap";
+import keymapJson from "../public/keymap.json";
+import { Binding, KeymapFile, SCHEMA, parseKeymap } from "./keymap";
 
 // --- the tool vocabulary -----------------------------------------------------
 
@@ -90,8 +95,6 @@ export interface CommandSpec {
   context: Context;
   /** The command arms this tool (some also set the role first — see `main.ts`). */
   tool?: Tool;
-  /** The shipped shortcuts, as chords. Absent or empty: the command has no key. */
-  keys?: readonly string[];
   /** The command answers even while focus is in an input / select / textarea. */
   whileTyping?: boolean;
   /** Hardwired: editors must show it and refuse to move it. */
@@ -107,15 +110,15 @@ export interface CommandSpec {
 export const COMMANDS = [
   // --- File ---
   {
-    id: "file.open", label: "Open…", group: "file", context: "any", keys: ["Ctrl+O"], whileTyping: true,
+    id: "file.open", label: "Open…", group: "file", context: "any", whileTyping: true,
     description: "Load a mechanism from a file.",
   },
   {
-    id: "file.save", label: "Save", group: "file", context: "any", keys: ["Ctrl+S"], whileTyping: true,
+    id: "file.save", label: "Save", group: "file", context: "any", whileTyping: true,
     description: "Write the mechanism to its file.",
   },
   {
-    id: "file.saveAs", label: "Save as…", group: "file", context: "any", keys: ["Ctrl+Shift+S"], whileTyping: true,
+    id: "file.saveAs", label: "Save as…", group: "file", context: "any", whileTyping: true,
     description: "Write the mechanism to a new file.",
   },
   {
@@ -137,55 +140,55 @@ export const COMMANDS = [
 
   // --- Edit ---
   {
-    id: "edit.undo", label: "Undo", group: "edit", context: "any", keys: ["Ctrl+Z"],
+    id: "edit.undo", label: "Undo", group: "edit", context: "any",
     description: "Take back the last change.",
   },
   {
-    id: "edit.redo", label: "Redo", group: "edit", context: "any", keys: ["Ctrl+Shift+Z", "Ctrl+Y"],
+    id: "edit.redo", label: "Redo", group: "edit", context: "any",
     description: "Put back the change that was taken back.",
   },
   {
-    id: "edit.copy", label: "Copy", group: "edit", context: "draw", keys: ["Ctrl+C"],
+    id: "edit.copy", label: "Copy", group: "edit", context: "draw",
     description: "Copy the selected body or selection.",
   },
   {
-    id: "edit.paste", label: "Paste", group: "edit", context: "draw", keys: ["Ctrl+V"],
+    id: "edit.paste", label: "Paste", group: "edit", context: "draw",
     description: "Paste the copied bodies at the cursor.",
   },
   {
-    id: "edit.group", label: "Group / ungroup", group: "edit", context: "draw", keys: ["Ctrl+G"],
+    id: "edit.group", label: "Group / ungroup", group: "edit", context: "draw",
     description: "Group the selected bodies — or dissolve the group that is selected.",
   },
   {
-    id: "edit.delete", label: "Delete", group: "edit", context: "any", keys: ["Delete", "Backspace"],
+    id: "edit.delete", label: "Delete", group: "edit", context: "any",
     description: "Delete the selection, or the selected measurement (either mode).",
   },
   {
-    id: "edit.cancel", label: "Cancel", group: "edit", context: "any", keys: ["Esc"], fixed: true,
+    id: "edit.cancel", label: "Cancel", group: "edit", context: "any", fixed: true,
     description: "Step back out: close a panel, drop an armed constraint, disarm the tool, leave a group or component.",
   },
   {
-    id: "edit.finish", label: "Finish", group: "edit", context: "draw", keys: ["Enter"],
+    id: "edit.finish", label: "Finish", group: "edit", context: "draw",
     description: "Close the shape being drawn, or accept a pattern's count.",
   },
   {
-    id: "edit.cornerRadiusUp", label: "More corner radius", group: "edit", context: "draw", keys: ["]"],
+    id: "edit.cornerRadiusUp", label: "More corner radius", group: "edit", context: "draw",
     description: "Round the selected body's corners one step further (a disk grows).",
   },
   {
-    id: "edit.cornerRadiusDown", label: "Less corner radius", group: "edit", context: "draw", keys: ["["],
+    id: "edit.cornerRadiusDown", label: "Less corner radius", group: "edit", context: "draw",
     description: "Take a step of rounding off the selected body's corners (a disk shrinks).",
   },
 
   // --- Mode ---
   {
-    id: "mode.toggle", label: "Draw / Simulate", group: "mode", context: "any", keys: ["Tab"],
+    id: "mode.toggle", label: "Draw / Simulate", group: "mode", context: "any",
     description: "Switch between building the mechanism and running it.",
   },
 
   // --- Animation ---
   {
-    id: "anim.run", label: "Run / pause animation", group: "anim", context: "sim", keys: ["Space"],
+    id: "anim.run", label: "Run / pause animation", group: "anim", context: "sim",
     description: "Start or stop the actuators and motors.",
   },
   {
@@ -195,81 +198,81 @@ export const COMMANDS = [
 
   // --- Shape role ---
   {
-    id: "role.body", label: "Body role", group: "role", context: "draw", keys: ["1"],
+    id: "role.body", label: "Body role", group: "role", context: "draw",
     description: "Every shape drawn from now on becomes a rigid body.",
   },
   {
-    id: "role.cut", label: "Cut role", group: "role", context: "draw", keys: ["2"],
+    id: "role.cut", label: "Cut role", group: "role", context: "draw",
     description: "Every shape is subtracted from the body under it — a hole inside, a notch across the outline.",
   },
   {
-    id: "role.reference", label: "Reference role", group: "role", context: "draw", keys: ["3"],
+    id: "role.reference", label: "Reference role", group: "role", context: "draw",
     description: "Every shape becomes construction geometry: snappable and measurable, never simulated or exported.",
   },
 
   // --- Shapes ---
   {
-    id: "shape.polylineBody", label: "Polyline (body)", group: "shapes", context: "draw", keys: ["B"], tool: "polyline",
+    id: "shape.polylineBody", label: "Polyline (body)", group: "shapes", context: "draw", tool: "polyline",
     description: "Draw a free shape corner by corner, in the Body role.",
   },
   {
-    id: "shape.polylineCut", label: "Polyline (cut)", group: "shapes", context: "draw", keys: ["Ctrl+U"], tool: "polyline",
+    id: "shape.polylineCut", label: "Polyline (cut)", group: "shapes", context: "draw", tool: "polyline",
     description: "Draw a free shape corner by corner, in the Cut role.",
   },
   {
-    id: "shape.rect", label: "Rectangle", group: "shapes", context: "draw", keys: ["Shift+B"], tool: "rect",
+    id: "shape.rect", label: "Rectangle", group: "shapes", context: "draw", tool: "rect",
     description: "Two opposite corners — Shift for a square, Alt to draw from the centre.",
   },
   {
-    id: "shape.circle", label: "Circle", group: "shapes", context: "draw", keys: ["C"], tool: "circle",
+    id: "shape.circle", label: "Circle", group: "shapes", context: "draw", tool: "circle",
     description: "Centre, then the rim: a disk, a round hole or a reference circle.",
   },
   {
-    id: "shape.polygon", label: "Regular polygon", group: "shapes", context: "draw", keys: ["Shift+P"], tool: "polygon",
+    id: "shape.polygon", label: "Regular polygon", group: "shapes", context: "draw", tool: "polygon",
     description: "Centre, then a corner; the side count shows beside the cursor.",
   },
   {
-    id: "shape.slot", label: "Slot", group: "shapes", context: "draw", keys: ["Shift+S"], tool: "slot",
+    id: "shape.slot", label: "Slot", group: "shapes", context: "draw", tool: "slot",
     description: "Both ends, then the width — a capsule.",
   },
   {
-    id: "shape.line", label: "Line", group: "shapes", context: "draw", keys: ["L"], tool: "line",
+    id: "shape.line", label: "Line", group: "shapes", context: "draw", tool: "line",
     description: "A reference segment between two points.",
   },
   {
-    id: "shape.arc", label: "Arc", group: "shapes", context: "draw", keys: ["A"], tool: "arc",
+    id: "shape.arc", label: "Arc", group: "shapes", context: "draw", tool: "arc",
     description: "A reference arc: its two ends, then a point it passes through.",
   },
   {
-    id: "shape.text", label: "Text", group: "shapes", context: "draw", keys: ["Shift+T"], tool: "text",
+    id: "shape.text", label: "Text", group: "shapes", context: "draw", tool: "text",
     description: "A label; clicked on a body it rides with that body.",
   },
   {
-    id: "shape.sidesMore", label: "More sides", group: "shapes", context: "draw", keys: ["↑"],
+    id: "shape.sidesMore", label: "More sides", group: "shapes", context: "draw",
     description: "One more side on the armed polygon tool, or on the selected regular polygon.",
   },
   {
-    id: "shape.sidesFewer", label: "Fewer sides", group: "shapes", context: "draw", keys: ["↓"],
+    id: "shape.sidesFewer", label: "Fewer sides", group: "shapes", context: "draw",
     description: "One side fewer on the armed polygon tool, or on the selected regular polygon.",
   },
 
   // --- Patterns ---
   {
-    id: "tool.patternLinear", label: "Linear pattern", group: "pattern", context: "draw", keys: ["I"], tool: "patternLinear",
+    id: "tool.patternLinear", label: "Linear pattern", group: "pattern", context: "draw", tool: "patternLinear",
     description: "Repeat a hole or a joint along one or two directions.",
   },
   {
-    id: "tool.patternCircular", label: "Circular pattern", group: "pattern", context: "draw", keys: ["Q"], tool: "patternCircular",
+    id: "tool.patternCircular", label: "Circular pattern", group: "pattern", context: "draw", tool: "patternCircular",
     description: "Repeat a hole or a joint around a centre.",
   },
 
   // --- Body operations ---
   {
-    id: "tool.split", label: "Split", group: "boolean", context: "draw", keys: ["X"], tool: "split",
+    id: "tool.split", label: "Split", group: "boolean", context: "draw", tool: "split",
     description: "Cut a body in two along a path drawn across it.",
   },
   {
-    id: "edit.combine", label: "Combine", group: "boolean", context: "draw", keys: ["N"],
+    id: "edit.combine", label: "Combine", group: "boolean", context: "draw",
     description: "Merge the selected bodies into one — they must overlap or share an edge.",
   },
   {
@@ -283,19 +286,19 @@ export const COMMANDS = [
 
   // --- Joints & mating ---
   {
-    id: "tool.joint", label: "Joint", group: "mating", context: "draw", keys: ["J"], tool: "joint",
+    id: "tool.joint", label: "Joint", group: "mating", context: "draw", tool: "joint",
     description: "Add a joint point to a body, where two bodies overlap, or free in space.",
   },
   {
-    id: "tool.weld", label: "Weld", group: "mating", context: "draw", keys: ["W"], tool: "weld",
+    id: "tool.weld", label: "Weld", group: "mating", context: "draw", tool: "weld",
     description: "Lock overlapping bodies rigidly together at a point, or toggle a pin weld ↔ revolute.",
   },
   {
-    id: "tool.connect", label: "Connect", group: "mating", context: "draw", keys: ["Ctrl+Shift+C"], tool: "connect",
+    id: "tool.connect", label: "Connect", group: "mating", context: "draw", tool: "connect",
     description: "Pin two joints together, or attach a joint to a rail as a rider.",
   },
   {
-    id: "tool.ground", label: "Ground", group: "mating", context: "draw", keys: ["G"], tool: "ground",
+    id: "tool.ground", label: "Ground", group: "mating", context: "draw", tool: "ground",
     description: "Fix a joint's position, or a whole body; click again to release it.",
   },
   {
@@ -303,17 +306,17 @@ export const COMMANDS = [
     description: "Draw a track for pin-in-slot riders between two joints.",
   },
   {
-    id: "tool.slider", label: "Slider", group: "mating", context: "draw", keys: ["S"], tool: "slider",
+    id: "tool.slider", label: "Slider", group: "mating", context: "draw", tool: "slider",
     description: "Make a body slide along an arrow without rotating.",
   },
 
   // --- Actuators ---
   {
-    id: "tool.linearActuator", label: "Linear actuator", group: "actuator", context: "draw", keys: ["Shift+A"], tool: "linearActuator",
+    id: "tool.linearActuator", label: "Linear actuator", group: "actuator", context: "draw", tool: "linearActuator",
     description: "Make a slider or rail self-driving: its carriage travels back and forth in animation.",
   },
   {
-    id: "tool.motor", label: "Motor", group: "actuator", context: "draw", keys: ["Shift+M"], tool: "motor",
+    id: "tool.motor", label: "Motor", group: "actuator", context: "draw", tool: "motor",
     description: "Spin a crank pin about a pivot on the same body.",
   },
 
@@ -327,15 +330,15 @@ export const COMMANDS = [
     description: "Flip the selection vertically.",
   },
   {
-    id: "edit.sendBack", label: "Send to back", group: "transform", context: "draw", keys: ["PageDown"],
+    id: "edit.sendBack", label: "Send to back", group: "transform", context: "draw",
     description: "Put the selection behind everything else.",
   },
   {
-    id: "edit.bringFront", label: "Bring to front", group: "transform", context: "draw", keys: ["PageUp"],
+    id: "edit.bringFront", label: "Bring to front", group: "transform", context: "draw",
     description: "Put the selection in front of everything else.",
   },
   {
-    id: "tool.rotate", label: "Rotate", group: "transform", context: "draw", keys: ["R"], tool: "rotate",
+    id: "tool.rotate", label: "Rotate", group: "transform", context: "draw", tool: "rotate",
     description: "Drag a body to turn it about its centroid, or a node to turn it about that node.",
   },
 
@@ -355,39 +358,39 @@ export const COMMANDS = [
     description: "Arm alignment constraints by holding a drag over a corner, joint or edge.",
   },
   {
-    id: "tool.coincident", label: "Coincident", group: "constraints", context: "draw", keys: ["O"], tool: "coincident",
+    id: "tool.coincident", label: "Coincident", group: "constraints", context: "draw", tool: "coincident",
     description: "Make two points share a position, or hold a point on a line.",
   },
   {
-    id: "tool.equal", label: "Equal length", group: "constraints", context: "draw", keys: ["E"], tool: "equal",
+    id: "tool.equal", label: "Equal length", group: "constraints", context: "draw", tool: "equal",
     description: "Give two lines the same length.",
   },
   {
-    id: "tool.horizontal", label: "Horizontal", group: "constraints", context: "draw", keys: ["H"], tool: "horizontal",
+    id: "tool.horizontal", label: "Horizontal", group: "constraints", context: "draw", tool: "horizontal",
     description: "Hold a line — or two points — horizontal.",
   },
   {
-    id: "tool.vertical", label: "Vertical", group: "constraints", context: "draw", keys: ["V"], tool: "vertical",
+    id: "tool.vertical", label: "Vertical", group: "constraints", context: "draw", tool: "vertical",
     description: "Hold a line — or two points — vertical.",
   },
   {
-    id: "tool.parallel", label: "Parallel", group: "constraints", context: "draw", keys: ["P"], tool: "parallel",
+    id: "tool.parallel", label: "Parallel", group: "constraints", context: "draw", tool: "parallel",
     description: "Hold two lines parallel.",
   },
   {
-    id: "tool.perpendicular", label: "Perpendicular", group: "constraints", context: "draw", keys: ["T"], tool: "perpendicular",
+    id: "tool.perpendicular", label: "Perpendicular", group: "constraints", context: "draw", tool: "perpendicular",
     description: "Hold two lines at a right angle.",
   },
   {
-    id: "tool.tangent", label: "Tangential", group: "constraints", context: "draw", keys: ["Z"], tool: "tangent",
+    id: "tool.tangent", label: "Tangential", group: "constraints", context: "draw", tool: "tangent",
     description: "Hold a line tangent to a circle or arc.",
   },
   {
-    id: "tool.symmetric", label: "Symmetrical", group: "constraints", context: "draw", keys: ["Y"], tool: "symmetric",
+    id: "tool.symmetric", label: "Symmetrical", group: "constraints", context: "draw", tool: "symmetric",
     description: "Make two points, or two lines, mirror images across a third line.",
   },
   {
-    id: "tool.fixed", label: "Fixed", group: "constraints", context: "draw", keys: ["F"], tool: "fixed",
+    id: "tool.fixed", label: "Fixed", group: "constraints", context: "draw", tool: "fixed",
     description: "Lock a point where it is, or lock a line's angle and position.",
   },
   {
@@ -411,7 +414,7 @@ export const COMMANDS = [
 
   // --- Measure ---
   {
-    id: "tool.measure", label: "Measure", group: "measure", context: "any", keys: ["D"], tool: "measure",
+    id: "tool.measure", label: "Measure", group: "measure", context: "any", tool: "measure",
     description: "Dimension a line, or the distance between two references — in either mode.",
   },
   {
@@ -431,15 +434,15 @@ export const COMMANDS = [
 
   // --- View ---
   {
-    id: "view.fit", label: "Fit to screen", group: "view", context: "any", keys: ["Shift+F"],
+    id: "view.fit", label: "Fit to screen", group: "view", context: "any",
     description: "Frame the whole mechanism.",
   },
   {
-    id: "view.rotate", label: "Rotate the view", group: "view", context: "any", keys: ["Ctrl+R"],
+    id: "view.rotate", label: "Rotate the view", group: "view", context: "any",
     description: "Open or close the dial that turns the whole picture.",
   },
   {
-    id: "view.rotateZero", label: "View upright", group: "view", context: "any", keys: ["0"],
+    id: "view.rotateZero", label: "View upright", group: "view", context: "any",
     description: "Turn the view back to 0° (while the dial is open).",
   },
   {
@@ -457,11 +460,11 @@ export const COMMANDS = [
 
   // --- Help ---
   {
-    id: "help.toggle", label: "Help drawer", group: "help", context: "any", keys: ["?"],
+    id: "help.toggle", label: "Help drawer", group: "help", context: "any",
     description: "Open or close the manual beside the canvas; while it is open, clicking a control explains it.",
   },
   {
-    id: "help.contents", label: "Manual contents", group: "help", context: "any", keys: ["F1"], whileTyping: true,
+    id: "help.contents", label: "Manual contents", group: "help", context: "any", whileTyping: true,
     description: "Open the manual at its table of contents.",
   },
 ] as const satisfies readonly CommandSpec[];
@@ -481,20 +484,58 @@ export function commandById(id: string): CommandSpec | undefined {
 /** The command ids, in table order. */
 export const COMMAND_IDS: readonly string[] = COMMAND_LIST.map((c) => c.id);
 
-/** The shortcuts a command ships with. An unreadable chord is dropped (the test catches it). */
+// --- the shipped shortcuts ---------------------------------------------------
+/**
+ * `public/keymap.json` **is** the shipped keymap, not a copy of one kept somewhere else:
+ * replace the file and the app's shortcuts change. It is imported at build time rather
+ * than fetched, so start-up stays synchronous, nothing races, and the built page still
+ * works from `file://` — and because it also sits in `public/` it is copied to the build
+ * output as it is, so KeyMapper can still fetch it over HTTP.
+ *
+ * Two consequences of *build time*, both deliberate. Replacing the file changes the
+ * shortcuts of the **source tree** (dev reloads, a build picks it up); swapping
+ * `dist/keymap.json` in a deployed copy only changes what KeyMapper reads there — the
+ * app's own defaults are already inlined. And `vite dev` warns once that "assets in
+ * public directory cannot be imported from JavaScript": that is about asset *URLs*, and
+ * JSON is inlined as a module, so dev, build, preview and `file://` all carry the same
+ * data. Nothing to fix.
+ *
+ * One source of truth per thing: the registry above owns ids, labels, descriptions,
+ * groups, contexts and tools; the file owns the bindings and nothing else that matters
+ * (it repeats the metadata for the editor's benefit, and `scripts/keymap.ts` holds the
+ * two to the same story).
+ *
+ * A file this version cannot read leaves **every command unbound** rather than throwing:
+ * a broken keymap must not take the app down with it. `keymapFileError` says why, and
+ * `main.ts` puts it in a toast — the Shortcuts panel may not be reachable without keys.
+ */
+const shipped = parseKeymap(keymapJson);
+
+/** Why `public/keymap.json` could not be read — null when it was fine. */
+export const keymapFileError: string | null = shipped.file
+  ? null
+  : shipped.errors[0]?.message ?? "It is not a keymap this version can read.";
+
+/** id → the bindings the file gives it. Ids the app doesn't know are simply not here. */
+const SHIPPED_BINDINGS = new Map<string, Binding[]>(
+  (shipped.file?.commands ?? []).map((c) => [c.id, c.bindings])
+);
+
+/**
+ * The shortcuts a command ships with: what the keymap file gives it, or none. A fresh
+ * list every call — callers put it straight into an exported file, and the shipped one
+ * must not be reachable from there.
+ */
 export function defaultBindings(c: CommandSpec): Binding[] {
-  const out: Binding[] = [];
-  for (const chord of c.keys ?? []) {
-    const b = parseChord(chord);
-    if (b) out.push(b);
-  }
-  return out;
+  const shippedFor = SHIPPED_BINDINGS.get(c.id);
+  return shippedFor ? [...shippedFor] : [];
 }
 
 /**
  * The whole registry as a `keymap/1` file. `bindingsOf` decides which shortcuts it
- * carries: the shipped defaults for `public/keymap.json`, the effective ones (defaults
- * plus the user's overrides) for the file the Shortcuts panel exports.
+ * carries: the shipped ones for `public/keymap.json` — which is how `npm run keymap:file`
+ * rewrites the metadata without touching a binding — and the effective ones (shipped plus
+ * the user's overrides) for the file the Shortcuts panel exports.
  */
 export function toKeymapFile(
   bindingsOf: (c: CommandSpec) => Binding[] = defaultBindings

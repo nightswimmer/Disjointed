@@ -2,47 +2,9 @@
 
 What has been **discussed and decided but not built yet**. Read with PROJECT_INSTRUCTIONS.md
 (current state); this file holds only the unfinished part, so a future session can pick a piece
-up without re-doing the brainstorm. In order: **the keymap file as the source of the shipped
-defaults** (next up), the rest of the **shortcut remap**, the **shape tools + roles** roadmap
-(phase 1 shipped 2026-09-13, format v20), the Tangential follow-up, the sim-mode toolbar, and the
-**pending manual updates** list.
-
-## Make `public/keymap.json` the shipped defaults — next up
-
-**Why this is here.** The registry shipped with the defaults in `keys` in `src/commands.ts` and
-the file as *generated output*. The user then replaced `public/keymap.json` with a board export
-and found the app unchanged — the obvious expectation, and the one the original spec had
-("shipped defaults live in the file"). Today the file is only an export for KeyMapper and the
-thing `npm test` diffs against. Worth closing, because "replace the file, get new shortcuts" is
-how everyone will expect this to work.
-
-**The design** (decided, not built). A **build-time import**, not a fetch: no async start-up, no
-"which one won" race, and the app still works from `file://`.
-
-1. `resolveJsonModule: true` in tsconfig; `import keymapJson from "../public/keymap.json"` in
-   `src/commands.ts` (Vite serves JSON imports natively, and the file is already in `public/`, so
-   it stays fetchable by KeyMapper too).
-2. **Delete `keys` from `CommandSpec`.** `defaultBindings(c)` reads the imported file by id
-   instead. That keeps one source of truth for a binding — the registry keeps ids, labels,
-   descriptions, groups, contexts and tools; the file keeps bindings and nothing else that
-   matters.
-3. **Invert `npm run keymap:file`**: today it writes the file from `keys`; it must instead rewrite
-   the *metadata* of each command (label, description, group, context, tool, tags) while
-   **preserving the bindings already in the file**, and append any command the file is missing
-   with an empty `bindings`. That makes it safe to run after adding a command, which is the only
-   reason to run it once bindings live in the file.
-4. **Change what `scripts/keymap.ts` asserts.** Drop "the file is what the registry generates"
-   (it can no longer be true) and put in its place: every registry id appears in the file exactly
-   once, the file names no id the app doesn't know, every non-binding field matches the registry,
-   and the file's own bindings are conflict-free. That is the same guarantee, minus the bindings.
-5. Precedence becomes `localStorage` overrides → the file → nothing. A command the file leaves
-   out simply has no key, which is a legitimate state and needs no fallback.
-
-**Watch out.** A hand-edited file can now break the app's shortcuts, so the parse failure path
-matters more than it does today: if the file is unreadable the app must fall back to *no*
-bindings rather than throwing, and say so — a toast, since the Shortcuts panel may not be
-reachable without a pointer. And `npm run keymap:docs` must run after any file edit, or the
-README goes stale; consider having `npm test` run `keymap-docs --check --readme` so it can't.
+up without re-doing the brainstorm. In order: the rest of the **shortcut remap** (next up), the
+**shape tools + roles** roadmap (phase 1 shipped 2026-09-13, format v20), the Tangential
+follow-up, the sim-mode toolbar, and the **pending manual updates** list.
 
 ## The rest of the shortcut remap
 
@@ -66,21 +28,23 @@ Linear actuator `Shift+A`, Motor `Shift+M`, Rail unassigned. What is left:
 file was hand-written on 2026-09-14 by reading the old `if`-ladder (`"source":
 "src/main.ts:8005-8283"`), and its ids were its own invention — `save`, `polybody`, `refline`,
 `radplus`, `sidesup`. None of them match a registry id, so importing that file applies *nothing*
-(the panel says "0 commands; 80 the app doesn't know, ignored"). The generated file carries the
-real ids; load that, rearrange, bring it back. The artifact is
+(the panel says "0 commands; 80 the app doesn't know, ignored"). The file in the repo carries
+the real ids; load that, rearrange, bring it back — it is also what ships, so the round trip is
+the whole job now. The artifact is
 `cc79ffcf-efa4-4d38-9bd7-e2aade7901a4`.
 
 ### How to apply a layout
 
-1. **To ship it:** edit `keys` in `src/commands.ts` (chords as `"Shift+B"`, `"Ctrl+S"`, `"↑"`,
-   `"?"`), then `npm run keymap:file`, then `npm run keymap:docs --readme` (the manual is
-   deferred — see the pending-updates section). Bring the letters in `scripts/keymap-live.ts`
-   into line — they are written out by hand on purpose — and run `npm run keymap:live`. Also
-   sweep README prose *outside* the tools table: the generator only owns the Shortcut column, and
-   the Navigate / Help sections name keys in sentences. `npm test` fails if the file, the
-   tooltips or the README table are behind, and refuses two commands on one slot in overlapping
-   contexts, so a clash cannot ship. (Once the section above lands, step one becomes "drop the
-   file in".)
+1. **To ship it:** drop the board's export in as `public/keymap.json` — that file *is* the
+   shipped keymap since 2026-09-15, so nothing in `src/` is edited for a remap. Then
+   `npm run keymap:docs --readme` (the manual is deferred — see the pending-updates section).
+   Bring the letters in `scripts/keymap-live.ts` into line — they are written out by hand on
+   purpose — and run `npm run keymap:live`. Also sweep README prose *outside* the tools table:
+   the generator only owns the Shortcut column, and the Navigate / Help sections name keys in
+   sentences. `npm test` fails if the file and the registry disagree about which commands exist,
+   if the tooltips or the README table are behind, or if two commands want one slot in
+   overlapping contexts, so a clash cannot ship. `npm run keymap:file` is only needed after
+   *adding a command*: it rewrites the file's metadata and keeps every binding.
 2. **To try one:** import it through the Shortcuts panel (File group). That writes
    `localStorage["disjointed:keymap"]` for this browser only; Reset undoes it.
 
@@ -91,7 +55,9 @@ worse than showing the user what they did.
 ### Watch out
 
 - **Ids are the contract.** Renaming a `CommandSpec.id` silently drops that command's binding
-  from every saved keymap. Rename labels freely, never ids.
+  from every saved keymap. Rename labels freely, never ids. (In `public/keymap.json` a rename is
+  no longer silent — `npm test` reports the old id as one the app doesn't have — but the binding
+  is lost all the same.)
 - **Spelling rules are shared with KeyMapper** and specified in its README, not here: Shift is
   part of a letter's or named key's slot and never part of a character's (`?` arrives as `"?"`
   with shiftKey true). `src/keymap.ts` implements them; a change has to happen in both projects.

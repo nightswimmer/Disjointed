@@ -4,8 +4,14 @@
  * one place: the registry against itself, `public/keymap.json` against the registry, and
  * `index.html`'s `data-cmd` / `data-tool` attributes against both.
  *
- * `tsx scripts/keymap.ts --write` regenerates `public/keymap.json` from the registry
- * before checking (that is `npm run keymap:file`).
+ * The bindings themselves live only in `public/keymap.json` (see *the shipped shortcuts*
+ * in `src/commands.ts`), so this file cannot check them against a second copy — it checks
+ * that the file and the registry describe the same commands, and that no two of them want
+ * the same key at the same time.
+ *
+ * `tsx scripts/keymap.ts --write` rewrites the file's *metadata* from the registry,
+ * keeping every binding, and adds any command the file is missing with an empty binding
+ * list (that is `npm run keymap:file`).
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -16,7 +22,8 @@ import {
   parseOverrides, shiftIsModifier, slotOf, slotOfChord, slotOfEvent,
 } from "../src/keymap";
 import {
-  COMMAND_LIST, CONTEXTS, GROUPS, TOOLS, commandById, defaultBindings, toKeymapFile,
+  COMMAND_LIST, CONTEXTS, GROUPS, TOOLS, commandById, defaultBindings, keymapFileError,
+  toKeymapFile,
 } from "../src/commands";
 
 let failures = 0;
@@ -28,8 +35,6 @@ function check(label: string, ok: boolean, detail = "") {
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const KEYMAP_PATH = join(root, "public", "keymap.json");
 const write = process.argv.includes("--write");
-/** Newline-blind: a checkout with core.autocrlf on hands these files back as CRLF. */
-const lf = (text: string): string => text.split("\r\n").join("\n");
 
 // --- key spelling ------------------------------------------------------------
 
@@ -183,46 +188,98 @@ check("an unreadable binding inside overrides is dropped", parseOverrides('{"a":
     if (!contextIds.has(c.context)) check(`${c.id} has a real context`, false, c.context);
     if (c.tool && !toolIds.has(c.tool)) check(`${c.id} names a real tool`, false, c.tool);
     if (!c.label || !c.description) check(`${c.id} is described`, false);
-    for (const chord of c.keys ?? []) {
-      if (!parseChord(chord)) check(`${c.id} has a readable chord`, false, chord);
-    }
   }
-  check("every group, context, tool and chord in the registry is real", true);
+  check("every group, context and tool in the registry is real", true);
 
   check("every group is used", GROUPS.every((g) => COMMAND_LIST.some((c) => c.group === g.id)), GROUPS.filter((g) => !COMMAND_LIST.some((c) => c.group === g.id)).map((g) => g.id).join(" "));
   check("every tool is reachable from some command", TOOLS.every((t) => COMMAND_LIST.some((c) => c.tool === t)), TOOLS.filter((t) => !COMMAND_LIST.some((c) => c.tool === t)).join(" "));
 
-  const conflicts = findConflicts(COMMAND_LIST.map((c) => ({ ...c, bindings: defaultBindings(c) })));
-  check("no two shipped commands share a slot in an overlapping context", conflicts.length === 0,
-    conflicts.map((c) => `${c.slot}: ${c.ids.join(" / ")}`).join("; "));
-
-  // The bug the registry exists to kill: resolution is by exact slot, so a Shift+letter
-  // can never be swallowed by the plain letter's command.
-  const shiftSlots = COMMAND_LIST.flatMap((c) => defaultBindings(c)).filter((b) => b.mods.includes("shift"));
-  check("Shift bindings are recorded as their own slots", shiftSlots.every((b) => slotOf(b).endsWith("|shift") || slotOf(b).includes("+shift")));
   check("modifier list is the documented one", MODS.join(",") === "ctrl,shift,alt");
 }
 
-// --- public/keymap.json ------------------------------------------------------
-
-const generated = JSON.stringify(toKeymapFile(), null, 2) + "\n";
-if (write) {
-  writeFileSync(KEYMAP_PATH, generated, "utf8");
-  console.log(`wrote public/keymap.json (${COMMAND_LIST.length} commands)`);
-}
+// --- public/keymap.json: the shipped shortcuts -------------------------------
+/**
+ * The file *is* the defaults, so the old agreement — "the file is whatever the registry
+ * generates" — can no longer be true of the bindings, which exist nowhere else. What
+ * takes its place is the same guarantee minus them: the file knows every command and no
+ * others, tells the same story as the registry about everything that is not a binding,
+ * binds no slot twice in one context, and can be read by the app at all.
+ *
+ * `--write` (npm run keymap:file) rewrites the metadata and **keeps the bindings**: it
+ * regenerates the file through `toKeymapFile()`, whose default `bindingsOf` reads the
+ * file itself. So it is safe to run after adding a command — which is the only reason to
+ * run it now that the bindings live here.
+ */
 {
-  let onDisk: string | null = null;
-  try {
-    onDisk = readFileSync(KEYMAP_PATH, "utf8");
-  } catch {
-    onDisk = null;
+  const registryIds = new Set(COMMAND_LIST.map((c) => c.id));
+  const before = parseKeymap(JSON.parse(readFileSync(KEYMAP_PATH, "utf8"))).file;
+
+  if (write) {
+    // Never rewrite from a file we could not read: `defaultBindings` would be empty and
+    // the write would silently throw every shortcut away.
+    if (!before) {
+      console.log(`\nREFUSED to write public/keymap.json: ${keymapFileError} — fix the file first, or its bindings would be lost.`);
+      process.exit(1);
+    }
+    const had = new Set(before.commands.map((c) => c.id));
+    const added = COMMAND_LIST.filter((c) => !had.has(c.id)).map((c) => c.id);
+    const dropped = before.commands.map((c) => c.id).filter((id) => !registryIds.has(id));
+    writeFileSync(KEYMAP_PATH, JSON.stringify(toKeymapFile(), null, 2) + "\n", "utf8");
+    console.log(
+      `wrote public/keymap.json (${COMMAND_LIST.length} commands, bindings kept` +
+        (added.length ? `; added with no shortcut: ${added.join(", ")}` : "") +
+        (dropped.length ? `; dropped, no such command: ${dropped.join(", ")}` : "") +
+        ")"
+    );
   }
-  check("public/keymap.json exists", onDisk !== null, "run npm run keymap:file");
-  if (onDisk !== null) {
-    // Compared newline-blind: a checkout with core.autocrlf on hands back CRLF.
-    check("public/keymap.json is what the registry generates", lf(onDisk) === generated, "run npm run keymap:file");
-    const { file, errors } = parseKeymap(JSON.parse(onDisk));
-    check("public/keymap.json is a valid keymap/1 file", !!file, errors.map((e) => e.message).join("; "));
+
+  check("the app can read public/keymap.json", keymapFileError === null, keymapFileError ?? "");
+  const { file, errors } = parseKeymap(JSON.parse(readFileSync(KEYMAP_PATH, "utf8")));
+  check("public/keymap.json is a valid keymap/1 file", !!file, errors.map((e) => e.message).join("; "));
+  if (file) {
+    // `parseKeymap` already refuses a duplicate id, so "exactly once" is "at all".
+    const inFile = new Map(file.commands.map((c) => [c.id, c]));
+    const missing = COMMAND_LIST.filter((c) => !inFile.has(c.id)).map((c) => c.id);
+    check("the file carries every command the app has", missing.length === 0,
+      missing.length ? `${missing.join(" ")} — run npm run keymap:file` : "");
+    const alien = file.commands.map((c) => c.id).filter((id) => !registryIds.has(id));
+    check("the file names no command the app doesn't have", alien.length === 0,
+      alien.length ? `${alien.join(" ")} — run npm run keymap:file` : "");
+
+    // Everything but the bindings is the registry's to say; the file repeats it for the
+    // editor, so the two must agree word for word.
+    const canonical = new Map(toKeymapFile(() => []).commands.map((c) => [c.id, c]));
+    const fields = ["label", "description", "group", "context", "tool", "whileTyping", "fixed", "tags"] as const;
+    const drifted: string[] = [];
+    for (const [id, want] of canonical) {
+      const got = inFile.get(id);
+      if (!got) continue;
+      for (const f of fields) {
+        if (JSON.stringify(got[f] ?? null) !== JSON.stringify(want[f] ?? null)) drifted.push(`${id}.${f}`);
+      }
+    }
+    check("the file repeats the registry's metadata unchanged", drifted.length === 0,
+      drifted.length ? `${drifted.slice(0, 4).join(" ")}${drifted.length > 4 ? ` +${drifted.length - 4} more` : ""} — run npm run keymap:file` : "");
+
+    // The contexts are the registry's (the file's copy is checked just above), so a
+    // command the app doesn't know cannot clash with anything.
+    const conflicts = findConflicts(
+      file.commands.flatMap((c) => {
+        const spec = commandById(c.id);
+        return spec ? [{ id: c.id, context: spec.context, bindings: c.bindings }] : [];
+      })
+    );
+    check("no two commands share a slot in an overlapping context", conflicts.length === 0,
+      conflicts.map((c) => `${c.slot}: ${c.ids.join(" / ")}`).join("; "));
+
+    // The bug the slot spelling exists to kill: resolution is by exact slot, so a
+    // Shift+letter can never be swallowed by the plain letter's command.
+    const shiftSlots = COMMAND_LIST.flatMap(defaultBindings).filter((b) => b.mods.includes("shift"));
+    check("Shift bindings are recorded as their own slots",
+      shiftSlots.every((b) => slotOf(b).endsWith("|shift") || slotOf(b).includes("+shift")));
+
+    const bound = COMMAND_LIST.filter((c) => defaultBindings(c).length > 0).length;
+    console.log(`      (${bound} of ${COMMAND_LIST.length} commands ship with a key)`);
   }
 }
 

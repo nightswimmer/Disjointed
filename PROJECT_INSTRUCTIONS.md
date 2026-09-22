@@ -9,11 +9,10 @@ Where things are documented:
   behaviour question comes up, read it there; do not duplicate it here.
 - **public/help/** — the in-app manual (same content as README, illustrated). Its updates are
   currently **deferred** (see *In flight*).
-- **HANDOFF.md** — unfinished work: making **`public/keymap.json` the shipped defaults** (next
-  up), the rest of the shortcut remap, the shape-tools roadmap (phases 2–4), smaller follow-ups,
-  and the list of pending manual edits.
-- **public/keymap.json** — every shortcut, as data. **Generated** from the registry today, so
-  hand-editing it changes nothing in the app; making it the source is the next job.
+- **HANDOFF.md** — unfinished work: the rest of the shortcut remap (next up), the shape-tools
+  roadmap (phases 2–4), smaller follow-ups, and the list of pending manual edits.
+- **public/keymap.json** — every shortcut, as data, and **the shipped keymap itself** since
+  2026-09-15: `src/commands.ts` imports it at build time, so replacing the file remaps the app.
 - Code comments carry the local *why* for most non-obvious branches; `scripts/*.ts` are the
   executable spec.
 
@@ -30,11 +29,13 @@ motion; actuators / motors animate.
 - `npm run dev` / `build` / `preview`; `npm test` runs every `scripts/*.ts` (tsx, headless, no DOM);
   `npm run manual` regenerates the manual's SVG illustrations + glyph tables with Playwright driving
   the **installed Chrome** (`channel: "chrome"`), and fails if a topic the app can ask for is missing.
-- Keymap scripts, all driven by the registry in `src/commands.ts`: `npm run keymap:file` writes
-  `public/keymap.json` (run it after touching the registry — `npm test` fails if the file is
-  behind), `npm run keymap:docs` rewrites the shortcut lists in README.md and the manual
-  (`--check` reports staleness instead), `npm run keymap:live` presses every shortcut in the real
-  app under Chrome.
+- Keymap scripts: `npm run keymap:file` rewrites `public/keymap.json`'s **metadata** from the
+  registry and keeps every binding — needed only after *adding a command*, which it appends with
+  an empty binding list; it refuses to write over a file it cannot parse, since that would throw
+  the bindings away. `npm run keymap:docs` rewrites the shortcut lists in README.md and the
+  manual (`--check` reports staleness instead; `npm test` runs `--check --readme`, so a keymap
+  edit that leaves the README behind fails the suite). `npm run keymap:live` presses every
+  shortcut in the real app under Chrome.
 - The interactive canvas is not covered by `npm test`: confirm UI changes by eye (or with a
   throwaway Playwright script against `npm run dev` with `?automation`, which exposes
   `window.__disjointed` — `scripts/keymap-live.ts` is a worked example of that pattern).
@@ -57,7 +58,7 @@ motion; actuators / motors animate.
 | `renderer.ts` | Canvas drawing from a `RenderInput`; theme palette; screen-space labels |
 | `view.ts` | Camera (`screen = R(angle)·world·scale + t`) |
 | `main.ts` | Everything UI: tools, drags, snapping, selection, history, persistence, backup, component contexts, animation loop; the command **actions** and the key handler |
-| `commands.ts` | The command registry as data (id, label, description, group, context, tool, default keys) + the `Tool` / `ShapeRole` vocabulary. DOM-free |
+| `commands.ts` | The command registry as data (id, label, description, group, context, tool) + the `Tool` / `ShapeRole` vocabulary; imports `public/keymap.json` for the shipped bindings. DOM-free |
 | `keymap.ts` | The `keymap/1` format: chord spelling, event → slot normalization, validation, conflicts, the user's overrides. DOM-free |
 | `notify.ts` | Toasts — the project-wide replacement for `alert` |
 | `filestore.ts` | File System Access API wrappers + IndexedDB handle storage |
@@ -393,15 +394,26 @@ motion; actuators / motors animate.
   identical warnings go through `notifyThrottled`. `SKETCH_FLASH_MS` is long enough (4 s) to find
   the flashing items after reading the toast that named them.
 - Two-click slider start pair: a press grabs the **rail joint** in draw mode, the **rider** in sim.
-- **A shortcut is data, written down once.** `src/commands.ts` is the registry (one entry per
-  command: id, label, one-line description, group, context, the tool it arms, the keys it ships
-  with); `src/main.ts` holds the matching `COMMAND_ACTIONS`, because every `run()` closes over
-  module state that no facade would carry cheaply. The two halves are keyed by id and
-  `Record<CommandId, CommandAction>` makes the compiler demand an action for each — that type is
-  the only thing keeping them in step, so don't widen it. Everything else is generated:
-  `public/keymap.json`, the tooltips (a button's `title` in `index.html` carries **base text
-  only**; `data-cmd` — or `data-tool` — names its commands and the key is appended at startup),
-  and the README / manual lists.
+- **A shortcut is data, written down once — and the bindings are written down in a file.**
+  `src/commands.ts` is the registry (one entry per command: id, label, one-line description,
+  group, context, the tool it arms) and `src/main.ts` holds the matching `COMMAND_ACTIONS`,
+  because every `run()` closes over module state that no facade would carry cheaply. The two
+  halves are keyed by id and `Record<CommandId, CommandAction>` makes the compiler demand an
+  action for each — that type is the only thing keeping them in step, so don't widen it.
+  The **keys** are in `public/keymap.json`, imported by `commands.ts`; the tooltips (a button's
+  `title` in `index.html` carries **base text only**; `data-cmd` — or `data-tool` — names its
+  commands and the key is appended at startup) and the README / manual lists are generated from
+  the two together.
+  - **Precedence is `localStorage` → the file → nothing.** A command neither binds has no key,
+    which is a legitimate state (23 of 81 ship that way) — there is no third fallback under it.
+    Build-time import, not a fetch: no async start-up, no race, and `file://` still works. The
+    cost is that a *deployed* copy's `dist/keymap.json` is only what KeyMapper fetches — the
+    app's own defaults were inlined at build time.
+  - A keymap file the app cannot parse leaves **every command unbound** rather than throwing:
+    `keymapFileError` carries the reason, `main.ts` raises a toast at startup and the Shortcuts
+    panel says so, because without keys that panel is pointer-only. `scripts/keymap.ts` holds
+    the file and the registry to the same command list and the same metadata, and refuses two
+    commands on one slot in overlapping contexts.
   - **Dispatch** is one map lookup on a *slot*: `KEY|mods`, mods always `ctrl+shift+alt`. Shift is
     part of the slot for letters and named keys, never for a character (`?` arrives as `"?"` with
     shiftKey true — recording Shift would build a slot nothing can produce). Exact slots are why
@@ -456,8 +468,9 @@ freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression
 components · pose-dims · pose-constraints · split-combine · shapes (cut, references, v21 load) ·
 regular · guides · patterns · features · context-ghost · view · dxf · export ·
 keymap (key spelling, slots, conflicts, file parsing, overrides; then the three agreements:
-the registry with itself, `public/keymap.json` with the registry, `index.html`'s `data-cmd` /
-`data-tool` and its shortcut-free tooltips with both).
+the registry with itself, `public/keymap.json` with the registry — same command list, same
+metadata, no slot wanted twice in one context — and `index.html`'s `data-cmd` / `data-tool` and
+its shortcut-free tooltips with both) · keymap-docs `--check --readme`.
 `solver-bench.ts` is a benchmark, not in `npm test`; `keymap-live.ts` (`npm run keymap:live`)
 needs Chrome, so it isn't either — it is the only coverage **dispatch** can have, and its letters
 are written out by hand on purpose: if it and the registry disagree, one of them is wrong.
@@ -500,16 +513,14 @@ Each script is a plain assertion list — read it for the exact cases.
   `tool-fixed`, `tool-symmetric` and `tool-tangent` topics had to be written, because
   `npm run manual` hard-fails on a topic the app can ask for and every `data-tool` button
   implies one — all three still need the illustration pass like the rest.
-- **The shortcuts were remapped (2026-09-15) and the layout is not settled.** The registry
-  shipped first with the bindings untouched, then the board's layout was applied on top of it as
-  eleven edits to `keys` in `src/commands.ts` — Fixed `F`, Circle `C`, Line `L`, Arc `A`, fit view
-  `Shift+F`, view dial `Ctrl+R`, polyline-as-cut `Ctrl+U`, Connect `Ctrl+Shift+C`, actuator
-  `Shift+A`, motor `Shift+M`, **Rail unassigned** — with the file, the tooltips and the README
-  following by themselves. Two of those want a second opinion (HANDOFF.md): Rail lost its key
-  where the earlier plan dropped the actuator's, and Connect became a three-key chord.
-  Rearranging happens on the KeyMapper board, which must be **seeded from the generated
-  `public/keymap.json`** — the board's original hand-written file used its own ids and applies
-  nothing.
+- **The shortcuts were remapped (2026-09-15) and the layout is not settled.** Fixed `F`, Circle
+  `C`, Line `L`, Arc `A`, fit view `Shift+F`, view dial `Ctrl+R`, polyline-as-cut `Ctrl+U`,
+  Connect `Ctrl+Shift+C`, actuator `Shift+A`, motor `Shift+M`, **Rail unassigned**. Two of those
+  want a second opinion (HANDOFF.md): Rail lost its key where the earlier plan dropped the
+  actuator's, and Connect became a three-key chord. Rearranging happens on the KeyMapper board,
+  which must be **seeded from `public/keymap.json`** — the board's original hand-written file
+  used its own ids and applies nothing. The next layout ships by replacing that file; no `src/`
+  edit is involved any more.
 - **KeyMapper now lives in its own repo** (`../KeyMapper`), and the empty `keymapper/` folder that
   staged it is gone. Its README specifies `keymap/1` normatively — the only thing the two projects
   share. `src/keymap.ts` implements that spec and must not restate it; if a rule needs changing,

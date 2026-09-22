@@ -69,7 +69,7 @@ import { Vec2, add, dist, sub, vec, dot, cross, lenSq, scale, rotate, normalize,
 import { View, MIN_SCALE, MAX_SCALE, screenToWorld, worldToScreen, zoomAt, rotateViewTo, rotateToScreen, rotateToWorld } from "./view";
 import {
   COMMAND_IDS, COMMAND_LIST, CommandId, CommandSpec, SHAPE_TOOLS, ShapeRole, ShapeTool, Tool,
-  commandById, defaultBindings, toKeymapFile,
+  commandById, defaultBindings, keymapFileError, toKeymapFile,
 } from "./commands";
 import {
   Binding, KeymapOverrides, findConflicts, formatChord, overridesOfFile, parseKeymap,
@@ -8364,6 +8364,10 @@ function applyShortcutTitles(): void {
  * nobody wants. A command the map doesn't mention (one a later version adds) keeps its
  * default. Export hands KeyMapper the effective keymap as a `keymap/1` file; import
  * takes that file back.
+ *
+ * Precedence, all of it: **this map → `public/keymap.json` → no shortcut.** A command
+ * neither of them binds simply has no key, which is a legitimate state — roughly a
+ * quarter of the registry ships that way — so there is no third fallback under this.
  */
 const keymapBtn = document.getElementById("keymap-btn") as HTMLButtonElement;
 const keymapPanel = document.getElementById("keymap-panel")!;
@@ -8384,7 +8388,9 @@ function refreshKeymapPanel(): void {
   const custom = Object.keys(keymapOverrides).length > 0;
   keymapStatus.textContent = custom
     ? "Your own keymap (kept in this browser)"
-    : "The shortcuts Disjointed ships with";
+    : keymapFileError
+      ? "The shipped keymap file is unreadable — no shortcuts. Import one."
+      : "The shortcuts Disjointed ships with";
   keymapReset.disabled = !custom;
 }
 
@@ -8449,6 +8455,16 @@ keymapInput.addEventListener("change", () => {
 });
 
 rebuildKeymap();
+// The shipped shortcuts are a file now, so a bad edit to it costs every key at once
+// rather than a build error. Say so where it can be seen without one: the Shortcuts
+// panel, which explains it, may not be reachable from the keyboard at all.
+if (keymapFileError) {
+  notify(
+    `The shipped shortcut file could not be read, so no command has a key — ${keymapFileError} ` +
+      "Import a keymap from the Shortcuts panel (File group) to get shortcuts back.",
+    "error"
+  );
+}
 
 // --- actuators / motors --------------------------------------------------
 /** All linear-actuator constraints in the scene. */
