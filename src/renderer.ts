@@ -44,14 +44,17 @@ export interface RenderInput {
     hint: string | null;
   } | null;
   /**
-   * Pattern tool: the seed hole's outline (or, with no seed yet, the hole under the
-   * cursor — `anchor` null), the seed anchor, the linear target / circular centre being
-   * picked or picked, and every instance after the seed with whether it fits.
+   * Pattern tool: the picked seeds (hole outlines, joint points) and the first seed's
+   * anchor (null while nothing is picked), the pickable feature under the cursor, the
+   * linear target / circular centre being picked or picked, and every would-be instance
+   * of every seed with whether it fits.
    */
   patternPreview: {
     kind: "linear" | "circular";
     anchor: Vec2 | null;
-    seedLoop: Vec2[] | null;
+    seedLoops: Vec2[][];
+    seedPoints: Vec2[];
+    candidate: { loop: Vec2[] | null; point: Vec2 } | null;
     target: Vec2 | null;
     instances: { point: Vec2; loop: Vec2[] | null; ok: boolean }[];
   } | null;
@@ -517,28 +520,32 @@ export function render(ctx: CanvasRenderingContext2D, input: RenderInput): void 
       loop.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
       ctx.closePath();
     };
-    if (pv.anchor === null) {
-      // Hovering a candidate hole: a faint dashed outline says "this one is pickable".
-      if (pv.seedLoop) {
-        ctx.strokeStyle = theme.ink;
-        ctx.globalAlpha = 0.55;
-        ctx.lineWidth = px(1.5);
-        ctx.setLineDash([px(4), px(3)]);
-        loopPath(pv.seedLoop);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
+    // The pickable feature under the cursor: a faint dashed outline / ring says "this one".
+    if (pv.candidate) {
+      ctx.strokeStyle = theme.ink;
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = px(1.5);
+      ctx.setLineDash([px(4), px(3)]);
+      if (pv.candidate.loop) loopPath(pv.candidate.loop);
+      else {
+        ctx.beginPath();
+        ctx.arc(pv.candidate.point.x, pv.candidate.point.y, px(JOINT_R + 3), 0, Math.PI * 2);
       }
-    } else {
-      // The seed: solid outline (hole) or a ring (joint).
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+    if (pv.anchor !== null) {
+      // The seeds: solid outlines (holes) and rings (joints).
       ctx.strokeStyle = theme.ink;
       ctx.lineWidth = px(2);
-      if (pv.seedLoop) {
-        loopPath(pv.seedLoop);
+      for (const loop of pv.seedLoops) {
+        loopPath(loop);
         ctx.stroke();
-      } else {
+      }
+      for (const q of pv.seedPoints) {
         ctx.beginPath();
-        ctx.arc(pv.anchor.x, pv.anchor.y, px(JOINT_R + 3), 0, Math.PI * 2);
+        ctx.arc(q.x, q.y, px(JOINT_R + 3), 0, Math.PI * 2);
         ctx.stroke();
       }
       if (pv.target) {
@@ -1423,8 +1430,10 @@ function drawGhostScene(
 const GHOST_FILL_ALPHA = "0d";
 const GHOST_STROKE_ALPHA = "55";
 
-/** Accent colour for pattern overlays (fixed across themes, like the other semantic accents). */
-const PATTERN_COLOR = "#f28cb1";
+/** Accent colour for pattern overlays (fixed across themes, like the other semantic accents).
+ *  Green: the only hue the other accents leave free — the original pink read as the error
+ *  red beside a flagged instance's ring. */
+const PATTERN_COLOR = "#7ccf8a";
 
 /** A pattern's overlay: see `PatternView`. */
 function drawPattern(

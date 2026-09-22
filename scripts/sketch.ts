@@ -273,6 +273,27 @@ const TOL = sketchConfig.tol;
   check("node path, not a rescale: vertex 3 untouched", near(v2[3].x, -50, TOL * 2) && near(v2[3].y, 150, TOL * 2));
 }
 
+// --- a dimension on a hole never takes the scale path -----------------------------------
+{
+  // The first driving dimension on a body scales it — unless an end is on a hole: a hole's
+  // own width is about the hole, so the node solve reshapes it and the outline stays.
+  const s = new Scene();
+  const body = s.addBody([{ x: 0, y: 0 }, { x: 200, y: 0 }, { x: 200, y: 100 }, { x: 0, y: 100 }]);
+  const hole = s.addBodyHole(body.id, [{ x: 40, y: 40 }, { x: 80, y: 40 }, { x: 80, y: 60 }, { x: 40, y: 60 }])!;
+  const m = s.addMeasurement("draw", { kind: "vertex", bodyId: body.id, index: 0, hole }, { kind: "vertex", bodyId: body.id, index: 1, hole }, { x: 60, y: 20 })!; // above → h
+  check("first dim on a hole: drive succeeds", applyDrivingDimension(s, m.id, 60).length === 0);
+  check("hole width hits its target", near(s.measureInfo(m)!.value, 60, TOL * 2));
+  const v = s.bodyControlWorld(body);
+  check("outline not scaled", near(v[0].x, 0, TOL * 2) && near(v[2].x, 200, TOL * 2) && near(v[2].y, 100, TOL * 2));
+  const hw = s.bodyHoleControlWorld(body, hole);
+  check("hole widened about its own middle", near(hw[0].x, 30, TOL * 2) && near(hw[1].x, 90, TOL * 2));
+  // A corner → hole distance is about the hole too: the node path, never a rescale.
+  const m2 = s.addMeasurement("draw", { kind: "vertex", bodyId: body.id, index: 0 }, { kind: "vertex", bodyId: body.id, index: 0, hole }, { x: 15, y: 20 })!; // above → h
+  check("corner → hole: drive succeeds", applyDrivingDimension(s, m2.id, 20).length === 0);
+  const v2 = s.bodyControlWorld(body);
+  check("corner → hole: far corner untouched, both dims hold", near(v2[2].x, 200, TOL * 2) && near(v2[2].y, 100, TOL * 2) && near(s.measureInfo(m2)!.value, 20, TOL * 2) && near(s.measureInfo(m)!.value, 60, TOL * 2));
+}
+
 // --- an external constraint disables the scale path --------------------------------
 {
   const s = new Scene();

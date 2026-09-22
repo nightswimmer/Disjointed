@@ -47,7 +47,7 @@ motion; actuators / motors animate.
 | Module | Role |
 |---|---|
 | `geometry.ts` | Vec2, polygon properties, fillet (`filletPolygon` / `filletCornerArcs`), offset hulls, regular polygons, arcs |
-| `model.ts` | `Scene`: bodies, joints, constraints, groups, components, guides, patterns, measurements, sketch constraints; serialization (`FORMAT_VERSION = 21`); all editing primitives |
+| `model.ts` | `Scene`: bodies, joints, constraints, groups, components, guides, patterns, measurements, sketch constraints; serialization (`FORMAT_VERSION = 22`); all editing primitives |
 | `solver.ts` | Sim solver (Gauss-Seidel positional impulses), groups/welds as rigid composites, break-and-exclude |
 | `sketch.ts` | Draw-mode shape solver for sketch constraints + driving dimensions |
 | `pose.ts` | Pose-level dimensions / constraints on component instances (rigid moves, not shape) |
@@ -85,8 +85,9 @@ motion; actuators / motors animate.
   frame" and expands into a rigid **chassis group**, never a world ground.
 - **Guides** (reference geometry): union of `poly` / `circle` / `arc` / `text`, all finite; never
   simulated, invisible in sim; usable as measurement / constraint refs.
-- **Patterns**: seed hole/joint + layout; members are real holes/joints **re-derived** from the seed
-  on every change.
+- **Patterns**: `slots[]` (each a seed hole/joint + its members) sharing one layout anchored on the
+  **first** slot's seed; members are real holes/joints **re-derived** from their seed on every change,
+  every instance applying one rigid motion to the whole seed group.
 - **Measurements** and **sketch constraints** share `MeasureRef` (joint, vertex, edge, bodyPoint,
   rail, guidePoint, guideLine, patternAxis, centre, midpoint; vertex/edge refs carry an optional `hole`).
   Refs always name **elements**, never coordinates. A **`midpoint` nests its line's own ref**
@@ -164,11 +165,27 @@ motion; actuators / motors animate.
 - **Driving dimensions hold their drawn `side`** so a one-frame overshoot can't flip the two sides
   through each other (direct point–point distances have no side by nature).
 - First driving dimension on an otherwise-unconstrained body **scales it uniformly**; later ones move
-  nodes. Size dimensions (diameter, radius, regular-polygon size) are not solver items: they set the
-  parameter directly and are re-applied by `enforceSizeDims`. A direct resize (rim drag, `[`/`]`)
-  demotes conflicting driving size dims to driven.
+  nodes. **A dimension with an end on a hole never scales** (`refOnHole` in `scaleEligibleBody`,
+  2026-09-22): it is about that hole, not the plate — before, the first hole-width dimension on a
+  plate scaled the whole plate, pattern spacing included. Size dimensions (diameter, radius,
+  regular-polygon size) are not solver items: they set the parameter directly and are re-applied
+  by `enforceSizeDims`. A direct resize (rim drag, `[`/`]`) demotes conflicting driving size
+  dims to driven.
 - **Pattern members ride with their seed** through rigid-offset couplings (an immovable rank
-  deadlocked any solve that needed a patterned body to shift).
+  deadlocked any solve that needed a patterned body to shift). A dimension is refused only when it
+  **spans two instances** of one pattern (`patternSpannedBy`: seed ↔ member or member ↔ member —
+  that distance is the layout, edited on the labels); both ends on one instance (a seed's
+  diameter, a slot's own width) is ordinary shape material and the members copy the result. Until
+  2026-09-22 the check compared *patterns* instead of instances, so nothing on a patterned seed
+  could be dimensioned at all — the first reported patterns bug.
+- **Multi-seed patterns (v22, 2026-09-22)**: `patternInstanceOfRef` → instance −1 for any seed,
+  else the copy index, so seed ↔ seed dims drive (the copies reproduce the new placement) and
+  seed ↔ copy dims are refused. The anchor is slot 0's seed; a circular `centre` is relative to it,
+  so `reanchorLayout` shifts it when slot 0 goes (anchors read *before* removal — `rebuildBody`
+  moves the local frame with the composite centroid). `syncPattern` trims every slot first (one
+  `dropHoles`), then writes all members in one frame and rebuilds once — never write geometry
+  after a rebuild with motions computed before it. A feature clip carries a pattern only when
+  every seed is copied (all-or-nothing; partial slot carrying was not built).
 - **Derived points are `PointHandle`s** (sketch.ts `acquirePoint`): the point items
   (coincident / H / V pairs, point-on-line, the point form of `fixed`) read and push a point
   through a handle, which is one variable or — for a `midpoint` — the mean of its line's two
@@ -438,11 +455,12 @@ motion; actuators / motors animate.
     KeyMapper's job, not this app's.
 - View rotation is purely visual (world axes for constraints, grid and snapping).
 
-## Serialization history (`load` accepts everything ≤ 21)
+## Serialization history (`load` accepts everything ≤ 22)
 v5 control polygons · v6 actuators/motors · v7 measurements · v8 sketch constraints + driving ·
 v9 groups · v10 grounded bodies · v11 guides · v12 units · v13 holes (baked) · v14 components +
 group joints · v15 per-corner radii · v16 editable holes · v17 locked riders · v18 welds ·
-v19 patterns · v20 guide union + `startRiders` · v21 regular polygons, infinite guideline dropped.
+v19 patterns · v20 guide union + `startRiders` · v21 regular polygons, infinite guideline dropped ·
+v22 pattern `slots` (several seeds per pattern; a v19–21 `seed`/`members` record migrates on load).
 Optional fields added without a bump: `Measurement.side`, `mirrored`, `rigid`, the `fixed`
 sketch-constraint kind with its `at` / `angle`, the `symmetric` kind with its `mirror` ref, the
 `tangent` kind and the `disk` / `guideCircle` ref kinds. Load sanitizes
@@ -508,7 +526,8 @@ Each script is a plain assertion list — read it for the exact cases.
   line midpoints as snap / implicit-constraint / placement targets, the fixed dimension
   direction with its pill glyph / glyph button / off-line leader, the Symmetrical
   constraint, the Tangential constraint, group isolation (double-click into a group),
-  recolouring a whole selection, the spoken refusals / longer conflict flash, and stale
+  recolouring a whole selection, the spoken refusals / longer conflict flash, dimensions on a
+  patterned seed, multi-seed (Ctrl+click) patterns, the green pattern accent, and stale
   what's-this strings. Manual exceptions so far: **text-only**
   `tool-fixed`, `tool-symmetric` and `tool-tangent` topics had to be written, because
   `npm run manual` hard-fails on a topic the app can ask for and every `data-tool` button
@@ -547,7 +566,10 @@ Each script is a plain assertion list — read it for the exact cases.
   PNG panel shots (path exists, no shots), pattern/component/ghost fixtures; option to let controls
   act *and* navigate in help mode (one-line change in `help.ts`). The draw-mode toolbar is ~1480 px wide and wraps groups below that.
 - **Patterns**: "make independent" UI undecided (`dissolvePattern` exists); labels not draggable;
-  whole-body patterns; patterns inside defs don't expand as patterns.
+  whole-body patterns; patterns inside defs don't expand as patterns. A dimension on a **turned
+  circular member's** own corners is refused (the member couplings are translation-only, so the
+  seed is pushed along the member's axis, not its own — dimension the seed instead); a
+  rotation-aware coupling (`R_k` from the layout) would fix it for `rotate: true` patterns.
 - **Components**: no per-instance scaling; no ports; per-instance actuator/motor speed overrides are
   lost on cascade; no thumbnails / drag-to-place in the browser; pose dims between instances aren't
   carried by copy/paste; a refused pose constraint gives no feedback (nothing to flash).

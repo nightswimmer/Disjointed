@@ -664,20 +664,20 @@ function memberSeedKey(scene: Scene, key: string): string | null {
   const parts = key.split(":");
   if (parts[0] === "v" && parts.length > 3) {
     const bodyId = Number(parts[1]);
-    const ph = scene.patternOfHole(bodyId, Number(parts[3]));
-    if (ph?.role !== "member" || ph.pattern.seed.kind !== "hole") return null;
-    return vertexKey(bodyId, Number(parts[2]), ph.pattern.seed.hole);
+    const hole = Number(parts[3]);
+    const seed = scene.patternSeedHole(bodyId, hole);
+    return seed === hole ? null : vertexKey(bodyId, Number(parts[2]), seed);
   }
   if (parts[0] === "c" && parts.length > 2) {
     const bodyId = Number(parts[1]);
-    const ph = scene.patternOfHole(bodyId, Number(parts[2]));
-    if (ph?.role !== "member" || ph.pattern.seed.kind !== "hole") return null;
-    return centreKey(bodyId, ph.pattern.seed.hole);
+    const hole = Number(parts[2]);
+    const seed = scene.patternSeedHole(bodyId, hole);
+    return seed === hole ? null : centreKey(bodyId, seed);
   }
   if (parts[0] === "j") {
-    const pj = scene.patternOfJoint(Number(parts[1]));
-    if (pj?.role !== "member" || pj.pattern.seed.kind !== "joint") return null;
-    return pointVarKey(scene, { kind: "joint", jointId: pj.pattern.seed.jointId });
+    const jointId = Number(parts[1]);
+    const seed = scene.patternSeedJoint(jointId);
+    return seed === jointId ? null : pointVarKey(scene, { kind: "joint", jointId: seed });
   }
   return null;
 }
@@ -2068,10 +2068,12 @@ export function applyDrivingDimension(
     scene.setMeasurementDriving(m.id, target);
     return [];
   }
-  // Both ends inside one pattern (seed ↔ member, member ↔ member): the spacing is the
-  // pattern's own parameter — edit it on the pattern, not through a dimension.
-  const pa = scene.patternOfRef(m.refA);
-  if (pa && pa === scene.patternOfRef(m.refB)) return reject;
+  // Ends on two different instances of one pattern (seed ↔ member, member ↔ member):
+  // that distance is the pattern's own layout — edit it on the pattern, not through a
+  // dimension. Both ends on the *same* instance (the seed's diameter, a slot's width
+  // between its own corners) are shape material like any other: the seed reshapes and
+  // its members copy it.
+  if (scene.patternSpannedBy(m.refA, m.refB)) return reject;
   const info = scene.measureInfo(m);
   if (!info || info.kind !== "distance") return reject; // angle dimensions can't drive (v1)
   if (m.axis === "diameter") {
@@ -2171,6 +2173,12 @@ function refOwnerBody(scene: Scene, ref: MeasureRef): number | null {
   }
 }
 
+/** Whether a ref (or the line its midpoint sits on) names a hole's corner, edge, centre or disk. */
+function refOnHole(r: MeasureRef): boolean {
+  const ref = refHost(r);
+  return (ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre" || ref.kind === "disk") && ref.hole !== undefined;
+}
+
 /** Whether a ref touches the body at all (owner match; a rail — or its midpoint — touches via either joint). */
 function refTouchesBody(scene: Scene, r: MeasureRef, bodyId: number): boolean {
   const ref = refHost(r);
@@ -2184,13 +2192,20 @@ function refTouchesBody(scene: Scene, r: MeasureRef, bodyId: number): boolean {
 
 /**
  * The body to uniformly scale for this dimension edit, or null for the node-solve path.
- * Eligible when both refs live on one body, no *other* driving dimension touches that
- * body, and every sketch constraint touching it stays fully inside it.
+ * Eligible when both refs live on one body, neither is on a hole, no *other* driving
+ * dimension touches that body, and every sketch constraint touching it stays fully
+ * inside it.
  */
 function scaleEligibleBody(scene: Scene, m: Measurement): number | null {
   const a = refOwnerBody(scene, m.refA);
   const b = refOwnerBody(scene, m.refB);
   if (a === null || a !== b) return null;
+  // The shortcut sets a body's *overall* size. A dimension with an end on a hole — the
+  // hole's width, its distance from a corner — is about that hole, not the plate around
+  // it: it goes through the node solve, so the hole reshapes or moves and the outline
+  // stays. (A patterned hole's members copy the reshaped seed; a scale would have grown
+  // the spacing with the plate.)
+  if (refOnHole(m.refA) || refOnHole(m.refB)) return null;
   for (const other of scene.measurements) {
     if (other.id === m.id || other.mode !== "draw" || !other.driving) continue;
     // A diameter / radius dimension is re-applied after a scale, so it never blocks one.

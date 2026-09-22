@@ -183,7 +183,7 @@ const near = (a: number, b: number, tol = 1e-6) => Math.abs(a - b) <= tol;
   s.addGuideArc(vec(0, 0), vec(5, 5), vec(10, 0));
   s.addGuideText(vec(5, 5), "hi", 4, b.id);
   const data = JSON.parse(JSON.stringify(s.serialize()));
-  check("format v21", data.version === 21);
+  check("format v22", data.version === 22);
   const t = new Scene();
   t.load(data);
   check("all guide kinds round-trip", t.guides.length === 5 && t.guides.map((g) => g.kind).join(",") === "poly,poly,circle,arc,text");

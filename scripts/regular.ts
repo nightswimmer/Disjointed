@@ -213,7 +213,7 @@ const sq = (x: number, y: number, w: number, h: number): Vec2[] => [vec(x, y), v
   s.moveBodyVertex(hex.id, 0, vec(5, 0));
   check("mirrored polygon still edits regularly", irregularity(s.bodyControlWorld(hex)) < 1e-9);
   const data = JSON.parse(JSON.stringify(s.serialize()));
-  check("format v21", data.version === 21);
+  check("format v22", data.version === 22);
   const t = new Scene();
   t.load(data);
   check("flags survive a round-trip", t.getBody(hex.id)?.regular === 6 && t.getBody(hex.id)?.holes?.[0].regular === 4);

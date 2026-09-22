@@ -353,8 +353,8 @@ const shapePropsGroup = document.getElementById("shape-props") as HTMLDivElement
 const textSizeLabel = document.getElementById("text-size-label") as HTMLLabelElement;
 const textSizeInput = document.getElementById("text-size") as HTMLInputElement;
 // --- pattern tools ------------------------------------------------------------
-/** What the armed pattern tool is replicating (a hole or an attached joint), or null before the pick. */
-let patternSeed: PatternSeed | null = null;
+/** What the armed pattern tool is replicating: the picked features (holes / attached joints of one body), in pick order — the first is the layout's anchor. */
+let patternSeeds: PatternSeed[] = [];
 /** Linear tool: the row just created, still armed for an optional second direction (a grid). */
 let patternDraft: number | null = null;
 /** Screen-pixel travel before a shape-tool press counts as a drag (vs a click). */
@@ -2670,7 +2670,7 @@ function setTool(next: Tool): void {
   resetTransient();
   selection = keepSel;
   multiSel = keepMulti;
-  if (seedJoint !== null) seedPatternJoint(seedJoint);
+  if (seedJoint !== null) togglePatternSeed({ kind: "joint", jointId: seedJoint }, false);
   document.querySelectorAll<HTMLButtonElement>(".tool-btn").forEach((b) =>
     b.classList.toggle("active", b.dataset.tool === tool)
   );
@@ -2695,7 +2695,7 @@ function resetTransient(): void {
   draftBody = [];
   draftBodySnaps = [];
   clearShapeDraft();
-  patternSeed = null;
+  patternSeeds = [];
   patternDraft = null;
   splitDraft = [];
   splitBodyId = null;
@@ -5199,6 +5199,12 @@ function commitDimEditor(): void {
   const breaks = applyDimensionValue(scene, id, target);
   if (breaks.length) {
     flashSketchItems(breaks);
+    // A distance between two instances of one pattern is the pattern's layout, not
+    // shape: the model refuses it outright, so say where that value lives instead.
+    if (scene.patternSpannedBy(m.refA, m.refB)) {
+      notify("Can't drive that value: the distance between pattern instances is the pattern's own spacing — double-click the pattern's label to change it.", "error");
+      return;
+    }
     // The edited dimension itself is always among the conflicts — what matters is what
     // else is holding the geometry, so it's named only when nothing else is.
     const what = describeBreaks(breaks, id);
@@ -5942,8 +5948,7 @@ function normalizeFeatureSel(
   }
   const jset = new Set<number>();
   for (const id of joints) {
-    const pj = scene.patternOfJoint(id);
-    jset.add(pj?.role === "member" && pj.pattern.seed.kind === "joint" ? pj.pattern.seed.jointId : id);
+    jset.add(scene.patternSeedJoint(id));
   }
   return vmap.size + jset.size ? { bodyId, verts: [...vmap.values()], joints: [...jset] } : null;
 }
@@ -6020,8 +6025,7 @@ function featureHitAt(p: Vec2): MeasureRef | null {
   }
   const j = scene.jointAt(p, pickRadius());
   if (j && j.bodyId === bodyId) {
-    const pj = scene.patternOfJoint(j.id);
-    const id = pj?.role === "member" && pj.pattern.seed.kind === "joint" ? pj.pattern.seed.jointId : j.id;
+    const id = scene.patternSeedJoint(j.id);
     if (featureSel.joints.includes(id)) return { kind: "joint", jointId: id };
   }
   return null;
@@ -6150,15 +6154,17 @@ function featureSelectedView(): RenderInput["featureSelected"] {
   const joints = [...featureSel.joints];
   for (const p of scene.patterns) {
     if (p.bodyId !== body.id) continue;
-    if (p.seed.kind === "hole") {
-      const seed = p.seed.hole;
-      const idx = featureSel.verts.filter((v) => v.hole === seed).map((v) => v.index);
-      if (idx.length === 0) continue;
-      for (const m of p.members) {
-        const verts = outlineControlWorld(body, m);
-        for (const i of idx) if (verts[i]) vertices.push(verts[i]);
-      }
-    } else if (featureSel.joints.includes(p.seed.jointId)) joints.push(...p.members);
+    for (const slot of p.slots) {
+      if (slot.seed.kind === "hole") {
+        const seed = slot.seed.hole;
+        const idx = featureSel.verts.filter((v) => v.hole === seed).map((v) => v.index);
+        if (idx.length === 0) continue;
+        for (const m of slot.members) {
+          const verts = outlineControlWorld(body, m);
+          for (const i of idx) if (verts[i]) vertices.push(verts[i]);
+        }
+      } else if (featureSel.joints.includes(slot.seed.jointId)) joints.push(...slot.members);
+    }
   }
   return { vertices, joints };
 }
@@ -6898,77 +6904,106 @@ function fmtNum(v: number): string {
 /** Stage-aware hint for the pattern tools. */
 function patternHint(): string {
   const circular = tool === "patternCircular";
-  if (!patternSeed) {
-    return `${circular ? "Circular" : "Linear"} pattern: click a hole (inside the cut-out) or a joint on a body to repeat it. The count / spacing labels are edited on the canvas afterwards (double-click a label; drag the end handle or centre to re-aim).`;
+  if (patternSeeds.length === 0) {
+    return `${circular ? "Circular" : "Linear"} pattern: click a hole (inside the cut-out) or a joint on a body to repeat it — Ctrl+click to pick several features of one body and repeat them together. The count / spacing labels are edited on the canvas afterwards (double-click a label; drag the end handle or centre to re-aim).`;
   }
-  const what = patternSeed.kind === "hole" ? "hole" : "joint";
+  const n = patternSeeds.length;
+  const what = n > 1 ? `${n} features` : patternSeeds[0].kind === "hole" ? "hole" : "joint";
+  const more = " Ctrl+click adds or removes features.";
   if (circular) {
-    return `Circular pattern of the ${what}: click the centre of rotation (snaps to joints, hole centres, corners and the grid).`;
+    return `Circular pattern of the ${what}: click the centre of rotation (snaps to joints, hole centres, corners and the grid).${more}`;
   }
   if (patternDraft !== null) {
-    return "Row created — click where the first instance of a second direction should go to make a grid, or press Enter / Esc to keep a single row. Type the count in the label, or double-click the ×count / spacing labels later.";
+    return `Row created — click where the first instance of a second direction should go to make a grid, or press Enter / Esc to keep a single row.${more} Type the count in the label, or double-click the ×count / spacing labels later.`;
   }
-  return `Linear pattern of the ${what}: click where the next instance should go (snaps to the grid / objects).`;
+  return `Linear pattern of the ${what}: click where the next instance should go (snaps to the grid / objects).${more}`;
 }
 
-/** Arm a pattern tool on an attached joint (refused: free joints, instance-owned, already patterned). */
-function seedPatternJoint(jointId: number): void {
-  const j = scene.getJoint(jointId);
-  if (!j) return;
-  if (j.bodyId === null) {
-    notify("A pattern repeats a joint across its body — free joints have no body to pattern on.");
+/** Whether two UI seeds name the same feature. */
+const samePatternSeed = (a: PatternSeed, b: PatternSeed): boolean =>
+  a.kind === "hole" ? b.kind === "hole" && a.bodyId === b.bodyId && a.hole === b.hole : b.kind === "joint" && a.jointId === b.jointId;
+
+/** The pattern-tool feature under `p`: a joint wins (as everywhere), else the hole whose cut-out contains the point. */
+function patternFeatureAt(p: Vec2): PatternSeed | null {
+  const j = scene.jointAt(p, pickRadius());
+  if (j) return { kind: "joint", jointId: j.id };
+  const hit = scene.holeAt(p);
+  return hit ? { kind: "hole", bodyId: hit.body.id, hole: hit.hole } : null;
+}
+
+/**
+ * Pick a feature for the armed pattern tool — or, `additive` (Ctrl), toggle it in the
+ * seed set: several features of one body repeat together, keeping their relative
+ * placement. Refused: free joints, component-instance material, a feature already in a
+ * pattern, a feature on another body than the seeds so far. While a row already exists
+ * (the linear draft) the feature joins / leaves that pattern at once, copies included.
+ */
+function togglePatternSeed(seed: PatternSeed, additive: boolean): void {
+  const body = scene.patternSeedBody(seed);
+  if (!body) {
+    if (seed.kind === "joint") notify("A pattern repeats a joint across its body — free joints have no body to pattern on.");
     return;
   }
-  if (scene.instanceOfBody(j.bodyId)) {
-    notify("This joint belongs to a component instance — edit the definition to pattern it.");
+  if (scene.instanceOfBody(body.id)) {
+    notify("This belongs to a component instance — edit the definition to pattern it.");
     disarmTool();
     return;
   }
-  if (scene.patternOfJoint(jointId)) {
-    notify("This joint is already part of a pattern — edit that pattern's labels, or delete it first.");
+  const at = patternSeeds.findIndex((s) => samePatternSeed(s, seed));
+  if (at >= 0) {
+    if (!additive) return; // a plain re-click on a seed: nothing to do
+    if (patternDraft !== null && !scene.removePatternSeed(patternDraft, seed)) return;
+    patternSeeds.splice(at, 1);
+    if (patternDraft !== null) {
+      if (!scene.getPattern(patternDraft)) patternDraft = null; // the last seed left: the row is gone
+      markDirty();
+    }
+    updateHint();
     return;
   }
-  patternSeed = { kind: "joint", jointId };
+  const taken = seed.kind === "joint" ? scene.patternOfJoint(seed.jointId) : scene.patternOfHole(seed.bodyId, seed.hole);
+  if (taken) {
+    notify(`This ${seed.kind} is already part of a pattern — edit that pattern's labels, or delete it first.`);
+    return;
+  }
+  if (patternSeeds.length && scene.patternSeedBody(patternSeeds[0])?.id !== body.id) {
+    notify("A pattern repeats features of one body — this one sits on another body.");
+    return;
+  }
+  if (patternDraft !== null) {
+    if (!scene.addPatternSeed(patternDraft, seed)) return;
+    markDirty();
+  }
+  patternSeeds.push(seed);
   updateHint();
 }
 
 /**
- * Pattern-tool click. No seed yet: pick one — a joint under the cursor wins (as
- * everywhere), else the hole whose cut-out contains the point. With a seed: create the
- * pattern at the clicked layout point (linear: where the next instance goes; circular:
- * the centre) and open its count label for typing. A linear pattern stays armed for an
- * optional second direction (a grid); Enter / Esc keep the single row.
+ * Pattern-tool click. Ctrl held, or no seed yet: pick the feature under the cursor (Ctrl
+ * toggles it in the seed set — see togglePatternSeed). Otherwise create the pattern at
+ * the clicked layout point (linear: where the next instance goes; circular: the centre)
+ * and open its count label for typing. A linear pattern stays armed for an optional
+ * second direction (a grid) and for more Ctrl+clicks; Enter / Esc keep it as it is.
  */
 function handlePatternClick(p: Vec2): void {
-  if (!patternSeed) {
-    const j = scene.jointAt(p, pickRadius());
-    if (j) {
-      seedPatternJoint(j.id);
-      return;
-    }
-    const hit = scene.holeAt(p);
-    if (hit) {
-      if (scene.instanceOfBody(hit.body.id)) {
-        notify("This body belongs to a component instance — edit the definition to pattern its holes.");
-        disarmTool();
-        return;
-      }
-      if (scene.patternOfHole(hit.body.id, hit.hole)) {
-        notify("This hole is already part of a pattern — edit that pattern's labels, or delete it first.");
-        return;
-      }
-      patternSeed = { kind: "hole", bodyId: hit.body.id, hole: hit.hole };
-      updateHint();
-    } else if (scene.bodyAt(p)) {
-      notify("Click inside a hole (the cut-out itself) or on a joint to pattern it.", "info");
+  if (mods.ctrl || patternSeeds.length === 0) {
+    const f = patternFeatureAt(p);
+    if (f) togglePatternSeed(f, mods.ctrl);
+    else if (scene.bodyAt(p)) {
+      notify(
+        mods.ctrl
+          ? "Ctrl+click inside a hole (the cut-out itself) or on a joint to add it to the pattern."
+          : "Click inside a hole (the cut-out itself) or on a joint to pattern it.",
+        "info"
+      );
     }
     return; // empty space: keep the tool armed
   }
   const target = patternTarget(p);
   if (!target) return;
-  const seed = patternSeed;
+  const seeds = patternSeeds;
   if (tool === "patternCircular") {
-    const created = scene.createCircularPattern(seed, target, PATTERN_DEFAULT_CIRCULAR_COUNT);
+    const created = scene.createCircularPattern(seeds, target, PATTERN_DEFAULT_CIRCULAR_COUNT);
     if (!created) return;
     markDirty();
     disarmTool();
@@ -6977,7 +7012,7 @@ function handlePatternClick(p: Vec2): void {
     return;
   }
   if (patternDraft === null) {
-    const created = scene.createLinearPattern(seed, target, PATTERN_DEFAULT_LINEAR_COUNT);
+    const created = scene.createLinearPattern(seeds, target, PATTERN_DEFAULT_LINEAR_COUNT);
     if (!created) return;
     patternDraft = created.id;
     autoConstrainPatternAxis(created.id, 0);
@@ -7038,39 +7073,54 @@ function finishPatternTool(): void {
  * Null when it coincides with the seed's anchor (no direction / a degenerate centre).
  */
 function patternTarget(p: Vec2): Vec2 | null {
-  if (!patternSeed) return null;
-  const anchor = scene.patternSeedAnchor(patternSeed);
+  if (patternSeeds.length === 0) return null;
+  const anchor = scene.patternSeedAnchor(patternSeeds[0]);
   if (!anchor) return null;
   const at = placeSnap(p);
   return dist(at, anchor) < 1e-6 ? null : at;
 }
 
-/** Pattern-tool overlay for the renderer: hover candidate, seed, layout point, instances. */
+/** Pattern-tool overlay for the renderer: hover candidate, seeds, layout point, instances. */
 function patternPreviewView(): RenderInput["patternPreview"] {
   if (mode !== "draw" || !isPatternTool(tool)) return null;
   const kind = tool === "patternCircular" ? "circular" : "linear";
-  if (!patternSeed) {
-    // Hover feedback while picking: the hole under the cursor (joints highlight anyway).
-    const hit = cursor && hoverJoint === null ? scene.holeAt(cursor) : undefined;
-    if (!hit) return null;
-    return { kind, anchor: null, seedLoop: scene.bodyHolesWorld(hit.body)[hit.hole], target: null, instances: [] };
+  // Hover feedback while picking — before the first seed, and whenever Ctrl is held to add
+  // or remove seeds (the layout preview waits until Ctrl is released): the hole under the
+  // cursor (joints highlight anyway).
+  const picking = patternSeeds.length === 0 || mods.ctrl;
+  let candidate: NonNullable<RenderInput["patternPreview"]>["candidate"] = null;
+  if (picking && cursor && hoverJoint === null) {
+    const hit = scene.holeAt(cursor);
+    if (hit) candidate = { loop: scene.bodyHolesWorld(hit.body)[hit.hole], point: cursor };
   }
-  const anchor = scene.patternSeedAnchor(patternSeed);
+  if (patternSeeds.length === 0) {
+    return candidate ? { kind, anchor: null, seedLoops: [], seedPoints: [], candidate, target: null, instances: [] } : null;
+  }
+  const anchor = scene.patternSeedAnchor(patternSeeds[0]);
   if (!anchor) return null;
-  const seedLoop =
-    patternSeed.kind === "hole" ? scene.bodyHolesWorld(scene.getBody(patternSeed.bodyId)!)[patternSeed.hole] ?? null : null;
-  const target = cursor ? patternTarget(cursor) : null;
+  const seedLoops: Vec2[][] = [];
+  const seedPoints: Vec2[] = [];
+  for (const s of patternSeeds) {
+    if (s.kind === "hole") {
+      const loop = scene.bodyHolesWorld(scene.getBody(s.bodyId)!)[s.hole];
+      if (loop) seedLoops.push(loop);
+    } else {
+      const j = scene.getJoint(s.jointId);
+      if (j) seedPoints.push(scene.jointWorld(j));
+    }
+  }
+  const target = cursor && !mods.ctrl ? patternTarget(cursor) : null;
   const pv = !target
     ? null
     : kind === "circular"
-    ? scene.patternPreview(patternSeed, { kind: "circular", centre: target, count: PATTERN_DEFAULT_CIRCULAR_COUNT })
-    : scene.patternPreview(patternSeed, {
+    ? scene.patternPreview(patternSeeds, { kind: "circular", centre: target, count: PATTERN_DEFAULT_CIRCULAR_COUNT })
+    : scene.patternPreview(patternSeeds, {
         kind: "linear",
         target,
         count: PATTERN_DEFAULT_LINEAR_COUNT,
         ...(patternDraft !== null ? { axis: patternDraft } : {}),
       });
-  return { kind, anchor, seedLoop, target, instances: pv?.instances ?? [] };
+  return { kind, anchor, seedLoops, seedPoints, candidate, target, instances: pv?.instances ?? [] };
 }
 
 // --- pattern labels / handles (draw mode) ----------------------------------------
@@ -7487,8 +7537,7 @@ canvas.addEventListener("mousedown", (e) => {
           canvas.style.cursor = "move";
         } else if (selection?.kind === "joint") {
           // A pattern member drags as its seed: the whole array moves together.
-          const pj = scene.patternOfJoint(selection.id);
-          const dragId = pj?.role === "member" && pj.pattern.seed.kind === "joint" ? pj.pattern.seed.jointId : selection.id;
+          const dragId = scene.patternSeedJoint(selection.id);
           const anchor = scene.jointWorld(scene.getJoint(dragId)!);
           leftDrag = {
             kind: "joint",
@@ -8294,6 +8343,19 @@ function commandForSlot(slot: string, typing: boolean): CommandSpec | null {
   }
   return null;
 }
+
+// Ctrl / Cmd pressed or released with the mouse still: the pattern tool's overlay switches
+// between picking seeds and laying them out on it, so the modifier state can't wait for
+// the next mouse event.
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Control" || e.key === "Meta") mods.ctrl = true;
+});
+window.addEventListener("keyup", (e) => {
+  if (e.key === "Control" || e.key === "Meta") mods.ctrl = e.ctrlKey || e.metaKey;
+});
+window.addEventListener("blur", () => {
+  mods.ctrl = false;
+});
 
 window.addEventListener("keydown", (e) => {
   const slot = slotOfEvent(e);

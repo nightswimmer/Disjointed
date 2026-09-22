@@ -108,22 +108,43 @@ export type PatternLayout =
   | { kind: "linear"; axes: PatternAxis[] }
   | { kind: "circular"; centre: Vec2; count: number; angleStep?: number; rotate: boolean };
 
+/** A pattern's record of one seed feature: a hole (index) or an attached joint (id) of the pattern's body. */
+export type PatternSeedRec = { kind: "hole"; hole: number } | { kind: "joint"; jointId: number };
+
 /**
- * A live pattern (v19): the seed (a hole or joint of `bodyId`) plus the layout, and the
- * **members** it owns — real holes (indices into `Body.holes`) or joints (ids) of the same
- * body, re-derived from the seed whenever the seed or its body changes (`syncPattern`).
- * Members are derived geometry: the sketch solver never moves them (rank-immovable, like
- * instance material), a drag on one moves the whole pattern, and the layout is edited
- * through its on-canvas labels. Deleting the seed dissolves the pattern (members stay as
- * plain holes / joints); deleting a member deletes every member (the seed stays).
+ * One seed feature of a pattern and the **members** derived from it — real holes (indices
+ * into `Body.holes`) or joints (ids) of the same body, one per instance after the seed, in
+ * layout order (see `patternLocalMotions`).
+ */
+export interface PatternSlot {
+  seed: PatternSeedRec;
+  members: number[];
+}
+
+/**
+ * A live pattern (v19; several seeds since v22): one or more seed features of `bodyId` —
+ * the **slots** — plus the layout they share. Every instance applies one rigid motion to
+ * the whole seed group, so the seeds' relative placement is reproduced in every copy, and
+ * the members are re-derived from their seeds whenever a seed or the body changes
+ * (`syncPattern`). The layout is anchored on the **first** slot's seed (a hole's control
+ * centroid or the joint): a circular `centre` is an offset from it. Members are derived
+ * geometry: the sketch solver only moves them with their seed, a drag on one moves the
+ * whole pattern, and the layout is edited through its on-canvas labels. Deleting a seed
+ * drops its slot (its members stay as plain holes / joints; the last seed dissolves the
+ * pattern); deleting any member deletes every member (the seeds stay).
  */
 export interface Pattern {
   id: number;
   bodyId: number;
-  seed: { kind: "hole"; hole: number } | { kind: "joint"; jointId: number };
+  slots: PatternSlot[];
   layout: PatternLayout;
-  /** Instances after the seed, in layout order (see `patternLocalMotions`). */
-  members: number[];
+}
+
+/** Where a hole / joint sits in a pattern: which slot, and whether it is that slot's seed or a member. */
+export interface PatternRole {
+  pattern: Pattern;
+  role: "seed" | "member";
+  slot: number;
 }
 
 /** A pattern resolved to world geometry for rendering / picking (see `Scene.patternInfo`). */
@@ -131,20 +152,24 @@ export interface PatternInfo {
   id: number;
   bodyId: number;
   kind: "linear" | "circular";
-  /** The seed's anchor: a hole's control-polygon centroid (a disk's centre) or the joint. */
+  /** The first seed's anchor: a hole's control-polygon centroid (a disk's centre) or the joint. */
   anchor: Vec2;
   /** Linear axes: where the last instance along each axis sits, the count and the spacing. */
   axes: { end: Vec2; count: number; step: number }[];
   /** Circular layout: the centre, the orbit radius, count, angle in degrees (null = even), rotation. */
   circular: { centre: Vec2; radius: number; count: number; angleDeg: number | null; rotate: boolean } | null;
-  /** Every member's anchor and whether it fits (inside the body, clear of other holes / joints). */
+  /** Every member's anchor (all slots) and whether it fits (inside the body, clear of other holes / joints). */
   members: { point: Vec2; ok: boolean }[];
 }
 
 /** Preview geometry of a layout that isn't (yet) a pattern (see `Scene.patternPreview`). */
 export interface PatternPreview {
+  /** The first seed's anchor. */
   anchor: Vec2;
-  seedLoop: Vec2[] | null;
+  /** The hole seeds' outlines and the joint seeds' points (world). */
+  seedLoops: Vec2[][];
+  seedPoints: Vec2[];
+  /** Every would-be member of every seed, with its fit. */
   instances: { point: Vec2; loop: Vec2[] | null; ok: boolean }[];
 }
 
@@ -197,6 +222,16 @@ function centroidOfPoints(pts: Vec2[]): Vec2 {
   let y = 0;
   for (const p of pts) { x += p.x; y += p.y; }
   return vec(x / pts.length, y / pts.length);
+}
+
+/** Whether two seed records name the same feature. */
+function sameSeed(a: PatternSeedRec, b: PatternSeedRec): boolean {
+  return a.kind === "hole" ? b.kind === "hole" && a.hole === b.hole : b.kind === "joint" && a.jointId === b.jointId;
+}
+
+/** A seed record in clipboard form (a joint by its tmp id, which is its live id at copy time). */
+function clipSeed(seed: PatternSeedRec): { kind: "hole"; hole: number } | { kind: "joint"; joint: number } {
+  return seed.kind === "hole" ? { kind: "hole", hole: seed.hole } : { kind: "joint", joint: seed.jointId };
 }
 
 /** Deep copy of a pattern layout. */
@@ -959,16 +994,15 @@ export interface SelectionClip {
    *  a `target`; driven (reference) ones travel only when the clip asks for them. */
   dims: { refA: MeasureRef; refB: MeasureRef; labelOffset: Vec2; axis: MeasureAxis; target?: number }[];
   /**
-   * Patterns of the copied bodies (v19): the seed (hole index / joint tmp id), the layout
-   * with its vectors in **world** orientation (a pasted body is re-baked at angle 0),
-   * and the members (hole indices / joint tmp ids).
+   * Patterns of the copied bodies (v19): per slot the seed (hole index / joint tmp id) and
+   * its members (hole indices / joint tmp ids), plus the layout with its vectors in
+   * **world** orientation (a pasted body is re-baked at angle 0).
    */
   patterns: {
     tmp: number;
     body: number;
-    seed: { kind: "hole"; hole: number } | { kind: "joint"; joint: number };
+    slots: { seed: { kind: "hole"; hole: number } | { kind: "joint"; joint: number }; members: number[] }[];
     layout: PatternLayout;
-    members: number[];
   }[];
 }
 
@@ -996,12 +1030,11 @@ export interface FeatureClip {
   /** Layout vectors in **world** orientation (re-oriented into the target body on paste). */
   patterns: {
     tmp: number;
-    seed: { kind: "hole"; hole: number } | { kind: "joint"; joint: number };
+    slots: { seed: { kind: "hole"; hole: number } | { kind: "joint"; joint: number }; members: number[] }[];
     layout: PatternLayout;
-    members: number[];
   }[];
 }
-const FORMAT_VERSION = 21;
+const FORMAT_VERSION = 22;
 
 /** Below this angle two measured lines count as parallel: show their distance, not the angle. */
 const MEASURE_PARALLEL_TOL = (0.5 * Math.PI) / 180;
@@ -1344,7 +1377,7 @@ export class Scene {
     shape.regular = n;
     this.rebuildBody(body);
     for (const p of this.patterns) {
-      if (p.bodyId === bodyId && p.seed.kind === "hole" && p.seed.hole === hole) this.syncPattern(p);
+      if (p.bodyId === bodyId && p.slots.some((s) => s.seed.kind === "hole" && s.seed.hole === hole)) this.syncPattern(p);
     }
     return true;
   }
@@ -1617,21 +1650,28 @@ export class Scene {
   }
 
   /** The pattern a hole of `bodyId` belongs to, and whether it is the seed or a member. */
-  patternOfHole(bodyId: number, hole: number): { pattern: Pattern; role: "seed" | "member" } | undefined {
+  patternOfHole(bodyId: number, hole: number): PatternRole | undefined {
     for (const p of this.patterns) {
-      if (p.bodyId !== bodyId || p.seed.kind !== "hole") continue;
-      if (p.seed.hole === hole) return { pattern: p, role: "seed" };
-      if (p.members.includes(hole)) return { pattern: p, role: "member" };
+      if (p.bodyId !== bodyId) continue;
+      for (let s = 0; s < p.slots.length; s++) {
+        const slot = p.slots[s];
+        if (slot.seed.kind !== "hole") continue;
+        if (slot.seed.hole === hole) return { pattern: p, role: "seed", slot: s };
+        if (slot.members.includes(hole)) return { pattern: p, role: "member", slot: s };
+      }
     }
     return undefined;
   }
 
   /** The pattern a joint belongs to, and whether it is the seed or a member. */
-  patternOfJoint(jointId: number): { pattern: Pattern; role: "seed" | "member" } | undefined {
+  patternOfJoint(jointId: number): PatternRole | undefined {
     for (const p of this.patterns) {
-      if (p.seed.kind !== "joint") continue;
-      if (p.seed.jointId === jointId) return { pattern: p, role: "seed" };
-      if (p.members.includes(jointId)) return { pattern: p, role: "member" };
+      for (let s = 0; s < p.slots.length; s++) {
+        const slot = p.slots[s];
+        if (slot.seed.kind !== "joint") continue;
+        if (slot.seed.jointId === jointId) return { pattern: p, role: "seed", slot: s };
+        if (slot.members.includes(jointId)) return { pattern: p, role: "member", slot: s };
+      }
     }
     return undefined;
   }
@@ -1648,39 +1688,93 @@ export class Scene {
 
   /** The pattern a reference's element belongs to (as seed or member), or undefined. */
   patternOfRef(r: MeasureRef): Pattern | undefined {
+    return this.patternInstanceOfRef(r)?.pattern;
+  }
+
+  /**
+   * The pattern **instance** a reference's element belongs to — the pattern plus which
+   * copy: −1 for the seed group (every seed, whichever slot), else the copy's index in
+   * layout order — or undefined for anything unpatterned. Two seeds of one pattern are
+   * one instance: their relative placement is what the copies reproduce.
+   */
+  patternInstanceOfRef(r: MeasureRef): { pattern: Pattern; instance: number } | undefined {
     const ref = refHost(r);
-    if (ref.kind === "joint") return this.patternOfJoint(ref.jointId)?.pattern;
-    if ((ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre" || ref.kind === "disk") && ref.hole !== undefined) {
-      return this.patternOfHole(ref.bodyId, ref.hole)?.pattern;
+    let at: PatternRole | undefined;
+    let id = 0;
+    if (ref.kind === "joint") {
+      at = this.patternOfJoint(ref.jointId);
+      id = ref.jointId;
+    } else if ((ref.kind === "vertex" || ref.kind === "edge" || ref.kind === "centre" || ref.kind === "disk") && ref.hole !== undefined) {
+      at = this.patternOfHole(ref.bodyId, ref.hole);
+      id = ref.hole;
     }
-    return undefined;
+    if (!at) return undefined;
+    return { pattern: at.pattern, instance: at.role === "seed" ? -1 : at.pattern.slots[at.slot].members.indexOf(id) };
+  }
+
+  /**
+   * The pattern whose two **different** instances a pair of references spans (seed ↔
+   * copy, copy ↔ another copy), or undefined. Such a distance is the pattern's own layout
+   * — spacing, radius, angle — and is edited on the pattern, never driven by a
+   * dimension. Two references on the *same* instance (a seed's diameter, the width of a
+   * slot hole between its own corners, the gap between two seeds of one group) are
+   * ordinary shape material: driving them reshapes or re-places the seeds and every
+   * copy follows.
+   */
+  patternSpannedBy(a: MeasureRef, b: MeasureRef): Pattern | undefined {
+    const ia = this.patternInstanceOfRef(a);
+    const ib = this.patternInstanceOfRef(b);
+    return ia && ib && ia.pattern === ib.pattern && ia.instance !== ib.instance ? ia.pattern : undefined;
   }
 
   /** A hole's index redirected to its pattern's seed when it is a member (else itself). */
   patternSeedHole(bodyId: number, hole: number): number {
     const ph = this.patternOfHole(bodyId, hole);
-    return ph?.role === "member" && ph.pattern.seed.kind === "hole" ? ph.pattern.seed.hole : hole;
+    const seed = ph?.role === "member" ? ph.pattern.slots[ph.slot].seed : null;
+    return seed?.kind === "hole" ? seed.hole : hole;
   }
 
-  /** The seed's anchor in its body's local frame: a hole's control centroid, or the joint. */
-  private patternAnchorLocal(p: Pattern): Vec2 | null {
-    const body = this.getBody(p.bodyId);
-    if (!body) return null;
-    if (p.seed.kind === "joint") {
-      const j = this.getJoint(p.seed.jointId);
+  /** A joint's id redirected to its pattern's seed joint when it is a member (else itself). */
+  patternSeedJoint(jointId: number): number {
+    const pj = this.patternOfJoint(jointId);
+    const seed = pj?.role === "member" ? pj.pattern.slots[pj.slot].seed : null;
+    return seed?.kind === "joint" ? seed.jointId : jointId;
+  }
+
+  /** A seed's anchor in its body's local frame: a hole's control centroid, or the joint. Null when missing. */
+  private seedAnchorLocal(body: Body, seed: PatternSeedRec): Vec2 | null {
+    if (seed.kind === "joint") {
+      const j = this.getJoint(seed.jointId);
       return j && j.bodyId === body.id ? j.local : null;
     }
-    const hole = body.holes?.[p.seed.hole];
+    const hole = body.holes?.[seed.hole];
     if (!hole) return null;
     return hole.controlLocal.length < 3 ? centroidOfPoints(hole.controlLocal) : polygonCentroid(hole.controlLocal);
+  }
+
+  /** The pattern's anchor — its first seed's — in the body's local frame. */
+  private patternAnchorLocal(p: Pattern): Vec2 | null {
+    const body = this.getBody(p.bodyId);
+    return body && p.slots[0] ? this.seedAnchorLocal(body, p.slots[0].seed) : null;
+  }
+
+  /**
+   * Keep a circular layout's centre where it is when the anchor slot changes to `next`:
+   * the centre is stored relative to the anchor, so it shifts by the anchors' difference
+   * (both read in the current frame, before anything is removed or rebuilt).
+   */
+  private reanchorLayout(p: Pattern, body: Body, next: PatternSeedRec): void {
+    if (p.layout.kind !== "circular" || !p.slots[0]) return;
+    const a0 = this.seedAnchorLocal(body, p.slots[0].seed);
+    const a1 = this.seedAnchorLocal(body, next);
+    if (a0 && a1) p.layout.centre = add(p.layout.centre, sub(a0, a1));
   }
 
   /** The world anchor of a pattern seed picked by the UI, or null (missing, free joint). */
   patternSeedAnchor(seed: PatternSeed): Vec2 | null {
     const body = this.patternSeedBody(seed);
     if (!body) return null;
-    const p = this.seedRecord(seed);
-    const a = this.patternAnchorLocal({ id: 0, bodyId: body.id, seed: p, layout: { kind: "linear", axes: [] }, members: [] });
+    const a = this.seedAnchorLocal(body, this.seedRecord(seed));
     return a ? add(body.pos, rotate(a, body.angle)) : null;
   }
 
@@ -1694,8 +1788,30 @@ export class Scene {
     return body?.holes?.[seed.hole] ? body : undefined;
   }
 
-  private seedRecord(seed: PatternSeed): Pattern["seed"] {
+  private seedRecord(seed: PatternSeed): PatternSeedRec {
     return seed.kind === "joint" ? { kind: "joint", jointId: seed.jointId } : { kind: "hole", hole: seed.hole };
+  }
+
+  /**
+   * The UI seeds of a new pattern (or of a slot being added) validated as one group: at
+   * least one, all on one body, none missing, none already in a pattern, no duplicates.
+   * The body and the seed records, or null.
+   */
+  private seedGroup(seeds: PatternSeed | PatternSeed[]): { body: Body; recs: PatternSeedRec[] } | null {
+    const list = Array.isArray(seeds) ? seeds : [seeds];
+    if (list.length === 0) return null;
+    const body = this.patternSeedBody(list[0]);
+    if (!body) return null;
+    const recs: PatternSeedRec[] = [];
+    for (const s of list) {
+      if (this.patternSeedBody(s)?.id !== body.id) return null;
+      const taken = s.kind === "joint" ? this.patternOfJoint(s.jointId) : this.patternOfHole(s.bodyId, s.hole);
+      if (taken) return null;
+      const rec = this.seedRecord(s);
+      if (recs.some((r) => sameSeed(r, rec))) return null;
+      recs.push(rec);
+    }
+    return { body, recs };
   }
 
   /** A body-local vector from a world one. */
@@ -1708,18 +1824,17 @@ export class Scene {
    * world point the 2nd instance lands on). Null when the seed is invalid, already in a
    * pattern, or the target coincides with the seed.
    */
-  createLinearPattern(seed: PatternSeed, target: Vec2, count = 3): Pattern | null {
-    const body = this.patternSeedBody(seed);
-    const anchor = body ? this.patternSeedAnchor(seed) : null;
-    if (!body || !anchor || this.seedTaken(seed)) return null;
-    const step = this.toLocalVec(body, sub(target, anchor));
+  createLinearPattern(seeds: PatternSeed | PatternSeed[], target: Vec2, count = 3): Pattern | null {
+    const g = this.seedGroup(seeds);
+    const anchor = g ? this.patternSeedAnchor(Array.isArray(seeds) ? seeds[0] : seeds) : null;
+    if (!g || !anchor) return null;
+    const step = this.toLocalVec(g.body, sub(target, anchor));
     if (len(step) < 1e-6) return null;
     const p: Pattern = {
       id: this.id(),
-      bodyId: body.id,
-      seed: this.seedRecord(seed),
+      bodyId: g.body.id,
+      slots: g.recs.map((seed) => ({ seed, members: [] })),
       layout: { kind: "linear", axes: [{ count: this.clampCount(count), step }] },
-      members: [],
     };
     this.patterns.push(p);
     this.syncPattern(p);
@@ -1749,29 +1864,68 @@ export class Scene {
    * Create a circular pattern of `count` instances evenly around `centre` (world), each
    * rotated with the arc. Null when the seed is invalid / taken or the centre sits on it.
    */
-  createCircularPattern(seed: PatternSeed, centre: Vec2, count = 6): Pattern | null {
-    const body = this.patternSeedBody(seed);
-    const anchor = body ? this.patternSeedAnchor(seed) : null;
-    if (!body || !anchor || this.seedTaken(seed)) return null;
-    const off = this.toLocalVec(body, sub(centre, anchor));
+  createCircularPattern(seeds: PatternSeed | PatternSeed[], centre: Vec2, count = 6): Pattern | null {
+    const g = this.seedGroup(seeds);
+    const anchor = g ? this.patternSeedAnchor(Array.isArray(seeds) ? seeds[0] : seeds) : null;
+    if (!g || !anchor) return null;
+    const off = this.toLocalVec(g.body, sub(centre, anchor));
     if (len(off) < 1e-6) return null;
     const p: Pattern = {
       id: this.id(),
-      bodyId: body.id,
-      seed: this.seedRecord(seed),
+      bodyId: g.body.id,
+      slots: g.recs.map((seed) => ({ seed, members: [] })),
       layout: { kind: "circular", centre: off, count: this.clampCount(count), rotate: true },
-      members: [],
     };
     this.patterns.push(p);
     this.syncPattern(p);
     return p;
   }
 
-  /** Whether a UI seed already belongs to a pattern (as seed or member). */
-  private seedTaken(seed: PatternSeed): boolean {
-    return seed.kind === "joint"
-      ? this.patternOfJoint(seed.jointId) !== undefined
-      : this.patternOfHole(seed.bodyId, seed.hole) !== undefined;
+  /**
+   * Add a seed feature to a pattern as a new slot (same body, not yet patterned): its
+   * copies appear at once, laid out by the pattern's motions like every other seed's.
+   */
+  addPatternSeed(id: number, seed: PatternSeed): boolean {
+    const p = this.getPattern(id);
+    const g = this.seedGroup(seed);
+    if (!p || !g || g.body.id !== p.bodyId) return false;
+    p.slots.push({ seed: g.recs[0], members: [] });
+    this.syncPattern(p);
+    return true;
+  }
+
+  /** Take a seed feature out of a pattern: its copies are deleted, the seed stays (the last seed dissolves the pattern). */
+  removePatternSeed(id: number, seed: PatternSeed): boolean {
+    const p = this.getPattern(id);
+    const rec = this.seedRecord(seed);
+    const s = p ? p.slots.findIndex((x) => sameSeed(x.seed, rec)) : -1;
+    if (!p || s < 0) return false;
+    this.detachSlot(p, s, true);
+    return true;
+  }
+
+  /**
+   * Take slot `s` out of pattern `p`: with `withMembers` its copies are deleted, else
+   * they stay as plain holes / joints. The anchor moving to the next seed keeps a circular
+   * centre in place; the last slot going dissolves the pattern.
+   */
+  private detachSlot(p: Pattern, s: number, withMembers: boolean): void {
+    const body = this.getBody(p.bodyId);
+    const slot = p.slots[s];
+    if (!body || !slot) return;
+    if (s === 0 && p.slots[1]) this.reanchorLayout(p, body, p.slots[1].seed);
+    p.slots = p.slots.filter((_, i) => i !== s);
+    if (withMembers) this.dropMembers(p, [slot]);
+    if (p.slots.length === 0) this.patterns = this.patterns.filter((x) => x.id !== p.id);
+    this.prunePatternRefs();
+  }
+
+  /** Delete the members of the given slots (holes in one pass, joints one by one). */
+  private dropMembers(p: Pattern, slots: PatternSlot[]): void {
+    const body = this.getBody(p.bodyId);
+    const holes = slots.filter((x) => x.seed.kind === "hole").flatMap((x) => x.members);
+    if (body && holes.length) this.dropHoles(body, holes);
+    for (const x of slots) if (x.seed.kind === "joint") for (const jid of x.members) this.removeJoint(jid);
   }
 
   /** Clamp an instance count (≥ 2, ≤ the axis cap, and the grid cap given the other axis). */
@@ -1888,12 +2042,7 @@ export class Scene {
     const p = this.getPattern(id);
     if (!p) return;
     this.patterns = this.patterns.filter((x) => x.id !== id); // record first: no hooks re-enter
-    const body = this.getBody(p.bodyId);
-    if (p.seed.kind === "hole") {
-      if (body) this.dropHoles(body, p.members);
-    } else {
-      for (const jid of p.members) this.removeJoint(jid);
-    }
+    this.dropMembers(p, p.slots);
     this.prunePatternRefs();
   }
 
@@ -1926,55 +2075,69 @@ export class Scene {
   private syncPattern(p: Pattern): void {
     if (this.syncingPatterns) return;
     const body = this.getBody(p.bodyId);
-    const anchor = body ? this.patternAnchorLocal(p) : null;
-    if (!body || !anchor) return;
-    const motions = patternLocalMotions(p.layout, anchor);
+    if (!body || !this.patternAnchorLocal(p)) return;
+    const n = patternLocalMotions(p.layout, vec(0, 0)).length; // instances after the seeds
     this.syncingPatterns = true;
     try {
-      if (p.seed.kind === "hole") {
-        const seed = body.holes![p.seed.hole];
-        if (p.members.length > motions.length) {
-          const extra = p.members.slice(motions.length);
-          p.members = p.members.slice(0, motions.length);
-          this.dropHoles(body, extra); // remaps this pattern's surviving member indices too
-        }
-        while (p.members.length < motions.length) {
-          body.holes!.push({ controlLocal: [], radius: seed.radius });
-          p.members.push(body.holes!.length - 1);
-        }
-        p.members.forEach((hi, k) => {
-          const h = body.holes![hi];
-          h.controlLocal = seed.controlLocal.map(motions[k]);
-          h.radius = seed.radius;
-          if (seed.radii) h.radii = [...seed.radii];
-          else delete h.radii;
-          if (seed.round) h.round = seed.round;
-          else delete h.round;
-          if (seed.regular) h.regular = seed.regular;
-          else delete h.regular;
-        });
-        this.rebuildBody(body);
-      } else {
-        const seedJ = this.getJoint(p.seed.jointId)!;
-        if (p.members.length > motions.length) {
-          const extra = p.members.slice(motions.length);
-          p.members = p.members.slice(0, motions.length);
-          for (const jid of extra) this.removeJoint(jid);
-        }
-        while (p.members.length < motions.length) {
-          const j: Joint = { id: this.id(), bodyId: body.id, local: vec(anchor.x, anchor.y) };
-          this.joints.push(j);
-          p.members.push(j.id);
-        }
-        p.members.forEach((jid, k) => {
-          const j = this.getJoint(jid);
-          if (!j) return;
-          j.local = motions[k](seedJ.local);
-          const w = this.jointWorld(j);
-          for (const c of this.constraints) {
-            if (c.kind === "ground" && c.joint === j.id) c.anchor = vec(w.x, w.y);
+      // Trim first, every slot at once: dropping holes rebuilds the body (the frame shifts
+      // with the centroid) and renumbers every slot's indices.
+      const extraHoles: number[] = [];
+      const extraJoints: number[] = [];
+      for (const slot of p.slots) {
+        if (slot.members.length <= n) continue;
+        (slot.seed.kind === "hole" ? extraHoles : extraJoints).push(...slot.members.slice(n));
+        slot.members = slot.members.slice(0, n);
+      }
+      if (extraHoles.length) this.dropHoles(body, extraHoles);
+      for (const jid of extraJoints) this.removeJoint(jid);
+      // Now the motions, in the current frame: grow every slot to `n` and write each
+      // member's geometry from its seed, then one rebuild re-bakes it all (nothing is
+      // written after the rebuild — it moves the frame).
+      const anchor = this.patternAnchorLocal(p);
+      if (!anchor) return;
+      const motions = patternLocalMotions(p.layout, anchor);
+      const memberJoints: Joint[] = [];
+      for (const slot of p.slots) {
+        if (slot.seed.kind === "hole") {
+          const seed = body.holes?.[slot.seed.hole];
+          if (!seed) continue;
+          while (slot.members.length < n) {
+            body.holes!.push({ controlLocal: [], radius: seed.radius });
+            slot.members.push(body.holes!.length - 1);
           }
-        });
+          slot.members.forEach((hi, k) => {
+            const h = body.holes![hi];
+            h.controlLocal = seed.controlLocal.map(motions[k]);
+            h.radius = seed.radius;
+            if (seed.radii) h.radii = [...seed.radii];
+            else delete h.radii;
+            if (seed.round) h.round = seed.round;
+            else delete h.round;
+            if (seed.regular) h.regular = seed.regular;
+            else delete h.regular;
+          });
+        } else {
+          const seedJ = this.getJoint(slot.seed.jointId);
+          if (!seedJ) continue;
+          while (slot.members.length < n) {
+            const j: Joint = { id: this.id(), bodyId: body.id, local: vec(anchor.x, anchor.y) };
+            this.joints.push(j);
+            slot.members.push(j.id);
+          }
+          slot.members.forEach((jid, k) => {
+            const j = this.getJoint(jid);
+            if (!j) return;
+            j.local = motions[k](seedJ.local);
+            memberJoints.push(j);
+          });
+        }
+      }
+      this.rebuildBody(body);
+      for (const j of memberJoints) {
+        const w = this.jointWorld(j);
+        for (const c of this.constraints) {
+          if (c.kind === "ground" && c.joint === j.id) c.anchor = vec(w.x, w.y);
+        }
       }
     } finally {
       this.syncingPatterns = false;
@@ -1998,6 +2161,23 @@ export class Scene {
     const map = new Map<number, number>();
     let k = 0;
     for (let i = 0; i < body.holes.length; i++) if (!set.has(i)) map.set(i, k++);
+    // Patterns follow the renumbering — before the holes go, since anchors are read from
+    // the old indices. A slot whose seed is removed is dropped (its members stay as plain
+    // holes); the last slot going dissolves the pattern; the anchor slot going re-expresses
+    // a circular centre from the next seed.
+    this.patterns = this.patterns.filter((p) => {
+      if (p.bodyId !== body.id) return true;
+      const kept = p.slots.filter((s) => !(s.seed.kind === "hole" && set.has(s.seed.hole)));
+      if (kept.length === 0) return false;
+      if (kept[0] !== p.slots[0]) this.reanchorLayout(p, body, kept[0].seed);
+      p.slots = kept;
+      for (const s of kept) {
+        if (s.seed.kind !== "hole") continue;
+        s.seed.hole = map.get(s.seed.hole)!;
+        s.members = s.members.filter((h) => !set.has(h)).map((h) => map.get(h)!);
+      }
+      return true;
+    });
     body.holes = body.holes.filter((_, i) => !set.has(i));
     body.holesLocal = body.holesLocal?.filter((_, i) => !set.has(i));
     if (body.holes.length === 0) {
@@ -2021,13 +2201,6 @@ export class Scene {
     this.sketch = this.sketch.filter((c) => !sketchRefs(c).some(refGone));
     for (const m of this.measurements) { remap(m.refA); remap(m.refB); }
     for (const c of this.sketch) sketchRefs(c).forEach(remap);
-    this.patterns = this.patterns.filter((p) => {
-      if (p.bodyId !== body.id || p.seed.kind !== "hole") return true;
-      if (set.has(p.seed.hole)) return false; // seed gone → the pattern dissolves
-      p.seed.hole = map.get(p.seed.hole)!;
-      p.members = p.members.filter((h) => !set.has(h)).map((h) => map.get(h)!);
-      return true;
-    });
     this.prunePatternRefs(); // a dissolved pattern's axis constraints go with it
     this.rebuildBody(body);
   }
@@ -2052,24 +2225,26 @@ export class Scene {
     const toWorld = (q: Vec2): Vec2 => add(body.pos, rotate(q, body.angle));
     const anchor = toWorld(anchorL);
     const outer = this.bodyWorldVerts(body);
-    let members: PatternInfo["members"];
-    if (p.seed.kind === "hole") {
-      const loops = this.bodyHolesWorld(body);
-      members = p.members.map((hi) => {
-        const loop = loops[hi];
-        const others = loops.filter((_, i) => i !== hi);
-        return { point: toWorld(centroidOfPoints(body.holes![hi].controlLocal)), ok: !!loop && this.holeLoopFits(outer, loop, others) };
-      });
-    } else {
-      const onBody = this.joints.filter((j) => j.bodyId === body.id);
-      members = p.members.map((jid) => {
-        const j = this.getJoint(jid);
-        const w = j ? this.jointWorld(j) : anchor;
-        const ok =
-          !!j && pointInPolygon(w, outer) &&
-          !onBody.some((o) => o.id !== jid && dist(this.jointWorld(o), w) <= PATTERN_JOINT_EPS);
-        return { point: w, ok };
-      });
+    const loops = this.bodyHolesWorld(body);
+    const onBody = this.joints.filter((j) => j.bodyId === body.id);
+    const members: PatternInfo["members"] = [];
+    for (const slot of p.slots) {
+      if (slot.seed.kind === "hole") {
+        for (const hi of slot.members) {
+          const loop = loops[hi];
+          const others = loops.filter((_, i) => i !== hi);
+          members.push({ point: toWorld(centroidOfPoints(body.holes![hi].controlLocal)), ok: !!loop && this.holeLoopFits(outer, loop, others) });
+        }
+      } else {
+        for (const jid of slot.members) {
+          const j = this.getJoint(jid);
+          const w = j ? this.jointWorld(j) : anchor;
+          const ok =
+            !!j && pointInPolygon(w, outer) &&
+            !onBody.some((o) => o.id !== jid && dist(this.jointWorld(o), w) <= PATTERN_JOINT_EPS);
+          members.push({ point: w, ok });
+        }
+      }
     }
     if (p.layout.kind === "linear") {
       return {
@@ -2095,19 +2270,21 @@ export class Scene {
   }
 
   /**
-   * Preview a layout for a UI seed (world coordinates in, world geometry out) without
-   * creating anything: the seed's anchor / outline and every would-be instance with its
-   * fit. `axis` previews a **second** axis added to an existing linear pattern.
+   * Preview a layout for one or more UI seeds (world coordinates in, world geometry out)
+   * without creating anything: the first seed's anchor, every seed's outline / point, and
+   * every would-be instance of every seed with its fit. `axis` previews a **second** axis
+   * added to an existing linear pattern (whose seeds are the ones passed).
    */
   patternPreview(
-    seed: PatternSeed,
+    seeds: PatternSeed | PatternSeed[],
     spec:
       | { kind: "linear"; target: Vec2; count: number; axis?: number }
       | { kind: "circular"; centre: Vec2; count: number }
   ): PatternPreview | null {
-    const body = this.patternSeedBody(seed);
-    const anchor = body ? this.patternSeedAnchor(seed) : null;
-    if (!body || !anchor) return null;
+    const list = Array.isArray(seeds) ? seeds : [seeds];
+    const body = list[0] ? this.patternSeedBody(list[0]) : undefined;
+    const anchor = body ? this.patternSeedAnchor(list[0]) : null;
+    if (!body || !anchor || list.some((s) => this.patternSeedBody(s)?.id !== body.id)) return null;
     const anchorL = rotate(sub(anchor, body.pos), -body.angle);
     let layout: PatternLayout;
     if (spec.kind === "linear") {
@@ -2130,33 +2307,47 @@ export class Scene {
     const motions = patternLocalMotions(layout, anchorL);
     const toWorld = (q: Vec2): Vec2 => add(body.pos, rotate(q, body.angle));
     const outer = this.bodyWorldVerts(body);
-    if (seed.kind === "hole") {
-      const existing = this.patternOfHole(seed.bodyId, seed.hole)?.pattern;
-      const loops = this.bodyHolesWorld(body);
-      // An existing pattern's members are being re-laid — they don't count as obstacles.
-      const memberSet = new Set(existing?.members ?? []);
-      const obstacles = loops.filter((_, i) => i !== seed.hole && !memberSet.has(i));
-      const seedLocal = body.holesLocal![seed.hole];
-      const instances = motions.map((m) => {
-        const loop = seedLocal.map((q) => toWorld(m(q)));
-        const ok = this.holeLoopFits(outer, loop, obstacles);
-        if (ok) obstacles.push(loop);
-        return { point: toWorld(m(anchorL)), loop, ok };
-      });
-      return { anchor, seedLoop: loops[seed.hole], instances };
+    // The seeds themselves and the members of a pattern being re-laid (a second-axis
+    // preview) are no obstacles.
+    const skipHoles = new Set<number>();
+    const skipJoints = new Set<number>();
+    for (const s of list) {
+      const existing = s.kind === "hole" ? this.patternOfHole(s.bodyId, s.hole) : this.patternOfJoint(s.jointId);
+      if (s.kind === "hole") skipHoles.add(s.hole);
+      else skipJoints.add(s.jointId);
+      for (const slot of existing?.pattern.slots ?? []) {
+        for (const m of slot.members) (slot.seed.kind === "hole" ? skipHoles : skipJoints).add(m);
+      }
     }
-    const existing = this.patternOfJoint(seed.jointId)?.pattern;
-    const memberSet = new Set(existing?.members ?? []);
-    const taken = this.joints
-      .filter((j) => j.bodyId === body.id && j.id !== seed.jointId && !memberSet.has(j.id))
-      .map((j) => this.jointWorld(j));
-    const instances = motions.map((m) => {
-      const point = toWorld(m(anchorL));
-      const ok = pointInPolygon(point, outer) && !taken.some((q) => dist(q, point) <= PATTERN_JOINT_EPS);
-      if (ok) taken.push(point);
-      return { point, loop: null, ok };
-    });
-    return { anchor, seedLoop: null, instances };
+    const loops = this.bodyHolesWorld(body);
+    const obstacles = loops.filter((_, i) => !skipHoles.has(i));
+    const taken = this.joints.filter((j) => j.bodyId === body.id && !skipJoints.has(j.id)).map((j) => this.jointWorld(j));
+    const seedLoops: Vec2[][] = [];
+    const seedPoints: Vec2[] = [];
+    const instances: PatternPreview["instances"] = [];
+    for (const s of list) {
+      if (s.kind === "hole") {
+        const seedLocal = body.holesLocal![s.hole];
+        const c = centroidOfPoints(body.holes![s.hole].controlLocal);
+        seedLoops.push(loops[s.hole]);
+        for (const m of motions) {
+          const loop = seedLocal.map((q) => toWorld(m(q)));
+          const ok = this.holeLoopFits(outer, loop, obstacles);
+          if (ok) obstacles.push(loop);
+          instances.push({ point: toWorld(m(c)), loop, ok });
+        }
+      } else {
+        const j = this.getJoint(s.jointId)!;
+        seedPoints.push(this.jointWorld(j));
+        for (const m of motions) {
+          const point = toWorld(m(j.local));
+          const ok = pointInPolygon(point, outer) && !taken.some((q) => dist(q, point) <= PATTERN_JOINT_EPS);
+          if (ok) taken.push(point);
+          instances.push({ point, loop: null, ok });
+        }
+      }
+    }
+    return { anchor, seedLoops, seedPoints, instances };
   }
 
   // --- split / combine ------------------------------------------------------
@@ -5077,11 +5268,32 @@ export class Scene {
         .map((p) => ({
           tmp: p.id,
           body: p.bodyId,
-          seed: p.seed.kind === "hole" ? { kind: "hole" as const, hole: p.seed.hole } : { kind: "joint" as const, joint: p.seed.jointId },
+          slots: p.slots.map((s) => ({ seed: clipSeed(s.seed), members: [...s.members] })),
           layout: rotateLayout(cloneLayout(p.layout), this.getBody(p.bodyId)!.angle),
-          members: [...p.members],
         })),
     };
+  }
+
+  /** Clipboard slots → live slots through a paste's maps; null when any seed or member has no image. */
+  private mapClipSlots(
+    slots: { seed: { kind: "hole"; hole: number } | { kind: "joint"; joint: number }; members: number[] }[],
+    holeOf: (h: number) => number | undefined,
+    jointOf: (t: number) => number | undefined
+  ): PatternSlot[] | null {
+    const out: PatternSlot[] = [];
+    for (const s of slots) {
+      const mapOne = s.seed.kind === "hole" ? holeOf : jointOf;
+      const seedId = mapOne(s.seed.kind === "hole" ? s.seed.hole : s.seed.joint);
+      if (seedId === undefined) return null;
+      const members: number[] = [];
+      for (const m of s.members) {
+        const id = mapOne(m);
+        if (id === undefined) return null;
+        members.push(id);
+      }
+      out.push({ seed: s.seed.kind === "hole" ? { kind: "hole", hole: seedId } : { kind: "joint", jointId: seedId }, members });
+    }
+    return out.length ? out : null;
   }
 
   /** Single-body convenience wrapper around `extractSelection`. */
@@ -5191,18 +5403,9 @@ export class Scene {
     for (const pc of clip.patterns ?? []) {
       const bid = bodyIdMap.get(pc.body);
       if (bid === undefined) continue;
-      let seed: Pattern["seed"];
-      if (pc.seed.kind === "hole") seed = { kind: "hole", hole: pc.seed.hole };
-      else {
-        const jid = idMap.get(pc.seed.joint);
-        if (jid === undefined) continue;
-        seed = { kind: "joint", jointId: jid };
-      }
-      const members =
-        pc.seed.kind === "hole"
-          ? [...pc.members]
-          : pc.members.map((t) => idMap.get(t)).filter((x): x is number => x !== undefined);
-      const p: Pattern = { id: this.id(), bodyId: bid, seed, layout: cloneLayout(pc.layout), members };
+      const slots = this.mapClipSlots(pc.slots, (h) => h, (t) => idMap.get(t));
+      if (!slots) continue;
+      const p: Pattern = { id: this.id(), bodyId: bid, slots, layout: cloneLayout(pc.layout) };
       this.patterns.push(p);
       patternIdMap.set(pc.tmp, p.id);
       this.syncPattern(p);
@@ -5302,10 +5505,11 @@ export class Scene {
     const carried: Pattern[] = [];
     for (const p of this.patterns) {
       if (p.bodyId !== bodyId) continue;
-      const seedIn = p.seed.kind === "hole" ? holeSet.has(p.seed.hole) : owned.has(p.seed.jointId);
-      if (!seedIn) continue;
+      // A pattern travels when every seed is copied; its members then come along.
+      const seedIn = (s: PatternSlot): boolean => (s.seed.kind === "hole" ? holeSet.has(s.seed.hole) : owned.has(s.seed.jointId));
+      if (!p.slots.every(seedIn)) continue;
       carried.push(p);
-      for (const m of p.members) (p.seed.kind === "hole" ? holeSet : owned).add(m);
+      for (const s of p.slots) for (const m of s.members) (s.seed.kind === "hole" ? holeSet : owned).add(m);
     }
     if (holeSet.size + owned.size === 0) return null;
     const clipHoles: FeatureClip["holes"] = [...holeSet]
@@ -5409,9 +5613,8 @@ export class Scene {
       dims,
       patterns: carried.map((p) => ({
         tmp: p.id,
-        seed: p.seed.kind === "hole" ? { kind: "hole" as const, hole: p.seed.hole } : { kind: "joint" as const, joint: p.seed.jointId },
+        slots: p.slots.map((s) => ({ seed: clipSeed(s.seed), members: [...s.members] })),
         layout: rotateLayout(cloneLayout(p.layout), body.angle),
-        members: [...p.members],
       })),
     };
   }
@@ -5480,26 +5683,13 @@ export class Scene {
     }
     const patternMap = new Map<number, number>();
     for (const pc of clip.patterns) {
-      let seed: Pattern["seed"];
-      if (pc.seed.kind === "hole") {
-        const hi = holeMap.get(pc.seed.hole);
-        if (hi === undefined) continue;
-        seed = { kind: "hole", hole: hi };
-      } else {
-        const jid = idMap.get(pc.seed.joint);
-        if (jid === undefined) continue;
-        seed = { kind: "joint", jointId: jid };
-      }
-      const members = pc.members
-        .map((t) => (pc.seed.kind === "hole" ? holeMap : idMap).get(t))
-        .filter((x): x is number => x !== undefined);
-      if (members.length !== pc.members.length) continue; // a member didn't fit: the array stays plain
+      const slots = this.mapClipSlots(pc.slots, (h) => holeMap.get(h), (t) => idMap.get(t));
+      if (!slots) continue; // a seed or member didn't fit: the array stays plain
       const p: Pattern = {
         id: this.id(),
         bodyId,
-        seed,
+        slots,
         layout: rotateLayout(cloneLayout(pc.layout), -body.angle), // world → the target body's frame
-        members,
       };
       this.patterns.push(p);
       patternMap.set(pc.tmp, p.id);
@@ -6519,7 +6709,7 @@ export class Scene {
       this.removePattern(pj.pattern.id);
       return;
     }
-    if (pj?.role === "seed") this.dissolvePattern(pj.pattern.id);
+    if (pj?.role === "seed") this.detachSlot(pj.pattern, pj.slot, false); // its copies stay as plain joints
     this.joints = this.joints.filter((j) => j.id !== id);
     this.pruneConstraints(new Set([id]));
     this.pruneGroups();
@@ -6884,21 +7074,40 @@ export class Scene {
 
   /** A loaded pattern record validated + deep-cloned, or nothing when it can't be trusted. */
   private sanitizePattern(raw: unknown): Pattern[] {
-    const p = raw as Partial<Pattern> | null;
-    if (!p || typeof p.id !== "number" || typeof p.bodyId !== "number" || !p.seed || !p.layout) return [];
+    const p = raw as (Partial<Pattern> & { seed?: unknown; members?: unknown }) | null;
+    if (!p || typeof p.id !== "number" || typeof p.bodyId !== "number" || !p.layout) return [];
     const body = this.getBody(p.bodyId);
     if (!body) return [];
     const isVec = (v: unknown): v is Vec2 =>
       !!v && typeof (v as Vec2).x === "number" && typeof (v as Vec2).y === "number" &&
       Number.isFinite((v as Vec2).x) && Number.isFinite((v as Vec2).y);
-    let seed: Pattern["seed"];
-    if (p.seed.kind === "hole") {
-      if (typeof p.seed.hole !== "number" || !body.holes?.[p.seed.hole]) return [];
-      seed = { kind: "hole", hole: p.seed.hole };
-    } else if (p.seed.kind === "joint") {
-      if (typeof p.seed.jointId !== "number" || this.getJoint(p.seed.jointId)?.bodyId !== body.id) return [];
-      seed = { kind: "joint", jointId: p.seed.jointId };
-    } else return [];
+    // v19–21 records carry one `seed` + `members`; since v22 a `slots` list. A slot whose
+    // seed is missing or repeated is dropped; a pattern with no slot left is dropped.
+    const rawSlots: unknown[] = Array.isArray(p.slots) ? p.slots : p.seed ? [{ seed: p.seed, members: p.members }] : [];
+    const slots: PatternSlot[] = [];
+    for (const rs of rawSlots) {
+      const s = rs as { seed?: { kind?: unknown; hole?: unknown; jointId?: unknown }; members?: unknown } | null;
+      const seed = s?.seed;
+      if (!seed) continue;
+      let rec: PatternSeedRec;
+      if (seed.kind === "hole") {
+        if (typeof seed.hole !== "number" || !body.holes?.[seed.hole]) continue;
+        rec = { kind: "hole", hole: seed.hole };
+      } else if (seed.kind === "joint") {
+        if (typeof seed.jointId !== "number" || this.getJoint(seed.jointId)?.bodyId !== body.id) continue;
+        rec = { kind: "joint", jointId: seed.jointId };
+      } else continue;
+      if (slots.some((x) => sameSeed(x.seed, rec))) continue;
+      const members = (Array.isArray(s.members) ? s.members : []).filter(
+        (m): m is number =>
+          typeof m === "number" &&
+          (rec.kind === "hole"
+            ? m !== rec.hole && !!body.holes?.[m]
+            : m !== rec.jointId && this.getJoint(m)?.bodyId === body.id)
+      );
+      slots.push({ seed: rec, members: [...new Set(members)] });
+    }
+    if (slots.length === 0) return [];
     let layout: PatternLayout;
     const l = p.layout as Partial<Extract<PatternLayout, { kind: "linear" }>> & Partial<Extract<PatternLayout, { kind: "circular" }>>;
     if (l.kind === "linear") {
@@ -6914,14 +7123,7 @@ export class Scene {
       layout = { kind: "circular", centre: vec(l.centre.x, l.centre.y), count: this.clampCount(l.count), rotate: l.rotate !== false };
       if (typeof l.angleStep === "number" && Number.isFinite(l.angleStep) && Math.abs(l.angleStep) >= 1e-9) layout.angleStep = l.angleStep;
     } else return [];
-    const members = (Array.isArray(p.members) ? p.members : []).filter(
-      (m): m is number =>
-        typeof m === "number" &&
-        (seed.kind === "hole"
-          ? m !== seed.hole && !!body.holes?.[m]
-          : m !== seed.jointId && this.getJoint(m)?.bodyId === body.id)
-    );
-    return [{ id: p.id, bodyId: body.id, seed, layout, members: [...new Set(members)] }];
+    return [{ id: p.id, bodyId: body.id, slots, layout }];
   }
 
   /** Snapshot of every body's pose, for save/restore around a simulation run. */

@@ -467,3 +467,20 @@ so running it changes nothing there.
   Nothing about the tool changed, and the on-canvas coincident **badge** (`◎`) is untouched —
   but the manual's generated glyph table (`glyphs.js`) and the Constraints group's toolbar
   illustration both render the toolbar icon, so both need reshooting with `npm run manual`.
+- **Dimensions on a patterned seed (2026-09-22).** Manual (Patterns topic, Measure topic): a
+  dimension with both ends on the seed — its diameter, the width between its own corners, its
+  distance to a body edge — drives it like any hole and every instance copies the result (in a
+  linear pattern the same works from one instance's own corners). Only a distance between two
+  instances (seed ↔ copy, copy ↔ copy) is refused, with a toast pointing at the pattern's
+  spacing label. Also (Driving dimensions topic): a dimension with an end on *any* hole no
+  longer takes the first-dimension uniform-scale shortcut — the hole reshapes or moves, the
+  outline stays.
+- **Multi-seed patterns (2026-09-22, format v22).** Manual (Linear / Circular pattern tool
+  topics, Patterns topic): with a pattern tool armed, Ctrl+click picks several holes / joints of
+  one body (Ctrl+click a picked one drops it; the layout preview shows once Ctrl is released,
+  and Ctrl+click still adds / removes seeds after the row exists); the group repeats as one, so
+  every instance reproduces the seeds' relative placement; a dimension between two seeds drives
+  that placement for every copy; the first pick is the anchor (dotted line / centre offset);
+  deleting one seed drops its copies from the array (they stay plain) and the pattern lives on.
+  The what's-this strings for the two pattern tools (`patternLinear` / `patternCircular` in
+  `src/main.ts`) do not mention Ctrl yet — reword in the same pass.

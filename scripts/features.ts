@@ -40,7 +40,7 @@ function source() {
 // --- 1) extractFeatures: a copied seed brings its members; internal constraints travel. ---
 {
   const { s, a, disk, square, p, j1, j2 } = source();
-  check("setup: pattern has 2 members", p.members.length === 2, `${p.members.length}`);
+  check("setup: pattern has 2 members", p.slots[0].members.length === 2, `${p.slots[0].members.length}`);
   const clip = s.extractFeatures(a.id, [disk, square], [j1.id, j2.id])!;
   check("clip exists", !!clip);
   check("clip holes = seed + members + square", clip.holes.length === 4, `${clip.holes.length}`);
@@ -49,7 +49,7 @@ function source() {
   check("rail travels", clip.sliders.length === 1);
   check("horizontal constraint travels", clip.sketch.length === 1 && clip.sketch[0].kind === "horizontal");
   check("driving dim travels", clip.dims.length === 1 && clip.dims[0].target === 50);
-  check("pattern travels with its members", clip.patterns.length === 1 && clip.patterns[0].members.length === 2);
+  check("pattern travels with its members", clip.patterns.length === 1 && clip.patterns[0].slots[0].members.length === 2);
   // A joints-only copy leaves the hole-anchored things behind.
   const jc = s.extractFeatures(a.id, [], [j1.id])!;
   check("joint-only clip: no holes / rail (other end missing) / constraint", jc.holes.length === 0 && jc.sliders.length === 0 && jc.sketch.length === 0 && jc.dims.length === 0);

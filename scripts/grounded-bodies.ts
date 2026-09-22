@@ -142,7 +142,7 @@ function moved(a: { pos: Vec2; angle: number }, b: { pos: Vec2; angle: number })
   const b = square(scene, 400, 200);
   scene.toggleBodyGround(a.id);
   const data = scene.serialize();
-  check("serialize is format v21", data.version === 21, `version ${data.version}`);
+  check("serialize is format v22", data.version === 22, `version ${data.version}`);
 
   const loaded = new Scene();
   loaded.load(JSON.parse(JSON.stringify(data)) as SceneData);

@@ -73,11 +73,11 @@ you can then drag and watch move.
   circles, arcs, text labels; Draw mode only, never simulated). Placement, dragging and drawing
   snap onto it in preference to the grid, and its points and edges take sketch constraints and
   measurements like any body corner or edge — see *Reference geometry* below.
-- **Pattern** — a **live array** of one hole or one joint on a body: a linear row, a two-direction
-  **grid**, or a circular arrangement around a centre. The instances are real holes / joints, but
-  they are **derived from the seed** — move or reshape the seed and every instance follows; edit
-  the count, spacing or angle on the canvas labels and the array re-lays itself. Delete the seed
-  to make the instances independent — see *Patterns* below.
+- **Pattern** — a **live array** of one or more holes / joints of a body: a linear row, a
+  two-direction **grid**, or a circular arrangement around a centre. The instances are real holes /
+  joints, but they are **derived from the seeds** — move or reshape a seed and every instance
+  follows; edit the count, spacing or angle on the canvas labels and the array re-lays itself.
+  Delete a seed to make its instances independent — see *Patterns* below.
 
 ## Usage
 
@@ -130,8 +130,8 @@ to **Select** mode. Press **Esc** to abort the current placement.
 | **Line** | `L` | A **reference segment**: two points, or press and drag. Endpoints that land on joints / corners / reference points are held there by a coincident; the segment takes H / V / parallel / perpendicular / **equal** constraints like a body edge. Reference only. |
 | **Arc** | `A` | A **reference arc**: click its start and end, then a point it passes through. Its three points are handles and references; placements snap onto the arc. Reference only. |
 | **Text** | `Shift+T` | A **label**: click where it goes, type, Enter. Clicked **on a body** it is anchored to that body and rides with it; on empty space it stays put. Height from the field that appears in the properties strip while the tool is armed. **Double-click** a label to edit it, drag to move, Delete to remove. Never simulated or exported. |
-| **Linear pattern** | `I` | Repeat a **hole** (click inside its cut-out) or a **joint** along a line: click where the **next instance** should go — the row appears (3 instances) and its **×count** label opens, so type the count and press Enter. The tool stays armed for an optional **second direction** (click where the first instance of the other direction goes — a grid), or press Enter / Esc to keep a single row. A direction within ~5° of horizontal / vertical gets an **H / V constraint** automatically, like a body edge. |
-| **Circular pattern** | `Q` | Repeat a hole or a joint around a **centre**: click the seed, then the centre (snaps to joints, hole centres, corners and the grid) — 6 instances spread evenly, each turned with the arc; the count label opens for typing. |
+| **Linear pattern** | `I` | Repeat a **hole** (click inside its cut-out) or a **joint** along a line: click where the **next instance** should go — the row appears (3 instances) and its **×count** label opens, so type the count and press Enter. **Ctrl+click** picks several features of one body instead (Ctrl+click again removes one): they repeat together, keeping their relative placement, and the layout preview appears once Ctrl is released. The tool stays armed for an optional **second direction** (click where the first instance of the other direction goes — a grid) and for more Ctrl+clicks, or press Enter / Esc to keep a single row. A direction within ~5° of horizontal / vertical gets an **H / V constraint** automatically, like a body edge. |
+| **Circular pattern** | `Q` | Repeat a hole or a joint — or, with **Ctrl+click**, several features of one body — around a **centre**: pick the seed(s), then click the centre (snaps to joints, hole centres, corners and the grid) — 6 instances spread evenly, each turned with the arc; the count label opens for typing. |
 | **Split** | `X` | Cut a body in two. Click a point on a body's **outline** (a corner, or anywhere on an edge) to start the cut, click inside the body to route it (as many vertices as you like — each kept inside), then click the outline again to finish: the body splits along that path into two bodies (same colour, grounded flag and group; the new one sits right above the original in the stacking order). Existing corners keep their rounding, the cut corners start sharp. Holes stay whole on their side (a cut through a hole is refused); joints stay where they are and belong to the side they're on; a rail or motor whose two joints end up on different sides is dropped. Bodies built from joints are converted to an editable sharp outline first. Esc aborts. |
 | **Joint** | `J` | Click inside a body to attach a joint; click where bodies overlap to drop one in each (pinned together); click **empty space** for a free, body-less joint. With **Object snap** on, the joint lands on the nearest corner / edge midpoint / centroid / **hole centre** / joint / guide point in range (else the grid). Drop a joint on a **rail (or rail node)** and it's automatically attached to that rail as a rider. An attached joint always lands **inside** its body — if grid snapping would push it outside, it's placed at the exact click point instead. |
 | **Weld** | `W` | Click where **bodies overlap** to weld them rigidly together at that point — a joint in each, sharing the position **and** locked at the drawn relative angle (no relative rotation; the angle re-captures from the drawn pose on every sim entry, like a slider's lock). Click an **existing pinned joint** to toggle its pin(s) **weld ↔ revolute**. |
@@ -268,17 +268,29 @@ Shift+drag *on* a body or joint is still the rigid drag described above.
 - **Handles**: click a label or the dotted line to select the pattern, then drag the **square at
   the last instance** to re-aim and re-space that direction, or the **centre crosshair** to move
   the circle's centre.
+- **Several features at once**: Ctrl+click holes and joints of one body while the tool is armed
+  (Ctrl+click a picked one to drop it) — the whole group repeats as one, so every instance
+  reproduces the seeds' relative placement, and a dimension **between two seeds** drives that
+  placement for every copy. The first pick is the layout's anchor (where the dotted line and
+  the centre offset are measured from). Deleting one seed takes its copies out of the array
+  (they stay as plain holes / joints) and the pattern carries on with the rest.
 - **Instances follow the seed**: drag the seed (dragging any instance does the same), reshape it,
-  round its corners or resize a round hole — every instance copies it. Instances that would fall
-  **outside the body** or **overlap** another hole / joint are ringed **red** so you can adjust
-  the count or spacing (they are never moved for you).
+  round its corners or resize a round hole — every instance copies it. **Dimensions and
+  constraints on the seed work as on any hole**: drive its diameter, the width between its own
+  corners or its distance from a body edge, and every instance takes the new shape or position
+  (in a linear pattern a dimension on one instance's own corners reaches the seed the same
+  way). Only a distance **between two instances** — seed to copy, or copy to copy — can't be
+  driven: that is the pattern's spacing, edited on its label (the toast says so). Instances that
+  would fall **outside the body** or **overlap** another hole / joint are ringed **red** so you
+  can adjust the count or spacing (they are never moved for you).
 - **Constraints on a direction**: the dotted line is a line reference — apply **Horizontal /
   Vertical / Parallel / Perpendicular** to it (or measure against it) like a body edge; the
   direction pivots about the seed to satisfy them, and stays constrained as the seed moves.
 - **Delete** with the pattern selected removes every instance and keeps the seed. Delete the
   **seed** hole / joint instead and the pattern dissolves: the instances stay as ordinary,
   independent holes / joints. Deleting one instance removes them all (the seed stays). Patterns
-  are saved with the file (format v19) and travel with copy / paste, mirror and scale.
+  are saved with the file (format v19; several seeds per pattern since v22) and travel with
+  copy / paste, mirror and scale (a feature copy carries a pattern only when every seed is in it).
 
 **Measurements.** The Measure tool (`D`) works in **both modes**, and each mode keeps its own
 set of measurements. What gets measured follows from the two references you pick:
@@ -349,8 +361,10 @@ remove it — all of this works in both modes. Measurements are saved with the m
   as another constraint tool). See *Implicit constraints while dragging* under Grid & snapping.
 - **Driving dimensions**: **double-click** a dimension's value, type a number, press Enter.
   The **first** driving dimension on an otherwise-unconstrained body **scales the whole body
-  uniformly** (same shape, new size); further dimensions move **only the involved nodes**
-  while every constraint and driving dimension holds. A **driven** (reference) dimension
+  uniformly** (same shape, new size) — unless an end of it is on a **hole**: a hole's own width,
+  diameter or distance from a corner always changes just that hole, the outline stays. Further
+  dimensions move **only the involved nodes** while every constraint and driving dimension
+  holds. A **driven** (reference) dimension
   shows its value **in parentheses**; a driving one shows it plain. Clear the field to turn a
   driving dimension back into a reference. A value the sketch can't reach is rejected with the
   same red flash and a toast naming what held the geometry.
@@ -732,7 +746,7 @@ npm install      # install dependencies
 npm run dev      # start the dev server (opens the app)
 npm run build    # type-check + production build into dist/
 npm run preview  # preview the production build
-npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, reference geometry, regular polygons, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (members riding with their seed), the context ghost (the enclosing assembly mapped into a definition's frame), the keymap (key spelling, slot resolution, conflicts, and the registry against the file and the markup)
+npm test         # headless tests: solver, persistence, body building, shape editing, edit utilities, actuators / motors, measurements, sketch constraints, groups (incl. free-joint members), grounded bodies, rigid-drag scoped solves, reference geometry, regular polygons, DXF import / units / holes, DXF / SVG cut-file export, hierarchical components, slider orientation locks, two-click sliders (construction, whole-slider deletion, actuator on the body's own rider), welds (rigid joints), pose-level driving dimensions, sketch constraints on components, live hole / joint patterns (several seeds per pattern, members riding with their seeds, dimensions on a seed), the context ghost (the enclosing assembly mapped into a definition's frame), the keymap (key spelling, slot resolution, conflicts, and the registry against the file and the markup)
 npm run manual   # regenerate the manual's illustrations (public/help/img) and toolbar glyph tables, and check that every help topic exists
 npm run keymap:file   # bring public/keymap.json's metadata in line (bindings untouched)
 npm run keymap:docs   # rewrite the shortcut lists in this file and in the manual
