@@ -847,8 +847,8 @@
     },
     {
       "id": "tool.equal",
-      "label": "Equal length",
-      "description": "Give two lines the same length.",
+      "label": "Equal",
+      "description": "Give two lines the same length, or two circles / rounded corners the same radius.",
       "group": "constraints",
       "context": "draw",
       "bindings": [

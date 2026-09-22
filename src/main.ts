@@ -43,6 +43,8 @@ import {
   sketchRefs,
   isMidpointHost,
   isCircleRef,
+  isLineRef,
+  isEqualRadiusConstraint,
   CONSTRAINT_NAME,
   measureInfoFor,
   measureAxisForPlacement,
@@ -62,6 +64,7 @@ import { solve, Driver, ConstraintBreak, SolveStats, SolveFreeze, solverConfig, 
 import {
   solveSketch, tryAddConstraint, autoConstrainBody, SketchBreak, AUTO_HV_TOL,
   anchorVarsForBody, anchorVarsForJoint, anchorVarsForGuide, anchorVarForGuidePoint, anchorVarForVertex,
+  enforceEqualRadii, equalRadiusPartners, equalRadiusViolated,
 } from "./sketch";
 import { applyDimensionValue, enforcePose, placeConstraint, poseConstraintViolated } from "./pose";
 import { render, RenderInput, PatternView, DARK_THEME, LIGHT_THEME, SketchGlyphView, GridStyle, GRID_STYLES, dimensionLabelHit, dimensionLabelWidth, LabelHit } from "./renderer";
@@ -2275,11 +2278,19 @@ const HINTS: Record<Mode | Tool | "select" | "viewRotate", string> = {
   vertical: "Click a body edge, rail or guideline — or two points — to make it vertical.",
   parallel: "Click two lines (body edges, rails or guidelines) to make them parallel.",
   perpendicular: "Click two lines (body edges, rails or guidelines) to make them perpendicular.",
-  equal: "Click two lines (body edges or rails) to make their lengths equal.",
+  equal: "Click two lines (body edges, rails or reference segments) to make their lengths equal — or two circles / rounded corners (a disk body's rim, a round hole, a rounded corner's arc, a reference circle or arc) to make their radii equal. The second takes the first one's value.", // live stage hint: equalHint()
   fixed: "Click a point (joint, body corner, polygon centre or reference point) to lock it where it is — or a line (body edge, rail or reference segment) to lock the line itself: its ends can still slide along it and stretch it, but the line can never turn or shift.",
   symmetric: "Click two points (joints, body corners, polygon centres or reference points) — or two lines (body edges, rails or reference segments) — then the mirror line: the two become mirror images across it.", // live stage hint: symmetricHint()
   tangent: "Click a circle or arc (a disk body's rim, a round hole, a reference circle or arc) and a line (body edge, rail or reference segment), in either order: the line becomes tangent to the circle.", // live stage hint: tangentHint()
 };
+
+/** Stage hint for the Equal tool: what the second click is for, matching the first. */
+function equalHint(): string {
+  if (constraintPicks.length === 0) return HINTS.equal;
+  return isLineRef(constraintPicks[0])
+    ? "Equal: now click the second line (a body edge, rail or reference segment) — it takes the first one's length."
+    : "Equal: now click the second circle or rounded corner (a disk's rim, a round hole, a rounded corner's arc, a reference circle) — it takes the first one's radius.";
+}
 
 /** Stage hint for the Tangential tool: what the second click is for. */
 function tangentHint(): string {
@@ -2355,6 +2366,7 @@ function updateHint(): void {
     : isShapeTool(tool) ? shapeHint()
     : tool === "symmetric" ? symmetricHint()
     : tool === "tangent" ? tangentHint()
+    : tool === "equal" ? equalHint()
     : HINTS[tool];
   setHint(containmentWarning() + groupScopeNote() + base);
 }
@@ -4792,11 +4804,26 @@ function constraintCircleRefAt(p: Vec2): MeasureRef | null {
   return g ? { kind: "guideCircle", guideId: g.id } : null;
 }
 
+/**
+ * The radius reference an Equal click would pick: a disk body's rim or a round hole
+ * (a `disk` ref), a reference circle or arc, or a rounded corner's arc (the corner's
+ * `vertex` — the measure tool's radius pick). A sharp corner has no arc to pick.
+ */
+function constraintRadiusRefAt(p: Vec2): MeasureRef | null {
+  return constraintCircleRefAt(p) ?? cornerArcAt(p)?.ref ?? null;
+}
+
 /** The reference the armed constraint tool would pick at `p` (for hover + clicks). */
 function constraintRefAt(p: Vec2): MeasureRef | null {
   const kind = tool as SketchConstraintKind;
-  if (kind === "parallel" || kind === "perpendicular" || kind === "equal") {
+  if (kind === "parallel" || kind === "perpendicular") {
     return constraintLineRefAt(p);
+  }
+  if (kind === "equal") {
+    // Two lines, or two radii: the first pick prefers a rim / arc (the more specific
+    // target where one meets an edge) but takes a line; the second must match it.
+    if (constraintPicks.length === 0) return constraintRadiusRefAt(p) ?? constraintLineRefAt(p);
+    return isLineRef(constraintPicks[0]) ? constraintLineRefAt(p) : constraintRadiusRefAt(p);
   }
   if (kind === "tangent") {
     // A circle and a line in either order: the first pick prefers a circle (a rim is
@@ -4857,6 +4884,24 @@ function reportUnusablePick(kind: SketchConstraintKind, p: Vec2): void {
       );
     else if (scene.bodyAt(p))
       notifyThrottled(`${name} attaches to elements, not to material — click a disk's rim, a round hole, an edge or a rail (a body's inside isn't one).`);
+    return;
+  }
+  if (kind === "equal") {
+    // Equal wants two lines or two radii; after the first pick, say which kind the second must match.
+    const first = constraintPicks[0];
+    if (first && isLineRef(first)) {
+      if (constraintRadiusRefAt(p)) notifyThrottled(`${name} has its first line — click the second line here (a body edge, a rail or a reference segment), not a circle: a length and a radius can't be made equal.`);
+      else if (constraintPointRefAt(p)) notifyThrottled(`${name} needs a line here — a body edge, a rail or a reference segment — not a point.`);
+      else if (scene.bodyAt(p)) notifyThrottled(`${name} attaches to elements, not to material — click an edge or a rail (a body's inside isn't one).`);
+    } else if (first) {
+      if (constraintLineRefAt(p)) notifyThrottled(`${name} has its first circle — click the second circle or rounded corner here (a disk's rim, a round hole, a rounded corner's arc, a reference circle), not a line: a radius and a length can't be made equal.`);
+      else if (constraintPointRefAt(p)) notifyThrottled(`${name} needs a circle or rounded corner here — a rim, a round hole or a rounded corner's arc — not a point.`);
+      else if (scene.bodyAt(p)) notifyThrottled(`${name} attaches to elements, not to material — click a rim, a rounded corner's arc or a reference circle (a body's inside isn't one).`);
+    } else if (constraintPointRefAt(p)) {
+      notifyThrottled(`${name} needs a line or a circle here — a body edge, a rail, a reference segment, a disk's rim or a rounded corner's arc — not a point (for a rounded corner, click its arc).`);
+    } else if (scene.bodyAt(p)) {
+      notifyThrottled(`${name} attaches to elements, not to material — click an edge, a rail, a rim or a rounded corner's arc (a body's inside isn't one).`);
+    }
     return;
   }
   // `constraintRefAt` already said no, so whichever shape the tool wants isn't here:
@@ -5795,6 +5840,33 @@ function demoteSizeDims(bodyId: number, hole: number | null, corner: ((index: nu
   }
   return any;
 }
+
+/**
+ * A direct resize of a radius — a rim / radius-handle drag, `[` / `]`, a reference
+ * circle's rim handle — is the reference for every radius made Equal to it: the
+ * partners' driving diameter / radius dimensions are demoted like the resized
+ * outline's own (the handle now sets the size), and the partners take the new value.
+ * Returns true when the element has partners at all (a partner disk's tangent line
+ * still needs a solve — the caller settles once the gesture ends).
+ */
+function propagateEqualRadii(ref: MeasureRef): boolean {
+  const partners = equalRadiusPartners(scene, ref);
+  if (!partners.length) return false;
+  for (const p of partners) {
+    if (p.kind === "disk") demoteSizeDims(p.bodyId, p.hole ?? null, null);
+    else if (p.kind === "vertex") {
+      const corner = scene.cornerOfRef(p);
+      if (corner) demoteSizeDims(corner.bodyId, corner.hole, scene.outlineRadiiUniform(corner.bodyId, corner.hole) ? null : (i) => i === corner.index);
+      else demoteSizeDims(p.bodyId, p.hole ?? null, null); // a disk named by its centre
+    }
+  }
+  enforceEqualRadii(scene, ref);
+  return true;
+}
+
+/** Whether the sketch says anything about rims — a tangent, an Equal between radii — so a
+ *  resize needs a settle solve (a plain radius change moves no vertex or joint). */
+const sketchNamesRadii = (): boolean => scene.sketch.some((c) => c.kind === "tangent" || isEqualRadiusConstraint(c));
 
 function filletDragRadius(body: Body, index: number, cursor: Vec2, hole: number | null): number | null {
   const verts = outlineControlWorld(body, hole);
@@ -7734,15 +7806,20 @@ canvas.addEventListener("mousemove", (e) => {
         if (body && scene.diskOfRef({ kind: "vertex", bodyId: body.id, index: 0, hole: hole ?? undefined })) {
           scene.setDiskRadius(bodyId, r, hole);
           demoteSizeDims(bodyId, hole, null); // the handle now sets the size
+          propagateEqualRadii(hole === null ? { kind: "disk", bodyId } : { kind: "disk", bodyId, hole });
         } else if (e.ctrlKey || e.metaKey) {
           // Ctrl: every corner of this outline follows the handle — the default is set
           // and per-corner overrides dropped, so the corners read as uniform from here on
           // (a radius dimension on any of them then drives them all).
           scene.setOutlineRadiusUniform(bodyId, r, hole);
           demoteSizeDims(bodyId, hole, null);
+          // Every corner changed: each carries the radii made Equal to it along.
+          for (const corner of scene.outlineCorners(bodyId, hole))
+            propagateEqualRadii(hole === null ? { kind: "vertex", bodyId, index: corner.index } : { kind: "vertex", bodyId, index: corner.index, hole });
         } else {
           scene.setBodyCornerRadius(bodyId, index, r, hole);
           demoteSizeDims(bodyId, hole, (i) => i === index); // the handle now sets this corner
+          propagateEqualRadii(hole === null ? { kind: "vertex", bodyId, index } : { kind: "vertex", bodyId, index, hole });
         }
         leftDrag.moved = true;
       }
@@ -7757,6 +7834,10 @@ canvas.addEventListener("mousemove", (e) => {
       const res = pick ? scene.resolveMeasureRef(pick) : null;
       const to = res?.kind === "point" ? res.p : snap(raw, leftDrag.id);
       scene.moveGuidePoint(leftDrag.id, leftDrag.which, to);
+      // A reference circle's rim handle is a direct resize — radii made Equal to it
+      // follow; so do the radii made equal to an arc, whose every point sets its radius.
+      const g = scene.getGuide(leftDrag.id);
+      if (g && (g.kind === "arc" || (g.kind === "circle" && leftDrag.which === "r"))) propagateEqualRadii({ kind: "guideCircle", guideId: g.id });
       leftDrag.moved = true;
       solveSketchLive(); // constraints on the guide hold while it follows
       return;
@@ -7876,10 +7957,14 @@ window.addEventListener("mouseup", (e) => {
       // released at is exactly the pose that gets persisted.
       if (finished.kind === "rigid") {
         timedSolve("rigidDrag", finished.driver, 100, undefined, finished.freeze);
-      } else if (finished.kind !== "measureLabel" && finished.kind !== "fillet" && finished.kind !== "patternHandle") {
+      } else if (finished.kind === "fillet") {
+        // A radius change moves no control vertex or joint, so the settle is only for
+        // what the sketch says about rims: a tangent line follows the resized disk, or
+        // a disk made Equal to the dragged radius (and any tangent on that one).
+        if (sketchNamesRadii()) solveSketchLive();
+      } else if (finished.kind !== "measureLabel" && finished.kind !== "patternHandle") {
         // Settle: one symmetric sketch solve at rest, repairing anything the anchored
-        // live solves couldn't satisfy without moving the dragged geometry. (A fillet
-        // drag needs none: a radius change moves no control vertices or joints.)
+        // live solves couldn't satisfy without moving the dragged geometry.
         solveSketchLive();
       }
       // Persist a reposition (a plain click just selects). A temporary context
@@ -8166,12 +8251,18 @@ function nudgeCornerRadius(step: number): void {
   if (disk) {
     scene.setDiskRadius(body.id, disk.r + step); // from the *effective* radius
     demoteSizeDims(body.id, null, null); // a direct resize overrides a driving diameter
+    propagateEqualRadii({ kind: "disk", bodyId: body.id });
   } else {
     scene.setBodyRadius(body.id, body.radius + step);
     // The default moved: radius dimensions on corners without their own override
     // were just overridden directly (overridden corners didn't change).
     demoteSizeDims(body.id, null, (i) => typeof body.radii?.[i] !== "number");
+    // …and those corners carry the radii made Equal to them along.
+    for (const corner of scene.outlineCorners(body.id, null)) {
+      if (typeof body.radii?.[corner.index] !== "number") propagateEqualRadii({ kind: "vertex", bodyId: body.id, index: corner.index });
+    }
   }
+  if (sketchNamesRadii()) solveSketchLive(); // a tangent line follows a resized rim
   markDirty();
 }
 const hasSelectedBody = (): boolean =>
@@ -9042,6 +9133,19 @@ function highlightOfRef(ref: MeasureRef): MeasureHighlight | null {
 }
 
 /**
+ * How a reference picked *for its radius* is highlighted (the Equal tool, an Equal
+ * between radii): a rounded corner as its arc — the measure tool's radius-pick picture
+ * — and anything else as `highlightOfRef` does (a circle as its rim).
+ */
+function radiusHighlightOfRef(ref: MeasureRef): MeasureHighlight | null {
+  if (ref.kind === "vertex") {
+    const arc = scene.cornerOfRef(ref)?.arc;
+    if (arc) return { kind: "arc", ...arc };
+  }
+  return highlightOfRef(ref);
+}
+
+/**
  * Whether the cursor is over the element a constraint reference names — a joint or a
  * body corner within pick range; for a vertex/edge, anywhere on the owning body counts
  * too (the whole body is the "parent" whose hover reveals its constraints); a rail's
@@ -9134,8 +9238,9 @@ function sketchGlyphsView(): SketchGlyphView[] {
       sketchInScope(c) && cursor !== null && badges.some((b) => dist(b, cursor!) <= GLYPH_PICK_RADIUS / view.scale);
     const hot = badgeHot || (cursor !== null && allRefs.some((ref) => refHovered(ref, cursor!)));
     // A pose constraint that can't currently hold (grounded partner, a def-edit reset,
-    // an instance rotated against it) shows in the error style, like a violated dim.
-    const violated = poseConstraintViolated(scene, c);
+    // an instance rotated against it) shows in the error style, like a violated dim —
+    // so does an Equal between radii whose two radii differ (a member nothing can set).
+    const violated = poseConstraintViolated(scene, c) || equalRadiusViolated(scene, c);
     out.push({ id: c.id, kind: c.kind, badges, faded: !hot && !violated, violated });
     if (badgeHot) hoveredBadge = out.length - 1;
   }
@@ -9145,7 +9250,7 @@ function sketchGlyphsView(): SketchGlyphView[] {
   if (hoveredBadge >= 0) {
     const c = scene.sketch.find((k) => k.id === out[hoveredBadge].id)!;
     const refs = sketchRefs(c)
-      .map(highlightOfRef)
+      .map(isEqualRadiusConstraint(c) ? radiusHighlightOfRef : highlightOfRef)
       .filter((r): r is MeasureHighlight => r !== null);
     // The link joins the two related elements (a symmetry's pair — its mirror is the
     // third; a tangent's circle and line touch by definition, so none).
@@ -9208,11 +9313,12 @@ function sketchLink(a: ResolvedMeasureRef, b: ResolvedMeasureRef): [Vec2, Vec2] 
 /** Constraint-tool overlay: the picked reference(s) and the one under the cursor. */
 function sketchDraftView(): { refs: MeasureHighlight[]; hover: MeasureHighlight | null } | null {
   if (tool === null || !CONSTRAINT_TOOLS.has(tool)) return null;
-  const refs = constraintPicks.map(highlightOfRef).filter((r): r is MeasureHighlight => r !== null);
+  const highlight = tool === "equal" ? radiusHighlightOfRef : highlightOfRef; // Equal picks a corner by its arc
+  const refs = constraintPicks.map(highlight).filter((r): r is MeasureHighlight => r !== null);
   let hover: MeasureHighlight | null = null;
   if (cursor) {
     const h = constraintRefAt(cursor);
-    hover = h ? highlightOfRef(h) : null;
+    hover = h ? highlight(h) : null;
   }
   return { refs, hover };
 }

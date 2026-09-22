@@ -16,11 +16,13 @@ import {
   sketchRefs,
   isCircleRef,
   isPointRef,
+  isEqualRadiusConstraint,
   Scene,
   SketchConstraint,
   Measurement,
   MeasureRef,
   VERTEX_LINK_EPS,
+  DIM_VIOLATION_TOL,
 } from "./model";
 import { Vec2, vec, add, sub, scale, dist, len, dot, perp, rotate, arcThrough, fitRegularPolygon, fitRegularPolygonRigid } from "./geometry";
 
@@ -1275,6 +1277,9 @@ function buildConstraintItem(
       },
     };
   }
+  // An Equal between two radii is not a solver item: a radius is a parameter, never a
+  // variable — `enforceEqualRadii` writes the followers once the solve is applied.
+  if (isEqualRadiusConstraint(c)) return null;
   // parallel / perpendicular / equal: two lines
   const ka = lineVarKeys(scene, c.refA);
   const kb = c.refB ? lineVarKeys(scene, c.refB) : null;
@@ -1886,8 +1891,7 @@ const APPLY_PASSES = 3;
  */
 export function solveSketch(scene: Scene, anchors?: ReadonlySet<string>): SketchBreak[] {
   const breaks = solveAndApply(scene, undefined, anchors);
-  enforceSizeDims(scene);
-  return breaks;
+  return breaks.concat(enforceSizeDims(scene));
 }
 
 /**
@@ -1896,9 +1900,10 @@ export function solveSketch(scene: Scene, anchors?: ReadonlySet<string>): Sketch
  * is independent of the vertex system — but a uniform body scale (first-dimension
  * behaviour) scales corner radii too, and this puts a dimensioned disk / corner back.
  * A dimension whose disk / corner is gone is left alone; it renders violated / not at
- * all.
+ * all. Then the Equals between radii are re-applied (`enforceEqualRadii` — a
+ * dimensioned member is what its class follows); their conflicts are the result.
  */
-export function enforceSizeDims(scene: Scene): void {
+export function enforceSizeDims(scene: Scene): SketchBreak[] {
   for (const m of scene.measurements) {
     if (m.mode !== "draw" || !m.driving || m.target === undefined) continue;
     if (m.axis === "diameter") {
@@ -1917,6 +1922,185 @@ export function enforceSizeDims(scene: Scene): void {
       scene.setRegularSize(size.bodyId, size.hole, size.size, m.target);
     }
   }
+  return enforceEqualRadii(scene);
+}
+
+// --- equal radii ---------------------------------------------------------------
+
+/**
+ * The key an Equal-between-radii member is grouped by — one per *radius*, whatever
+ * reference names it: a disk's `disk` ref and its centre `vertex` (how a diameter
+ * dimension names the disk) share a key, and a pattern member's hole keys as its
+ * seed's (the members copy the seed, so they are one radius). Null for a reference
+ * that names no radius (a line, a point, a disk that became a polygon).
+ */
+function radiusKey(scene: Scene, ref: MeasureRef): string | null {
+  const loop = (bodyId: number, hole: number | null): string =>
+    hole === null ? "outer" : String(scene.patternSeedHole(bodyId, hole));
+  if (ref.kind === "guideCircle") return scene.circleOfRef(ref) ? `gc:${ref.guideId}` : null;
+  if (ref.kind === "disk") return scene.circleOfRef(ref) ? `d:${ref.bodyId}:${loop(ref.bodyId, ref.hole ?? null)}` : null;
+  if (ref.kind === "vertex") {
+    const corner = scene.cornerOfRef(ref);
+    if (corner) return `v:${corner.bodyId}:${loop(corner.bodyId, corner.hole)}:${corner.index}`;
+    const disk = scene.diskOfRef(ref);
+    return disk ? `d:${disk.bodyId}:${loop(disk.bodyId, disk.hole)}` : null;
+  }
+  return null;
+}
+
+/** One equality class of radii: the references naming its members (one per radius, in
+ *  the order the Equals first named them) and the Equals that link them. */
+interface RadiusClass {
+  members: MeasureRef[];
+  constraints: SketchConstraint[];
+}
+
+/**
+ * The equality classes the Equals between radii form — union-find over `radiusKey`, so
+ * A = B and B = C make one class {A, B, C}. An Equal whose reference names no radius
+ * any more is skipped (pruning removes it with its element; a disk turned polygon
+ * takes its Equals with it in `shiftMeasureIndices`).
+ */
+function radiusClasses(scene: Scene): RadiusClass[] {
+  const parent = new Map<string, string>();
+  const find = (k: string): string => {
+    let r = k;
+    while (parent.get(r) !== r) r = parent.get(r)!;
+    return r;
+  };
+  const firstRef = new Map<string, MeasureRef>(); // insertion order = first-named order
+  const links: { c: SketchConstraint; key: string }[] = [];
+  for (const c of scene.sketch) {
+    if (!isEqualRadiusConstraint(c) || !c.refB) continue;
+    const ka = radiusKey(scene, c.refA);
+    const kb = radiusKey(scene, c.refB);
+    if (!ka || !kb) continue;
+    for (const [k, ref] of [[ka, c.refA], [kb, c.refB]] as const) {
+      if (!parent.has(k)) parent.set(k, k);
+      if (!firstRef.has(k)) firstRef.set(k, ref);
+    }
+    const ra = find(ka);
+    const rb = find(kb);
+    if (ra !== rb) parent.set(rb, ra);
+    links.push({ c, key: ka });
+  }
+  const byRoot = new Map<string, RadiusClass>();
+  const classOf = (k: string): RadiusClass => {
+    const root = find(k);
+    let cl = byRoot.get(root);
+    if (!cl) byRoot.set(root, (cl = { members: [], constraints: [] }));
+    return cl;
+  };
+  for (const [k, ref] of firstRef) classOf(k).members.push(ref);
+  for (const { c, key } of links) classOf(key).constraints.push(c);
+  return [...byRoot.values()];
+}
+
+/**
+ * Re-apply every Equal between radii (`isEqualRadiusConstraint`): the members of each
+ * equality class — every radius linked to the others through one or more Equals — are
+ * written to one value. A radius is a parameter, not a solver variable, so this runs
+ * on the applied scene like `enforceSizeDims` does, and the value comes from whoever
+ * cannot change, in this order:
+ *  1. a **driving diameter / radius dimension** on a member — its target;
+ *  2. a member nothing can set — a reference arc (its radius follows its three points)
+ *     or component-instance geometry (its shape is the definition's) — its radius;
+ *  3. `source`, the member the user is acting on — a rim / radius-handle drag, `[` `]`,
+ *     a dimension edit, the first pick of a new Equal;
+ *  4. else the first member named, which only decides anything when the class
+ *     disagrees with no edit behind it (a loaded file) and is a no-op otherwise.
+ * Two of one rank that disagree beyond the solver tolerance are a **conflict**: the
+ * class is left untouched and the items at odds are returned as breaks — the
+ * dimensions, plus the class's Equals when a dimension asks something immovable to
+ * change — with reject semantics, like any other unsatisfiable sketch item.
+ */
+export function enforceEqualRadii(scene: Scene, source?: MeasureRef): SketchBreak[] {
+  const classes = radiusClasses(scene);
+  if (!classes.length) return [];
+  const tol = sketchConfig.tol;
+  const sourceKey = source ? radiusKey(scene, source) : null;
+  // Driving size dimensions by the radius they hold: a diameter's disk, a radius' corner.
+  const dims = new Map<string, { m: Measurement; r: number }[]>();
+  for (const m of scene.measurements) {
+    if (m.mode !== "draw" || !m.driving || m.target === undefined) continue;
+    if (m.axis !== "diameter" && m.axis !== "radius") continue;
+    const k = radiusKey(scene, m.refA);
+    if (!k) continue;
+    const list = dims.get(k) ?? [];
+    list.push({ m, r: m.axis === "diameter" ? m.target / 2 : m.target });
+    dims.set(k, list);
+  }
+  const breaks: SketchBreak[] = [];
+  for (const cl of classes) {
+    const live: { ref: MeasureRef; key: string; r: number }[] = [];
+    for (const ref of cl.members) {
+      const key = radiusKey(scene, ref);
+      const r = key ? scene.radiusOfRef(ref) : null;
+      if (key && r !== null) live.push({ ref, key, r });
+    }
+    if (!live.length) continue;
+    const held = live.flatMap((mem) => dims.get(mem.key) ?? []);
+    const rigid = live.filter((mem) => !scene.radiusSettable(mem.ref) || scene.refInstanceOwned(mem.ref));
+    const asBreaks = (items: { id: number; kind: SketchBreak["kind"]; r: number }[], target: number): SketchBreak[] =>
+      items.map((i) => ({ id: i.id, kind: i.kind, error: Math.abs(i.r - target) }));
+    const dimItems = held.map((h) => ({ id: h.m.id, kind: "dimension" as const, r: h.r }));
+    const eqItems = (r: number) => cl.constraints.map((c) => ({ id: c.id, kind: "constraint" as const, r }));
+    let target: number;
+    if (held.length) {
+      target = held[0].r;
+      if (held.some((h) => Math.abs(h.r - target) > tol)) {
+        breaks.push(...asBreaks(dimItems, target)); // two dimensions, one radius
+        continue;
+      }
+      const stuck = rigid.filter((mem) => Math.abs(mem.r - target) > tol);
+      if (stuck.length) {
+        // The dimension asks a radius nothing can set to change.
+        breaks.push(...asBreaks(dimItems, target), ...asBreaks(eqItems(stuck[0].r), target));
+        continue;
+      }
+    } else if (rigid.length) {
+      target = rigid[0].r;
+      const stuck = rigid.filter((mem) => Math.abs(mem.r - target) > tol);
+      if (stuck.length) {
+        breaks.push(...asBreaks(eqItems(stuck[0].r), target)); // two immovable radii that differ
+        continue;
+      }
+    } else {
+      target = (live.find((mem) => mem.key === sourceKey) ?? live[0]).r;
+    }
+    for (const mem of live) {
+      if (Math.abs(mem.r - target) <= tol) continue;
+      if (!scene.setRadiusOfRef(mem.ref, target)) breaks.push(...asBreaks(eqItems(mem.r), target));
+    }
+  }
+  return breaks;
+}
+
+/**
+ * The other radii made Equal to a reference's — its class's members minus the radius
+ * itself (by `radiusKey`, so a disk asked about through its centre vertex finds the
+ * partners of its `disk` ref). Empty when no Equal names it.
+ */
+export function equalRadiusPartners(scene: Scene, ref: MeasureRef): MeasureRef[] {
+  const key = radiusKey(scene, ref);
+  if (!key) return [];
+  for (const cl of radiusClasses(scene)) {
+    const keys = cl.members.map((m) => radiusKey(scene, m));
+    if (keys.includes(key)) return cl.members.filter((_, i) => keys[i] !== key);
+  }
+  return [];
+}
+
+/**
+ * Whether an Equal between radii currently fails to hold — its two radii differ beyond
+ * the display tolerance (a member nothing could set, a definition edit): rendered in
+ * the error style, like a violated dimension. False for every other constraint.
+ */
+export function equalRadiusViolated(scene: Scene, c: SketchConstraint): boolean {
+  if (!isEqualRadiusConstraint(c) || !c.refB) return false;
+  const a = scene.radiusOfRef(c.refA);
+  const b = scene.radiusOfRef(c.refB);
+  return a !== null && b !== null && Math.abs(a - b) > DIM_VIOLATION_TOL;
 }
 
 
@@ -1979,11 +2163,19 @@ export function tryAddConstraint(
   refB?: MeasureRef,
   mirror?: MeasureRef
 ): { constraint: SketchConstraint | null; breaks: SketchBreak[] } {
+  // An Equal between radii writes its followers *before* the solve, the first pick as
+  // the reference (the user's "make B like A"), so the solve sees the final rims and a
+  // follower disk's tangent line comes along. Having written, it reverts as a whole on
+  // failure — a solver item that fails has touched nothing, this one has.
+  const radii = isEqualRadiusConstraint({ kind, refA, refB: refB ?? null });
+  const snap = radii ? snapshot(scene) : null;
   const c = scene.addSketchConstraint(kind, refA, refB, mirror);
   if (!c) return { constraint: null, breaks: [] };
-  const breaks = solveSketch(scene);
+  let breaks = radii ? enforceEqualRadii(scene, c.refA) : [];
+  if (!breaks.length) breaks = solveSketch(scene);
   if (breaks.length) {
-    scene.removeSketchConstraint(c.id);
+    if (snap) restore(scene, snap);
+    else scene.removeSketchConstraint(c.id);
     return { constraint: null, breaks };
   }
   return { constraint: c, breaks: [] };
@@ -2060,12 +2252,23 @@ export function applyDrivingDimension(
   if (m.axis === "radius") {
     // A corner's rounding radius is its own parameter: set it directly (every corner of
     // a uniform outline, else just this one — `setCornerRadiusDriven`). No vertex or
-    // joint moves, so nothing else in the sketch can be disturbed. (A pattern hole's
+    // joint moves, so nothing else in the sketch can be disturbed — unless radii are
+    // made Equal to this one: they follow (a driving dimension outranks the class's
+    // other members; a second dimension in the class that disagrees is the conflict),
+    // and a follower disk's tangent line then needs the solve. (A pattern hole's
     // corner is fine here: the seed's radius is what the members copy.)
     const corner = scene.cornerOfRef(m.refA);
     if (!corner) return reject;
+    const snap = snapshot(scene);
     scene.setCornerRadiusDriven(corner.bodyId, corner.index, target, corner.hole);
     scene.setMeasurementDriving(m.id, target);
+    const partners = equalRadiusPartners(scene, m.refA);
+    let breaks = partners.length ? enforceEqualRadii(scene, m.refA) : [];
+    if (!breaks.length && partners.length) breaks = solveAndApply(scene);
+    if (breaks.length) {
+      restore(scene, snap);
+      return breaks;
+    }
     return [];
   }
   // Ends on two different instances of one pattern (seed ↔ member, member ↔ member):
@@ -2085,12 +2288,16 @@ export function applyDrivingDimension(
     if (!disk) return reject;
     const snap = snapshot(scene);
     scene.setDiskRadius(disk.bodyId, target / 2, disk.hole);
-    const breaks = solveAndApply(scene);
+    scene.setMeasurementDriving(m.id, target);
+    // Radii made Equal to this disk's follow it first (a driving dimension outranks the
+    // class's other members; a second dimension in the class that disagrees is the
+    // conflict), then the solve moves whatever the sketch says about the new rims.
+    let breaks = enforceEqualRadii(scene, m.refA);
+    if (!breaks.length) breaks = solveAndApply(scene);
     if (breaks.length) {
       restore(scene, snap);
       return breaks;
     }
-    scene.setMeasurementDriving(m.id, target);
     return [];
   }
   const size = scene.regularSizeOfDim(m);

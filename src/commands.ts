@@ -362,8 +362,8 @@ export const COMMANDS = [
     description: "Make two points share a position, or hold a point on a line.",
   },
   {
-    id: "tool.equal", label: "Equal length", group: "constraints", context: "draw", tool: "equal",
-    description: "Give two lines the same length.",
+    id: "tool.equal", label: "Equal", group: "constraints", context: "draw", tool: "equal",
+    description: "Give two lines the same length, or two circles / rounded corners the same radius.",
   },
   {
     id: "tool.horizontal", label: "Horizontal", group: "constraints", context: "draw", tool: "horizontal",

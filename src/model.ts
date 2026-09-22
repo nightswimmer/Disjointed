@@ -624,12 +624,24 @@ export function isLineRef(r: MeasureRef | null | undefined): boolean {
 
 /**
  * Whether a reference names a **circle** — a disk outline (disk body / circular hole)
- * or a reference circle / arc. The only constraint that takes one is `tangent`; every
- * generic path (`resolveMeasureRef`, badges, pruning) sees a circle as its centre point,
- * and `Scene.circleOfRef` gives the radius to whoever needs the circle itself.
+ * or a reference circle / arc. The constraints that take one are `tangent` and the
+ * radius form of `equal`; every generic path (`resolveMeasureRef`, badges, pruning)
+ * sees a circle as its centre point, and `Scene.circleOfRef` gives the radius to
+ * whoever needs the circle itself.
  */
 export function isCircleRef(r: MeasureRef | null | undefined): boolean {
   return !!r && (r.kind === "disk" || r.kind === "guideCircle");
+}
+
+/**
+ * Whether an `equal` constraint relates two **radii** rather than two lengths: its
+ * references are circles (`disk`, `guideCircle`) or roundable corners (`vertex`), never
+ * lines. A radius is a parameter, not a solver variable, so the sketch solver builds no
+ * item for these — `enforceEqualRadii` (sketch.ts) writes the followers after every
+ * solve, the way driving diameter / radius dimensions are re-applied.
+ */
+export function isEqualRadiusConstraint(c: { kind: SketchConstraintKind; refA: MeasureRef; refB: MeasureRef | null }): boolean {
+  return c.kind === "equal" && !!c.refB && !isLineRef(c.refA) && !isLineRef(c.refB);
 }
 
 /**
@@ -674,7 +686,9 @@ export interface Measurement {
  * `coincident` — two points share a position, or a point lies on an infinite line;
  * `horizontal`/`vertical` — a line (or a point pair) is axis-aligned;
  * `parallel`/`perpendicular` — two lines' directions; `equal` — two lines have equal
- * length; `fixed` — a single reference is nailed down where it is (a point keeps its
+ * length, or two **radii** are equal (a disk body, a round hole, a rounded corner, a
+ * reference circle or arc — see `Scene.radiusOfRef`); `fixed` — a single reference is
+ * nailed down where it is (a point keeps its
  * world position, a line keeps its angle); `symmetric` — two points, or two lines, are
  * mirror images of each other across a third reference, the `mirror` line; `tangent` —
  * a line touches a circle (a disk body, a circular hole, a reference circle or arc):
@@ -698,7 +712,10 @@ export type SketchConstraintKind =
  * null for horizontal/vertical applied to a single line reference, and always for
  * `fixed`; `mirror` exists only on `symmetric`. Solvable point refs are joints and body
  * control vertices (`bodyPoint` refs are measurement-only); line refs are slider rails
- * and body control edges; `tangent` stores its circle as `refA` and its line as `refB`.
+ * and body control edges; `tangent` stores its circle as `refA` and its line as `refB`;
+ * an `equal` between radii names each radius the way the measure tool does — a disk or
+ * round hole as a `disk` ref, a rounded corner as its `vertex`, a reference circle / arc
+ * as a `guideCircle` (`isEqualRadiusConstraint` tells it from the length form).
  * Enumerate a constraint's references through `sketchRefs`,
  * never as `[refA, refB]`, so the third one is never left behind.
  */
@@ -3725,6 +3742,69 @@ export class Scene {
   }
 
   /**
+   * The **radius** a reference names, for the Equal constraint: a disk body or circular
+   * hole (`disk`), a reference circle or the circle a reference arc lies on
+   * (`guideCircle`), or a roundable corner — a `vertex` ref on any non-disk outline, its
+   * effective rounding radius (0 when sharp). A vertex whose outline has shrunk to a
+   * single point names that disk's radius, so a corner that became a disk still reads.
+   * Null for every other reference kind and for a reference that no longer resolves.
+   */
+  radiusOfRef(ref: MeasureRef): number | null {
+    if (ref.kind === "vertex") {
+      const corner = this.cornerOfRef(ref);
+      if (corner) return corner.r;
+      return this.diskOfRef(ref)?.r ?? null;
+    }
+    return this.circleOfRef(ref)?.r ?? null;
+  }
+
+  /**
+   * Whether the radius a reference names can be **set** (`setRadiusOfRef`): every radius
+   * but a reference arc's. An arc is three points, its radius derived from them — the
+   * sketch solver reshapes it and nothing sets its radius — so it can only be what
+   * other radii are made equal *to*.
+   */
+  radiusSettable(ref: MeasureRef): boolean {
+    if (ref.kind === "guideCircle") return this.getGuide(ref.guideId)?.kind === "circle";
+    return this.radiusOfRef(ref) !== null;
+  }
+
+  /**
+   * Set the radius a reference names (see `radiusOfRef`): a disk's radius
+   * (`setDiskRadius`), a corner's rounding as a driving radius dimension sets it — every
+   * corner of a uniform outline, else that one (`setCornerRadiusDriven`) — or a
+   * reference circle's `r`. A pattern member's hole edits the seed hole (members are
+   * derived from it). False when the reference names no settable radius: a reference
+   * arc, a stale reference, a negative value.
+   */
+  setRadiusOfRef(ref: MeasureRef, r: number): boolean {
+    if (!(r >= 0)) return false;
+    if (ref.kind === "disk") {
+      if (!this.circleOfRef(ref)) return false;
+      this.setDiskRadius(ref.bodyId, r, ref.hole === undefined ? null : this.patternSeedHole(ref.bodyId, ref.hole));
+      return true;
+    }
+    if (ref.kind === "vertex") {
+      const corner = this.cornerOfRef(ref);
+      if (corner) {
+        this.setCornerRadiusDriven(corner.bodyId, corner.index, r, corner.hole);
+        return true;
+      }
+      const disk = this.diskOfRef(ref);
+      if (!disk) return false;
+      this.setDiskRadius(disk.bodyId, r, disk.hole === null ? null : this.patternSeedHole(disk.bodyId, disk.hole));
+      return true;
+    }
+    if (ref.kind === "guideCircle") {
+      const g = this.getGuide(ref.guideId);
+      if (!g || g.kind !== "circle") return false;
+      g.r = Math.max(Scene.GUIDE_MIN_SPAN, r);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * The two point references at the ends of a line reference — a body / hole edge's
    * corners, a reference polyline edge's two points, or a rail's joints — so a single
    * measure-tool pick on the line can stand for a dimension between its ends (the same
@@ -3961,6 +4041,25 @@ export class Scene {
         if (isLineRef(refA) && isLineRef(b)) return "Tangential relates a line to a circle or arc — not two lines.";
         return "Tangential takes a circle or arc (a disk, a circular hole, a reference circle or arc) and a line (a body edge, rail or reference segment).";
       }
+    } else if (kind === "equal") {
+      // Two lengths, or two radii — a line and a circle have nothing in common to equalise.
+      if (!b) return "Equal needs two references: two lines, or two circles / rounded corners.";
+      const lines = isLineRef(refA) && isLineRef(b);
+      const radA = !isLineRef(refA) && this.radiusOfRef(refA) !== null;
+      const radB = !isLineRef(b) && this.radiusOfRef(b) !== null;
+      if (!lines && !(radA && radB)) {
+        if ((isLineRef(refA) && radB) || (radA && isLineRef(b)))
+          return "Equal relates two lengths or two radii — a line and a circle can't be made equal to one another.";
+        return "Equal takes two lines (body edges, rails or reference segments), or two circles / rounded corners (a disk body's rim, a round hole, a rounded corner's arc, a reference circle or arc).";
+      }
+      if (!lines) {
+        // Members of one pattern already share their seed's radius — nothing to equalise.
+        if (this.patternSpannedBy(refA, b))
+          return "Those are two instances of one pattern — the copies already have the seed's radius.";
+        // A reference arc's radius follows its three points: it can be copied, not set.
+        if (!this.radiusSettable(refA) && !this.radiusSettable(b))
+          return "A reference arc's radius follows its three points, so Equal can't set it — one of the two must be a disk, a round hole, a rounded corner or a reference circle.";
+      }
     } else if (!b || !isLineRef(refA) || !isLineRef(b)) {
       return `${name} needs two lines (body edges, rails or reference segments).`;
     }
@@ -3981,10 +4080,13 @@ export class Scene {
     // variables are immovable in the sketch solver — see varRank in sketch.ts). One
     // whose every end is instance-owned is a *pose constraint* (pose.ts): it moves
     // rigid parts, so it's rejected only when no pose can satisfy it — two ends rigid
-    // to one another (same body / chassis group), or "equal" (both lengths locked).
+    // to one another (same body / chassis group), or "equal" (both lengths — or both
+    // radii — locked).
     if (this.refInstanceOwned(refA) && (!b || this.refInstanceOwned(b)) && (!mirror || this.refInstanceOwned(mirror))) {
-      if (kind === "equal")
-        return "Both lengths belong to component instances, and an instance's shape comes from its definition — open the definition to make them equal there.";
+      if (kind === "equal") {
+        const what = isLineRef(refA) ? "lengths" : "radii";
+        return `Both ${what} belong to component instances, and an instance's shape comes from its definition — open the definition to make them equal there.`;
+      }
       if (b) {
         // (A symmetric pair rigid to one another can't be posed either — only the two
         // objects move, never the mirror, so the mirror's unit is free to be either.)
@@ -4002,7 +4104,10 @@ export class Scene {
    * `coincident` takes two point refs, or a point ref + a line ref (the point is held
    * on the **infinite** line; normalized so the point is stored as `refA`);
    * `horizontal`/`vertical` take one line ref (refB
-   * omitted) or two point refs; `parallel`/`perpendicular`/`equal` take two line refs;
+   * omitted) or two point refs; `parallel`/`perpendicular` take two line refs, `equal`
+   * two line refs (equal lengths) or two radius refs (equal radii — a `disk`, a rounded
+   * corner's `vertex`, a `guideCircle`; see `radiusOfRef`, and `radiusSettable` for the
+   * one that can only be copied, a reference arc);
    * `symmetric` takes two point refs or two line refs plus the `mirror` line they
    * reflect across; `tangent` takes a circle ref and a line ref (either order —
    * normalized so the circle is stored as `refA`).

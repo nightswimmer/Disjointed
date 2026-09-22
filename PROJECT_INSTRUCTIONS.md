@@ -108,7 +108,11 @@ motion; actuators / motors animate.
   centre point** through `resolveMeasureRef`, so label anchors, badges, hover, pruning and
   every remap treat them like a point, and `circleOfRef` hands the radius to the few places
   that need the circle itself (the `tangent` items, the rim highlight
-  `circleHighlightOfRef`). Only `tangent` accepts one (stored as `refA`, the line as `refB`).
+  `circleHighlightOfRef`). `tangent` takes one (stored as `refA`, the line as `refB`); the
+  **radius form of `equal`** takes two *radius refs* — a `disk`, a `guideCircle`, or a rounded
+  corner's `vertex` — told from the length form by `isEqualRadiusConstraint` (kind-based: no
+  line ref), and read / written through `radiusOfRef` / `setRadiusOfRef` (`radiusSettable` is
+  false only for a reference arc).
   A `disk` ref rides every remap site `vertex` / `edge` / `centre` ride on holes, and
   `shiftMeasureIndices` also drops it when a node added to the outline stops it being a disk
   (an outer disk cut, split or combined is a polygon afterwards: its refs go stale).
@@ -254,6 +258,26 @@ motion; actuators / motors animate.
   sweeps left 0.002 on 6000-unit geometry); the angle form settles in ~6 sweeps. That is
   the "line blends smoothly into an arc" CAD idiom. `sketchConfig.trace` is the per-sweep
   residual hook that found it — use it before guessing.
+- **Equal between radii is a parameter pass, not a solver item** (`enforceEqualRadii`,
+  2026-09-22). Radii are never variables, so an `equal` whose refs are circles / rounded
+  corners builds no item; `enforceSizeDims` re-applies the **equality classes** after every
+  solve (union-find over `radiusKey`: A = B, B = C is one class; a disk and its centre vertex —
+  how a diameter dim names it — are one key; a pattern member keys as its seed). The class
+  value comes from whoever cannot change, in order: a driving size dimension → a member
+  nothing can set (a reference arc is three points the solver reshapes; instance geometry is
+  the def's) → the `source` the caller names (the first pick on creation, the element just
+  resized) → the first-named member. Same-rank disagreement is a **conflict**: the class is
+  left alone and the breaks name the dims (plus the class's Equals when a dim asks an
+  immovable to change). `tryAddConstraint` and the diameter / radius branches of
+  `applyDrivingDimension` run the pass *before* their solve so tangents see the final rims,
+  and snapshot / restore around it — the write has happened by the time a solve can fail.
+  In main.ts a direct resize (`propagateEqualRadii`) demotes the **partners'** size dims like
+  the resized outline's own, and a fillet drag / `[` `]` now settle-solve when the sketch has
+  a tangent or a radius Equal (before, nothing solved after a rim drag, so a tangent line
+  lagged until the next edit). Refused by `sketchConstraintProblem`: a line with a circle,
+  two arcs (neither settable), seed ↔ member (redundant), two instance radii. Known
+  ping-pong (accepted, same as radius dims): two classes each holding a different corner of
+  one *uniform* outline, since a corner write there sets every corner.
 - **Regular polygons are an invariant, not constraints**: rigid weighted fit per solve (a similarity
   fit let pinching corrections shrink it sweep after sweep); H/V/parallel/perpendicular on an edge
   turn it in one step; **a dimension never turns a regular polygon** (that solver item could stall
@@ -480,7 +504,10 @@ rigid arc / locked disk / equal ranks; drag follow; a diameter edit re-solving t
 conflict reject; remaps: node added to the hole, hole removal, cascades, copy/paste, load;
 sketch vs pose route; the line-blends-into-arc idiom on the field-repro geometry — two long
 reference lines and a ~154° arc on 6000-unit coordinates — incl.
-sweep count, an H-held line, point-on-line pinning and a drag of the shared end) · midpoint (midpoint refs: resolve, validate, solve, who
+sweep count, an H-held line, point-on-line pinning and a drag of the shared end) · equal-radius
+(validation — lengths vs radii, arcs copy-only, seed ↔ member, instances; who follows — first
+pick, dimension, arc, instance, direct resize; classes; uniform vs mixed corners; a follower
+disk's tangent; conflicts untouched; the violated flag; remaps, load, copy/paste) · midpoint (midpoint refs: resolve, validate, solve, who
 moves, follow-the-line remaps, load) · groups · group-joints · grounded-bodies ·
 freeze-drag · slider-locks · two-click-slider · welds (incl. chain regression with solver stats) ·
 components · pose-dims · pose-constraints · split-combine · shapes (cut, references, v21 load) ·
@@ -527,8 +554,8 @@ Each script is a plain assertion list — read it for the exact cases.
   direction with its pill glyph / glyph button / off-line leader, the Symmetrical
   constraint, the Tangential constraint, group isolation (double-click into a group),
   recolouring a whole selection, the spoken refusals / longer conflict flash, dimensions on a
-  patterned seed, multi-seed (Ctrl+click) patterns, the green pattern accent, and stale
-  what's-this strings. Manual exceptions so far: **text-only**
+  patterned seed, multi-seed (Ctrl+click) patterns, the green pattern accent, Equal on radii
+  (label now "Equal"), and stale what's-this strings. Manual exceptions so far: **text-only**
   `tool-fixed`, `tool-symmetric` and `tool-tangent` topics had to be written, because
   `npm run manual` hard-fails on a topic the app can ask for and every `data-tool` button
   implies one — all three still need the illustration pass like the rest.
@@ -573,7 +600,10 @@ Each script is a plain assertion list — read it for the exact cases.
 - **Components**: no per-instance scaling; no ports; per-instance actuator/motor speed overrides are
   lost on cascade; no thumbnails / drag-to-place in the browser; pose dims between instances aren't
   carried by copy/paste; a refused pose constraint gives no feedback (nothing to flash).
-- **Sketch**: driving angle dimensions; radius dim on a sharp corner can't be picked. The implicit
+- **Sketch**: driving angle dimensions; radius dim on a sharp corner can't be picked (nor can Equal
+  pick one — round it first; the model accepts a sharp corner's vertex as a radius of 0); Equal can
+  copy a reference arc's radius but not set it — a real arc parametrisation (HANDOFF.md, the
+  Tangential pass) would lift that. The implicit
   constraints' switch ships with no key (it is `sketch.autoConstraints` in the registry, so giving
   it one is now a line in the keymap rather than a code change), and there is no point-on-point coincident between
   a dragged *line* and a candidate (lines only take point-on-line). Midpoints are drag / placement

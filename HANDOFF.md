@@ -484,3 +484,15 @@ so running it changes nothing there.
   deleting one seed drops its copies from the array (they stay plain) and the pattern lives on.
   The what's-this strings for the two pattern tools (`patternLinear` / `patternCircular` in
   `src/main.ts`) do not mention Ctrl yet — reword in the same pass.
+- **Equal works on radii (2026-09-22).** Manual (Equal / constraints topic, the `equal`
+  what's-this entry): with Equal armed, click two circles instead of two lines — a disk body's
+  rim, a round hole, a rounded corner's **arc**, a reference circle or arc, in any mix — and the
+  second takes the first one's radius; a line and a circle together are refused. Who follows:
+  a driving diameter / radius dimension on any member wins (a second dimension that disagrees
+  is rejected with both flashing), then a reference arc or component-instance geometry (they
+  can only be copied), then whatever the user just resized (rim / radius handle, `[` `]`, a
+  reference circle's handle — the partners' size dimensions are demoted like the resized
+  outline's own). Equals chain (A = B, B = C is one class); a follower disk's tangent line
+  re-solves; the badge is `=` at each element and turns red while the radii differ (an arc
+  reshaped). The command label changed from "Equal length" to "Equal" — the `#shortcuts`
+  list needs `npm run keymap:docs` (README's Shortcut column is unchanged: still `E`).

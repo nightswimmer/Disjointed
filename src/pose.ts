@@ -398,7 +398,8 @@ function constraintItem(scene: Scene, c: SketchConstraint): PoseItem {
       };
     }
     case "equal":
-      // Both lengths are locked to their definitions — never satisfiable as a pose.
+      // Both lengths (or both radii) are locked to their definitions — never
+      // satisfiable as a pose.
       return { id: c.id, kind: "constraint", refA: c.refA, refB: c.refB, error: () => Infinity, correction: () => null };
     case "tangent":
       // The circle's centre one radius off the infinite line, on its current side: the
