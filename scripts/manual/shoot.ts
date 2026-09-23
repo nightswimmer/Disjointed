@@ -11,7 +11,10 @@
  * through Playwright with the automation hook (src/automation.ts, `?automation`), and:
  *   - "svg" shots replay the live renderer into an SVG (vector, theme-following via CSS
  *     variables, cropped to the mechanism);
- *   - "png" shots screenshot a DOM element (panels, dialogs) at 2x in both themes;
+ *   - "html" shots copy a DOM element's markup (a toolbar section, a panel, the breadcrumb
+ *     bar) into public/help/ui.js; the manual renders it with the app's own stylesheet
+ *     (public/ui.css), so it follows the theme and restyling by itself;
+ *   - "png" shots screenshot a DOM element at 2x in both themes (the fallback);
  *   - toolbar button glyphs and group membership are read from the live DOM into
  *     public/help/glyphs.js, so the manual draws toolbar buttons as vectors.
  * It then checks that every help topic the app can ask for exists in public/help/index.html.
@@ -111,6 +114,15 @@ async function prepare(ctx: ShotCtx, shot: Shot): Promise<void> {
   }
   if (shot.mode) await call("setMode", shot.mode);
   if (shot.tool) await call("setTool", shot.tool);
+  // Fit view frames the bodies alone; annotations and reference geometry around them can
+  // land off-canvas, and the crop clamps to the canvas. Zooming out keeps them in the
+  // picture - and keeps the badges (a fixed size on screen) legible once the manual
+  // shows the capture at its own width.
+  if (shot.zoom) await call("zoom", shot.zoom);
+  // Park the mouse in an empty corner so no hover highlight from an earlier shot is
+  // captured.
+  const rect = await call<{ x: number; y: number; w: number; h: number }>("canvasRect");
+  await ctx.page.mouse.move(rect.x + 6, rect.y + rect.h - 6);
   await call("frame");
 }
 
@@ -155,18 +167,21 @@ async function main(): Promise<void> {
   const browser = await chromium.launch({ channel: "chrome", headless: !headed });
   let failures = 0;
   // Toolbar glyphs for the manual: every toolbar button's inline SVG (keyed by its topic
-  // tool-x / mode-x, else its element id) and the buttons of each toolbar group, read from
-  // the live DOM so they are exactly what the app shows.
+  // tool-x, its role role-x, else its element id - the mode toggle is "mode-toggle" and
+  // carries both of its icons) and the buttons of each toolbar section, read from the
+  // live DOM so they are exactly what the app shows.
   let toolbar: { glyphs: Record<string, string[]>; groups: Record<string, string[]> } | null = null;
+  // Markup copied out of the running app for the "html" shots, keyed by shot id.
+  const uiSnapshots: Record<string, string> = {};
   try {
     const pages: Record<Theme, Page> = { dark: await setupPage(browser, "dark"), light: await setupPage(browser, "light") };
     const shots = SHOTS.filter((s) => !only || only.includes(s.id));
     for (const shot of shots) {
-      const themes: Theme[] = shot.kind === "svg" ? ["dark"] : ["dark", "light"];
+      const themes: Theme[] = shot.kind === "png" ? ["dark", "light"] : ["dark"];
       for (const theme of themes) {
         const page = pages[theme];
         const ctx = makeCtx(page, theme);
-        const label = shot.kind === "svg" ? shot.id : `${shot.id}-${theme}`;
+        const label = shot.kind === "png" ? `${shot.id}-${theme}` : shot.id;
         try {
           await prepare(ctx, shot);
           if (shot.run) await shot.run(ctx);
@@ -180,6 +195,10 @@ async function main(): Promise<void> {
                 await rasterise(browser, file, resolve(checkDir, `${shot.id}-${t}.png`), t);
               }
             }
+          } else if (shot.kind === "html") {
+            const html = await page.locator(shot.selector!).first().evaluate((el) => el.outerHTML);
+            uiSnapshots[shot.id] = html;
+            console.log(`  html ${shot.id}  (${(html.length / 1024).toFixed(1)} KB)`);
           } else {
             const file = resolve(OUT, `${label}.png`);
             const target = page.locator(shot.selector!).first();
@@ -199,7 +218,7 @@ async function main(): Promise<void> {
     toolbar = await pages.dark.evaluate(`(() => {
       const glyphs = {}, groups = {};
       document.querySelectorAll("#toolbar button").forEach((b) => {
-        const key = b.dataset.tool ? "tool-" + b.dataset.tool : b.dataset.mode ? "mode-" + b.dataset.mode : b.id || null;
+        const key = b.dataset.tool ? "tool-" + b.dataset.tool : b.dataset.role ? "role-" + b.dataset.role : b.id || (b.dataset.mode ? "mode-" + b.dataset.mode : null);
         const svgs = [...b.querySelectorAll(":scope > svg")].map((s) => s.outerHTML);
         if (!key || !svgs.length) return;
         glyphs[key] = svgs;
@@ -225,6 +244,19 @@ async function main(): Promise<void> {
     );
     console.log(`  glyphs.js  (${Object.keys(toolbar.glyphs).length} buttons, ${Object.keys(toolbar.groups).length} groups)`);
   }
+  // The UI snapshots, merged over the previous file so `--only` keeps the others.
+  const uiFile = resolve(ROOT, "public/help/ui.js");
+  const previous: Record<string, string> = existsSync(uiFile)
+    ? (JSON.parse(readFileSync(uiFile, "utf8").replace(/^[\s\S]*?= /, "").replace(/;\s*$/, "")) as Record<string, string>)
+    : {};
+  const ui = { ...previous, ...uiSnapshots };
+  writeFileSync(
+    uiFile,
+    `// Generated by scripts/manual/shoot.ts from the running app - do not edit. Real markup,\n` +
+      `// rendered by the manual with the app's own stylesheet (public/ui.css).\n` +
+      `window.DISJOINTED_UI = ${JSON.stringify(ui, null, 1)};\n`
+  );
+  console.log(`  ui.js  (${Object.keys(ui).length} snapshots)`);
   // ...and which element ids lead to each topic (the inverse of helpmap's ID_TOPICS), so a
   // topic heading can show every button that opens it.
   const topicIds: Record<string, string[]> = {};
@@ -244,6 +276,13 @@ async function main(): Promise<void> {
   if (missing.length) {
     failures++;
     console.error(`  Missing manual topics: ${missing.join(", ")}`);
+  }
+  // Every UI snapshot the manual shows must have been captured.
+  const uiRefs = [...html.matchAll(/data-ui="([^"]+)"/g)].map((m) => m[1]);
+  const missingUi = uiRefs.filter((k) => !(k in ui));
+  if (missingUi.length) {
+    failures++;
+    console.error(`  Missing UI snapshots: ${missingUi.join(", ")}`);
   }
   // Every illustration the manual references must exist.
   const refs = [...html.matchAll(/(?:data-svg|data-dark|data-light|src)="(img\/[^"]+)"/g)].map((m) => m[1]);

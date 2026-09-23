@@ -1,16 +1,10 @@
 /* Disjointed manual - shown in the app's help drawer (src/help.ts) or on its own.
-   The palette mirrors src/style.css so the page matches the app's theme; the --dj-*
-   variables are what the generated SVG illustrations reference for theme colours. */
+   The palette (--bg, --panel, --accent, ...) comes from the app's own ../ui.css, linked
+   before this file, so the page and the UI snapshots it shows match the app's theme
+   exactly; the --dj-* variables are what the generated SVG illustrations reference for
+   theme colours. */
 :root,
 :root[data-theme="dark"] {
-  --bg: #1e1f24;
-  --panel: #2a2c33;
-  --panel-border: #3a3d46;
-  --accent: #4f9dff;
-  --accent-dim: #2f5d99;
-  --text: #e6e8ee;
-  --text-dim: #9aa0ac;
-  --control: #34373f;
   --dj-ink: #ffffff;
   --dj-surface: #1e1f24;
   --dj-grid: #26282f;
@@ -18,14 +12,6 @@
   color-scheme: dark;
 }
 :root[data-theme="light"] {
-  --bg: #f4f5f7;
-  --panel: #e9ebf0;
-  --panel-border: #d2d5dc;
-  --accent: #2f7fe0;
-  --accent-dim: #4f9dff;
-  --text: #1f2329;
-  --text-dim: #6b7280;
-  --control: #ffffff;
   --dj-ink: #1f2329;
   --dj-surface: #f4f5f7;
   --dj-grid: #d9dce2;
@@ -122,6 +108,13 @@ kbd {
   line-height: 18px;
   white-space: nowrap;
 }
+code {
+  font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+  font-size: 12.5px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--control);
+}
 .note {
   border-left: 3px solid var(--accent);
   padding: 4px 10px;
@@ -197,6 +190,18 @@ figure.pending {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* UI snapshots (figure[data-ui]): real app markup copied by the generator into ui.js,
+   rendered with the app's own stylesheet (../ui.css) and made inert - a picture made of
+   real elements. That stylesheet gives an overlay its look but never its place (that
+   stays in the app's src/style.css), so a panel or the breadcrumb bar lays out here as an
+   ordinary block. */
+.ui-snapshot {
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* Toolbar rows drawn from the buttons' own glyphs (figure[data-glyph-row]). */

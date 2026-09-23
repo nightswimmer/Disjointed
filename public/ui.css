@@ -1,0 +1,992 @@
+/* Disjointed - the look of its controls and panels, shared by the app (index.html links it
+   before the bundled src/style.css) and the in-app manual (public/help/index.html): the
+   theme palette, buttons and fields, the combos, the toolbar sections with their captions
+   and eyes, the role / profile toggles and the switch, the breadcrumb bar, the component
+   browser and the dialog panels. Anything here renders the same in a manual figure as in
+   the app, so the manual shows real markup copied by the generator instead of screenshots.
+   Where an overlay *sits* (position, edges, z-index) is the app's business and stays in
+   src/style.css, which is why a snapshot of a panel lays out as an ordinary block. */
+
+:root,
+:root[data-theme="dark"] {
+  --bg: #1e1f24;
+  --panel: #2a2c33;
+  --panel-border: #3a3d46;
+  --accent: #4f9dff;
+  --accent-dim: #2f5d99;
+  --text: #e6e8ee;
+  --text-dim: #9aa0ac;
+  --control: #34373f; /* button / field background */
+  --control-hover: #3e424c;
+  --sec-bg: rgba(0, 0, 0, 0.22); /* toolbar section chip: below --control, so buttons read as buttons */
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f5f7;
+  --panel: #e9ebf0;
+  --panel-border: #d2d5dc;
+  --accent: #2f7fe0;
+  --accent-dim: #4f9dff;
+  --text: #1f2329;
+  --text-dim: #6b7280;
+  --control: #ffffff;
+  --control-hover: #e7eaf0;
+  --sec-bg: rgba(0, 0, 0, 0.06); /* toolbar section chip: below --control, so buttons read as buttons */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.tb-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px 3px 1px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--sec-bg);
+}
+
+.tb-sec.hidden {
+  display: none;
+}
+
+/* Column-major: the first two controls form column 1, the next two column 2, … */
+.tb-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: 32px 32px;
+  grid-auto-columns: auto;
+  gap: 2px;
+  align-items: center;
+  justify-items: center;
+  justify-content: center;
+}
+
+/* A control that takes a whole column (the mode toggle, the role switch, the
+   colour chip, the grid eye). The child selector outweighs .icon-btn's fixed size. */
+.tb-grid > .tb-tall {
+  grid-row: span 2;
+  align-self: stretch;
+  height: auto;
+}
+
+.tb-grid > .tb-mid {
+  grid-row: span 2;
+  align-self: center;
+}
+
+.tb-grid > .tb-big {
+  width: 42px;
+}
+
+.tb-grid > .tb-big svg {
+  width: 26px;
+  height: 26px;
+}
+
+/* Caption = section name, its visibility eye (when the group has one) and the drag handle. */
+.tb-cap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+  cursor: grab;
+}
+
+.tb-cap:hover {
+  color: var(--text);
+  background: var(--control-hover);
+}
+
+/* The grid spacing / units fields are the widest things in the rack: trim them. */
+#sec-grid .combo-btn {
+  min-width: 50px;
+  padding: 0 5px 0 8px;
+}
+
+/* This group's controls are laid out as two independent rows rather than one 2-column
+   grid: a grid would tie the spacing button's width to the line-style sample's, and the
+   sample only wants to be wide. Each row stretches to the group's width and shares it
+   out itself. */
+#sec-grid .tb-grid {
+  justify-items: stretch;
+}
+
+.tb-row {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  gap: 2px;
+}
+
+.tb-row .color-chip {
+  flex: none;
+}
+
+#sec-grid select {
+  padding: 5px 4px;
+}
+
+/* Draw ↔ Simulate toggle: shows the mode it switches *to* (the theme button's
+   convention); the caption under it names the mode you are in. */
+#mode-toggle .icon-draw {
+  display: none;
+}
+
+#mode-toggle[data-mode="draw"] .icon-draw {
+  display: block;
+}
+
+#mode-toggle[data-mode="draw"] .icon-sim {
+  display: none;
+}
+
+#mode-toggle {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+#mode-toggle:hover {
+  background: var(--accent);
+}
+
+#sec-mode .tb-cap {
+  color: var(--accent);
+}
+
+/* Visibility toggles (grid, constraint badges, dimensions) sit on their group's
+   caption, because that is what they apply to: a small borderless eye — open when the
+   group is shown, struck through when it is hidden (then at full text brightness, so a
+   hidden group is noticeable). */
+.tb-cap .cap-eye {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--text-dim);
+}
+
+.cap-eye svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cap-eye:hover {
+  color: var(--text);
+  background: var(--control-hover);
+}
+
+.cap-eye .icon-eye-off {
+  display: none;
+}
+
+.cap-eye:not(.active) {
+  color: var(--text);
+}
+
+.cap-eye:not(.active) .icon-eye {
+  display: none;
+}
+
+.cap-eye:not(.active) .icon-eye-off {
+  display: block;
+}
+
+button {
+  background: var(--control);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+button:hover {
+  background: var(--control-hover);
+}
+
+button.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* Icon buttons: a fixed square that centers an SVG glyph. The SVG inherits the
+   button's text colour via currentColor, so active/hover states recolour it. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.icon-btn svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  display: block;
+}
+
+.icon-btn-danger {
+  color: var(--text-dim);
+}
+
+.icon-btn-danger:hover {
+  color: #ff8a8a;
+  border-color: #ff4d4d;
+}
+
+/* A setting that lives among tools (the Constraints group's auto-constraint switch):
+   a tall pill with a slider under its glyph, so it never reads as one more constraint
+   to click. The pill itself stays neutral when on — the accent belongs to the slider,
+   since an accent-filled button means "this tool is armed" everywhere else. */
+.tb-switch {
+  flex-direction: column;
+  gap: 3px;
+  width: 34px;
+  padding: 4px 0;
+  border-radius: 999px;
+}
+
+.tb-switch.active,
+.tb-switch.active:hover {
+  background: var(--control);
+  border-color: var(--panel-border);
+  color: var(--text);
+}
+
+.tb-switch:hover,
+.tb-switch.active:hover {
+  background: var(--control-hover);
+}
+
+.tb-switch:not(.active) {
+  color: var(--text-dim);
+}
+
+.tb-switch .sw-glyph {
+  width: 20px;
+  height: 20px;
+}
+
+.tb-switch .sw-track {
+  position: relative;
+  width: 20px;
+  height: 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: transparent; /* empty track = off; the accent fill is the on state */
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.tb-switch .sw-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: transform 0.12s, background 0.12s;
+}
+
+.tb-switch.active .sw-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tb-switch.active .sw-knob {
+  transform: translateX(8px);
+  background: #fff;
+}
+
+/* Theme toggle shows the destination's glyph: a sun in dark mode (click → light),
+   a moon in light mode (click → dark). */
+#theme-btn .icon-moon {
+  display: none;
+}
+:root[data-theme="light"] #theme-btn .icon-sun {
+  display: none;
+}
+:root[data-theme="light"] #theme-btn .icon-moon {
+  display: block;
+}
+
+.select-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+select,
+input[type="number"] {
+  background: var(--control);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* Grid-size combo: a value button that drops a preset list with a "Custom" field at the
+   bottom. Custom entries (added from that field) show a x to remove them. */
+.combo {
+  position: relative;
+}
+
+.combo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  min-width: 58px;
+  padding: 0 7px 0 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.combo-btn svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.8;
+}
+
+.combo-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 128px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.combo-menu.hidden {
+  display: none;
+}
+
+.combo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 262px;
+  overflow-y: auto;
+}
+
+.combo-item {
+  display: flex;
+  align-items: center;
+  border-radius: 5px;
+}
+
+.combo-item:hover {
+  background: var(--control-hover);
+}
+
+.combo-item.selected {
+  background: var(--accent-dim);
+  color: #fff;
+}
+
+.combo-pick,
+.combo-remove {
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: inherit;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.combo-pick {
+  flex: 1;
+  text-align: left;
+}
+
+.combo-pick:hover,
+.combo-remove:hover {
+  background: transparent;
+}
+
+.combo-remove {
+  padding: 3px 8px;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.combo-item.selected .combo-remove {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.combo-remove:hover {
+  color: #ff8a8a;
+}
+
+.combo-add {
+  display: flex;
+  gap: 3px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.combo-add input[type="number"] {
+  flex: 1;
+  width: 0;
+  min-width: 70px;
+  cursor: text;
+}
+
+.combo-add-btn {
+  width: 30px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* Shape role switch (Body / Cut / Reference): a segmented control like the actuator
+   profile toggle. `.forced` marks a reference-only tool holding it on Reference. */
+.role-toggle {
+  display: inline-flex;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.role-toggle button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  background: var(--control);
+  color: var(--text);
+}
+.role-toggle button svg {
+  display: block;
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.role-toggle button + button {
+  border-left: 1px solid var(--panel-border);
+}
+.role-toggle button.active {
+  background: var(--accent-dim);
+  color: #fff;
+}
+.role-toggle button.active[data-role="cut"] {
+  background: #b9502e;
+}
+.role-toggle button.active[data-role="reference"] {
+  background: #6b7280;
+}
+.role-toggle button.forced {
+  opacity: 0.55;
+}
+.role-toggle button.forced.active {
+  opacity: 0.85;
+}
+
+/* Run-animation toggle: shows the play glyph when paused, pause glyph when running. */
+#run-btn .icon-pause {
+  display: none;
+}
+#run-btn.running .icon-play {
+  display: none;
+}
+#run-btn.running .icon-pause {
+  display: block;
+}
+#run-btn.running {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* Auto-pause toggle: an opt-in safety so animation halts on impossible assembly.
+   When armed, the icon turns the same red as the impossible-assembly banner. */
+#autopause-btn.armed {
+  background: rgba(255, 77, 77, 0.18);
+  border-color: #ff4d4d;
+  color: #ff4d4d;
+}
+
+/* Animation iteration slider: tunes the per-frame Phase-A sweep count live. */
+.iter-ctrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+}
+.iter-ctrl.hidden {
+  display: none;
+}
+#anim-iter,
+#cleanup-max {
+  width: 100px;
+  cursor: pointer;
+}
+#anim-iter-value,
+#cleanup-max-value {
+  min-width: 36px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+input[type="number"]#struct-tol,
+input[type="number"]#break-tol {
+  width: 70px;
+  cursor: text;
+  font-variant-numeric: tabular-nums;
+}
+
+.prop-tag {
+  color: var(--text-dim);
+  font-size: 13px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.prop-unit {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+input[type="number"]#actuator-speed,
+input[type="number"]#motor-speed {
+  width: 64px;
+  cursor: text;
+}
+
+.profile-toggle {
+  display: inline-flex;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.profile-toggle button {
+  border: none;
+  border-radius: 0;
+  padding: 6px 10px;
+  font-family: monospace;
+  font-size: 14px;
+  background: var(--control);
+  color: var(--text);
+}
+
+.profile-toggle button + button {
+  border-left: 1px solid var(--panel-border);
+}
+
+.profile-toggle button.active {
+  background: var(--accent-dim);
+  color: #fff;
+}
+
+/* Body-colour swatch: a square chip that matches the icon-button footprint. */
+/* Grid line-style picker: the button and every row show a sample of the line itself
+   instead of a word. The sample is drawn in CSS — a border for the three line styles,
+   repeated dots for "points" — so it stretches to whatever width its row leaves it,
+   which an SVG of fixed geometry could not do without distorting its dots. The gs-*
+   class sits on the *container* (the button, or the menu row), so one sample element
+   serves every style. "Points" marks intersections rather than drawing lines, so its
+   sample is a few widely spaced dots: at this size that is what tells it from "dotted". */
+.gs-preview {
+  flex: 1;
+  min-width: 30px;
+  height: 0;
+  border-top: 2px solid currentColor;
+}
+
+.gs-dashed .gs-preview {
+  border-top-style: dashed;
+}
+
+.gs-dotted .gs-preview {
+  border-top-style: dotted;
+}
+
+.gs-points .gs-preview {
+  height: 4px;
+  border-top: none;
+  background-image: radial-gradient(circle at 2px 50%, currentColor 1.9px, transparent 2.1px);
+  background-size: 15px 4px;
+  background-repeat: repeat-x;
+}
+
+/* The style combo takes the width its row has left over (the colour chip is square), and
+   its menu lines up with it. The rows are pure pictures — no text to set a width. */
+#grid-style-combo {
+  flex: 1;
+  min-width: 0;
+}
+
+#grid-style-btn {
+  width: 100%;
+}
+
+#grid-style-menu {
+  min-width: 100%;
+}
+
+.gs-opt {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 9px 10px;
+}
+
+/* Colour swatches (the body colour, the grid colour): a chip that fills its cell — one
+   toolbar row, or the whole column when it also carries .tb-tall. */
+input[type="color"].color-chip {
+  width: 32px;
+  height: 100%;
+  min-height: 32px;
+  padding: 3px;
+  background: var(--control);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+input[type="color"].color-chip::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+input[type="color"].color-chip::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+/* --- components: breadcrumb bar + browser panel ---------------------------- */
+
+/* Breadcrumb overlay while editing a component definition (top-left of the canvas). */
+#crumb-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  font-size: 13px;
+  user-select: none;
+}
+#crumb-bar.hidden {
+  display: none;
+}
+#crumb-bar .crumb {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+#crumb-bar .crumb:hover {
+  background: var(--control-hover);
+}
+#crumb-bar .crumb-current {
+  color: var(--text);
+  padding: 2px 4px;
+  font-weight: 600;
+}
+#crumb-bar .crumb-sep {
+  color: var(--text-dim);
+}
+/* Context-ghost eye beside an ancestor crumb: filled = that context is shown faded in
+   the definition's frame, hollow = hidden, dimmed = unplaceable (no instance to place by). */
+#crumb-bar .crumb-eye {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 3px;
+  margin-right: 2px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+#crumb-bar .crumb-eye.on {
+  color: var(--accent);
+}
+#crumb-bar .crumb-eye:hover:not(:disabled) {
+  background: var(--control-hover);
+}
+#crumb-bar .crumb-eye.off {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Component browser panel (top-right of the canvas). */
+#comp-panel {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  overflow: hidden;
+  font-size: 13px;
+  user-select: none;
+}
+#comp-panel.hidden {
+  display: none;
+}
+#comp-panel-head {
+  padding: 8px 10px 6px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--panel-border);
+}
+#comp-list {
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+#comp-list .comp-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 4px;
+  border-bottom: 1px solid var(--panel-border);
+  background: var(--panel);
+}
+/* Canvas ↔ list mirroring: the hovered instance's row, and the selected instances' rows. */
+#comp-list .comp-row.hover {
+  background: var(--control-hover);
+}
+#comp-list .comp-row.selected {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+/* Drag-to-reorder: grab the grip; while a row is dragged the others slide out of its way. */
+#comp-list .comp-grip {
+  flex: 0 0 auto;
+  width: 14px;
+  color: var(--text-dim);
+  letter-spacing: -3px;
+  cursor: grab;
+  text-align: center;
+}
+#comp-list .comp-row.dragging {
+  z-index: 1;
+  background: var(--control);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+#comp-list .comp-row.dragging .comp-grip {
+  cursor: grabbing;
+}
+#comp-list.reordering .comp-row:not(.dragging) {
+  transition: transform 140ms ease;
+}
+#comp-list .comp-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  padding: 2px 4px;
+}
+#comp-list .comp-name:hover {
+  border-color: var(--panel-border);
+}
+#comp-list .comp-name:focus {
+  border-color: var(--accent);
+  outline: none;
+  background: var(--control);
+}
+#comp-list .comp-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: var(--control);
+  color: var(--text);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+#comp-list .comp-btn:hover {
+  background: var(--control-hover);
+}
+#comp-list .comp-btn.danger:hover {
+  background: #a33;
+  color: #fff;
+}
+#comp-list .comp-empty {
+  padding: 10px;
+  color: var(--text-dim);
+}
+#comp-panel-hint {
+  padding: 6px 10px 8px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  border-top: 1px solid var(--panel-border);
+}
+
+/* --- cut-file export panel (src/export.ts) --------------------------------- */
+#export-panel,
+#backup-panel,
+#keymap-panel {
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  font-size: 13px;
+  user-select: none;
+}
+#export-panel.hidden,
+#backup-panel.hidden,
+#keymap-panel.hidden {
+  display: none;
+}
+#export-panel .export-head,
+#backup-panel .export-head,
+#keymap-panel .export-head {
+  font-weight: 600;
+}
+#export-panel .export-scope,
+#backup-panel .export-scope,
+#keymap-panel .export-scope {
+  color: var(--text-dim);
+  margin-top: -6px;
+}
+#export-panel .export-row,
+#backup-panel .export-row,
+#keymap-panel .export-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#export-panel .export-row label,
+#backup-panel .export-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+#export-panel .export-hint,
+#backup-panel .export-hint {
+  color: var(--text-dim);
+  margin-left: auto;
+}
+#export-panel input[type="number"],
+#backup-panel input[type="number"] {
+  width: 64px;
+  cursor: text;
+}
+#export-panel .export-actions,
+#backup-panel .export-actions,
+#keymap-panel .export-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* Auto-backup panel specifics: a folder row with the name ellipsised, a status line,
+   and the toolbar button tinted while backups are enabled but can't run (no folder /
+   access to re-grant). */
+#backup-panel {
+  width: 300px;
+}
+#backup-panel .export-row label select {
+  cursor: pointer;
+}
+#backup-panel .backup-folder-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+#backup-panel .backup-folder-label {
+  color: var(--text-dim);
+}
+#backup-panel .backup-folder-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#backup-panel .backup-status {
+  margin-top: 0;
+  line-height: 1.35;
+}
+#backup-btn.paused {
+  color: #f0b441;
+}
+
+/* Keyboard shortcuts panel: the keymap in force, and the file it travels in. */
+#keymap-panel {
+  width: 300px;
+}
+#keymap-panel .keymap-note {
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+#keymap-panel .export-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

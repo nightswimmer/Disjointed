@@ -96,7 +96,7 @@ export function installAutomation(host: AutomationHost): void {
       const c = vs.reduce((a, v) => ({ x: a.x + v.x / vs.length, y: a.y + v.y / vs.length }), { x: 0, y: 0 });
       return screenOf(c);
     },
-    /** Canvas-relative CSS-px bounding box of the whole mechanism (bodies + joints). */
+    /** Canvas-relative CSS-px bounding box of the whole drawing (bodies, joints, grounds, reference geometry, dimension labels). */
     contentBox(margin = 0) {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       const include = (wp: Vec2) => {
@@ -107,6 +107,23 @@ export function installAutomation(host: AutomationHost): void {
       for (const b of host.scene.bodies) host.scene.bodyWorldVerts(b).forEach(include);
       for (const j of host.scene.joints) include(host.scene.jointWorld(j));
       for (const c of host.scene.constraints) if (c.kind === "ground") include(c.anchor);
+      // Reference geometry and dimension labels are part of the picture too - a shot of
+      // reference-only geometry would otherwise have no box at all.
+      for (const g of host.scene.guides) {
+        if (g.kind === "circle") {
+          include({ x: g.c.x - g.r, y: g.c.y - g.r });
+          include({ x: g.c.x + g.r, y: g.c.y + g.r });
+        } else {
+          for (const k of host.scene.guidePointKeys(g)) {
+            const p = host.scene.guidePointWorld(g, k);
+            if (p) include(p);
+          }
+        }
+      }
+      for (const m of host.scene.measurements) {
+        const p = host.scene.measurementLabelPos(m);
+        if (p) include(p);
+      }
       if (!Number.isFinite(minX)) return null;
       return { x: minX - margin, y: minY - margin, w: maxX - minX + 2 * margin, h: maxY - minY + 2 * margin };
     },

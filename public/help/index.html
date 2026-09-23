@@ -4,7 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Disjointed — Manual</title>
+    <link rel="stylesheet" href="../ui.css" />
     <link rel="stylesheet" href="help.css" />
+    <link rel="icon" href="data:," />
   </head>
   <body>
     <main>
@@ -16,12 +18,13 @@
         <p>
           Disjointed is a 2D planar mechanism simulator. You draw rigid <strong>bodies</strong>, place
           <strong>joints</strong> on them, couple the joints with pins, grounds, rails and sliders, then switch to
-          <strong>Simulate</strong> mode and drag anything to see the whole linkage move.
+          <strong>Simulate</strong> mode and drag anything to see the whole linkage move. In Draw mode the drawing
+          behaves like a CAD sketch: constraints and driving dimensions hold while you edit.
         </p>
         <p>
           This manual opens beside the canvas. In the app, click the <span class="glyph"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5"/><path d="M7.6 7.8a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1 .9-1 1.6v.4"/><circle cx="10" cy="14.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
-          help button (or press <kbd>?</kbd>) to open it; while it is open, click any control to jump to its topic.
-          <kbd>F1</kbd> brings you back to this table of contents.
+          help button (or press <kbd>?</kbd>) to open it; while it is open, click any control — or anything drawn on
+          the canvas — to jump to its topic. <kbd>F1</kbd> brings you back to this table of contents.
         </p>
         <figure data-svg="img/fourbar-draw.svg">
           <figcaption>A four-bar linkage in Draw mode: three bodies, two pins, two grounded pivots.</figcaption>
@@ -34,17 +37,18 @@
         <p>A four-bar linkage in five steps. Every step uses a single tool; each tool disarms itself after one use.</p>
         <ol>
           <li>
-            <strong>Draw three bars.</strong> Press <kbd>B</kbd> (Body) and click four corners for a long, thin rectangle;
-            click the first corner again or press <kbd>Enter</kbd> to close it. Repeat for two more bars. Select a bar and
-            press <kbd>]</kbd> a few times to round its ends.
+            <strong>Draw three bars.</strong> Press <kbd>B</kbd> (Polyline, Body role) and click four corners for a
+            long, thin rectangle; click the first corner again or press <kbd>Enter</kbd> to close it. Repeat for two
+            more bars. Select a bar and press <kbd>]</kbd> a few times to round its ends.
           </li>
           <li>
             <strong>Add joints.</strong> Press <kbd>J</kbd> (Joint) and click near each end of every bar. A joint belongs to
             the body it is placed on.
           </li>
           <li>
-            <strong>Pin the bars together.</strong> Press <kbd>C</kbd> (Connect), click a joint on one bar, then a joint on
-            the next. The second joint snaps onto the first. Do this twice to make a chain of three bars.
+            <strong>Pin the bars together.</strong> Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> (Connect), click
+            a joint on one bar, then a joint on the next. The second joint snaps onto the first. Do this twice to make a
+            chain of three bars.
           </li>
           <li>
             <strong>Ground the two free ends.</strong> Press <kbd>G</kbd> (Ground) and click the joint at each end of the
@@ -58,30 +62,41 @@
         <figure data-svg="img/fourbar-sim-drag.svg">
           <figcaption>Simulate mode, mid-drag: the grabbed pin follows the pointer and the solver moves the rest.</figcaption>
         </figure>
-        <p class="note">Right-drag pans the view, the mouse wheel zooms, <kbd>F</kbd> fits the mechanism to the screen.</p>
+        <p class="note">
+          Right-drag pans the view, the mouse wheel zooms, <kbd>Shift</kbd>+<kbd>F</kbd> fits the mechanism to the
+          screen. The line along the bottom of the window always says what the next click will do.
+        </p>
       </section>
 
       <section class="topic" id="canvas">
         <h2>The canvas</h2>
         <p>
           The canvas is the drawing. What a click does depends on the <a href="#modes">mode</a> and on the armed
-          <a href="#tools">tool</a>; with no tool armed, clicking selects and dragging moves. The hint at the right end of the
-          toolbar always says what the next click will do.
+          <a href="#tools">tool</a>; with no tool armed, clicking selects and dragging moves. The <strong>status
+          bar</strong> along the bottom of the window spells out what the armed tool expects, or what you can do with
+          the current selection (hover it to read the whole line when it is a long one).
         </p>
         <ul>
           <li><strong>Pan:</strong> drag with the right mouse button.</li>
           <li><strong>Zoom:</strong> mouse wheel, about the pointer.</li>
-          <li><strong>Fit:</strong> <kbd>F</kbd>, or the fit button in the <a href="#view">view</a> group.</li>
+          <li><strong>Fit:</strong> <kbd>Shift</kbd>+<kbd>F</kbd>, or the fit button in the <a href="#view">View</a> group.</li>
           <li><strong>Cancel:</strong> <kbd>Esc</kbd> drops a half-drawn shape, disarms the tool, or clears the selection.</li>
         </ul>
+        <p>
+          When something can't be done — an invalid pick, a rejected cut, a constraint that can't hold — a
+          <strong>toast</strong> slides in under the toolbar and says why; click it to dismiss it sooner.
+        </p>
       </section>
 
-      <section class="topic" id="modes" data-glyph="mode-draw mode-sim">
+      <section class="topic" id="modes" data-glyph="mode-toggle">
         <h2>Draw and Simulate modes <span class="keys"><kbd>Tab</kbd> toggles</span></h2>
-        <figure class="ui" data-glyph-row="mode-draw mode-sim"><figcaption>Draw and Simulate.</figcaption></figure>
+        <figure class="ui" data-glyph-row="mode-toggle"><figcaption>The mode button while drawing: it shows the mode it switches <em>to</em>.</figcaption></figure>
         <p>
-          The two buttons at the left of the toolbar switch between building the mechanism and running it. Entering
-          Simulate settles every constraint once; leaving it puts every body back exactly where you drew it.
+          The big button in the <strong>Mode</strong> group switches between building the mechanism and running it.
+          It shows the mode it switches <em>to</em> — the play triangle while you draw, the pencil while you
+          simulate — and the caption under it names the mode you are in. Entering Simulate settles every constraint
+          once; leaving it puts every body back exactly where you drew it. Groups that belong to the other mode
+          leave the toolbar while you are not in it.
         </p>
       </section>
 
@@ -91,7 +106,7 @@
           Build the mechanism: draw bodies, place joints, add constraints and dimensions, arrange and edit everything.
           Bodies move freely when dragged, and the sketch solver keeps any dimensions and constraints you added
           satisfied while you edit. Hold <kbd>Shift</kbd> while dragging to move a body rigidly with its linked
-          neighbours instead.
+          neighbours instead — the way it would move in simulation, with everything else frozen.
         </p>
       </section>
 
@@ -101,7 +116,7 @@
           Drag any joint, or any point on a body, and the constraint solver propagates the motion through everything
           pinned, grounded or sliding with it. Nothing you do here changes the drawing: switching back to Draw mode
           restores the drawn layout. Press <kbd>Space</kbd> or the play button to run <a href="#animation">actuators and
-          motors</a>.
+          motors</a>. Reference geometry and constraint badges are hidden here; dimensions stay and read live.
         </p>
         <figure data-svg="img/fourbar-sim-drag.svg">
           <figcaption>Dragging the crank pin of a four-bar linkage.</figcaption>
@@ -109,21 +124,39 @@
       </section>
 
       <!-- ============================================================ -->
-      <h1 class="chapter">Drawing tools</h1>
+      <h1 class="chapter">Toolbar and drawing tools</h1>
 
       <section class="topic" id="tools">
-        <h2>The tool group</h2>
-        <figure class="ui" data-glyph-row="group:tool-group"><figcaption>The tool group, as in the toolbar.</figcaption></figure>
+        <h2>The toolbar</h2>
+        <figure class="ui" data-glyph-row="group:sec-shapes"><figcaption>The Shapes group.</figcaption></figure>
         <p>
-          Every drawing tool is <strong>one-shot</strong>: arm it with its button or letter key, use it once, and you are
-          back in select mode. Each tool's letter is in its tooltip and in its topic heading below. Hovering a button
-          shows a short description of what the tool wants you to click.
+          Controls are gathered into named <strong>groups</strong> — File, Mode, Role, Shapes, Colour, Pattern, Boolean,
+          Mating, Actuators, Transform, Components, Constraints, Grid, Measure, Snapping and View, plus Animation in
+          Simulate mode. Each group is two rows tall and reads down, then across, with its name on the caption strip
+          underneath. <strong>Drag a group by its caption</strong> to move it along the toolbar: the others slide into
+          the order they will have when you let go, and the arrangement is remembered. <strong>Double-click</strong> a
+          caption to restore the default order. On a narrow window the toolbar wraps whole groups onto a second row.
         </p>
+        <p>
+          A group whose drawing can be hidden carries a small <strong>eye</strong> on its caption — Grid, Constraints
+          (the badges) and Measure (the dimensions). A struck-through eye means that group's drawing is hidden, never
+          that it stopped working. Fields that belong to a selection or an armed tool — text height, actuator and
+          motor speed, the solver knobs — appear in a strip to the right of the groups, so nothing shifts when a
+          selection comes or goes; the <kbd>?</kbd> help button sits at the far right.
+        </p>
+        <p>
+          Every drawing tool is <strong>one-shot</strong>: arm it with its button or key, use it once, and you are back
+          in select mode (<kbd>Esc</kbd> disarms it early). Every tooltip ends with the control's shortcut, read from the
+          <a href="#shortcuts-panel">keymap</a> rather than written into the button — a control with no key shows none,
+          and one you rebind says so straight away. The <a href="#canvas">status bar</a> along the bottom says what the
+          armed tool wants you to click next.
+        </p>
+        <figure class="ui" data-glyph-row="group:sec-mating"><figcaption>The Mating group: joint, weld, connect, ground, rail, slider.</figcaption></figure>
       </section>
 
       <section class="topic" id="roles">
         <h2>Shape roles: Body, Cut, Reference <span class="keys"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></span></h2>
-        <figure class="ui" data-glyph-row="group:role-group"><figcaption>The role switch, at the start of the tool group.</figcaption></figure>
+        <figure class="ui" data-glyph-row="group:sec-role"><figcaption>The role switch: Body, Cut, Reference.</figcaption></figure>
         <p>
           The shape tools (polyline, rectangle, circle, regular polygon, slot) draw plain geometry; the <strong>role</strong>
           switch decides what a finished shape becomes. <strong>Body</strong>: a new rigid body. <strong>Cut</strong>: the
@@ -143,13 +176,14 @@
       </section>
 
       <section class="topic" id="tool-polyline">
-        <h2>Polyline <span class="keys"><kbd>B</kbd> body &middot; <kbd>U</kbd> cut</span></h2>
+        <h2>Polyline <span class="keys"><kbd>B</kbd> body &middot; <kbd>Ctrl</kbd>+<kbd>U</kbd> cut</span></h2>
         <p>
           Click each corner, then click the first corner again, double-click or press <kbd>Enter</kbd> to close. Clicks
-          that land on existing joints, corners or edges are remembered and turned into coincident constraints, so a body
-          drawn between two joints stays attached to them; near-horizontal / vertical edges are straightened.
-          <kbd>B</kbd> arms it in the Body role, <kbd>U</kbd> in the Cut role; in the Reference role a closed polyline
-          is a reference polygon and two points make a segment.
+          that land on existing joints, corners, edge midpoints or reference points are remembered and turned into
+          coincident constraints, so a body drawn between two joints stays attached to them; near-horizontal / vertical
+          edges are straightened and get the matching constraint. <kbd>B</kbd> arms it in the Body role,
+          <kbd>Ctrl</kbd>+<kbd>U</kbd> in the Cut role; in the Reference role a closed polyline is a reference polygon
+          and two points make a segment.
         </p>
         <p>
           In the Body role, start on existing <strong>free joints</strong> instead and the body is built around them: the
@@ -169,20 +203,40 @@
       </section>
 
       <section class="topic" id="tool-circle">
-        <h2>Circle <span class="keys"><kbd>Shift</kbd>+<kbd>C</kbd></span></h2>
+        <h2>Circle <span class="keys"><kbd>C</kbd></span></h2>
         <p>
           Click the centre, then a point on the rim — or press and drag the radius out. As a body it is a disk (a
           one-point rounded outline: move it by its centre node, resize it by its rim handle); as a cut, a round hole that
           can carry a diameter <a href="#dimensions">dimension</a> and be repeated by a <a href="#el-pattern">pattern</a>;
-          as a reference, a circle whose centre snaps and measures.
+          as a reference, a circle whose centre snaps and measures. Every kind of circle can be made
+          <a href="#tool-tangent">tangent</a> to a line and <a href="#tool-equal">equal</a> in radius to another.
         </p>
       </section>
 
       <section class="topic" id="tool-polygon">
         <h2>Regular polygon <span class="keys"><kbd>Shift</kbd>+<kbd>P</kbd></span></h2>
         <p>
-          Click the centre, then one corner — or press and drag. The number of sides is set in the toolbar field that
-          appears while the tool is armed, or with <kbd>&uarr;</kbd> / <kbd>&darr;</kbd>.
+          Click the centre, then one corner — or press and drag. The side count shows beside the cursor while the tool is
+          armed; <kbd>&uarr;</kbd> / <kbd>&darr;</kbd> change it. Once the polygon exists it <strong>stays regular</strong>:
+          drag a corner to grow or spin it about its centre; an <strong>"n sides" tag</strong> above the selected polygon
+          shows the count — double-click it to type a new one, or press <kbd>&uarr;</kbd> / <kbd>&darr;</kbd>. Nodes can't
+          be added or removed by double-click (change the count instead). Its centre is drawn as a small crosshair and is
+          a point for coincident constraints, dimensions and object snap.
+        </p>
+        <figure data-svg="img/polygon-sides.svg">
+          <figcaption>A selected hexagon: corner handles, the centre crosshair and the "6 sides" tag.</figcaption>
+        </figure>
+        <p>
+          In the sketch a regular polygon is a rigid shape. Its <strong>size</strong> is set by a size dimension — an edge,
+          a chord between any two corners, centre to corner, centre to edge, across flats between opposite edges, or the
+          horizontal / vertical span between two corners (what a label placed between the corners gives you) — and it
+          scales to the value, keeping its rotation. Its <strong>rotation</strong> is set by drags and by line constraints
+          (Horizontal, Vertical, Parallel or Perpendicular on an edge turn it in one step). Every other dimension or
+          constraint moves or turns it whole, and a corner drag then only does what the constraints leave free: with the
+          size driven it only turns, with the rotation locked it only resizes, with both it moves the whole polygon. A
+          size the polygon can't reach, or a second size that disagrees with the first, is refused with the conflicting
+          dimension flashed. Split or combine turns it into a free polygon. As a cut it makes a regular hole (a nut trap)
+          with the same behaviour.
         </p>
       </section>
 
@@ -195,21 +249,96 @@
         </p>
       </section>
 
+      <section class="topic" id="tool-line">
+        <h2>Line <span class="keys"><kbd>L</kbd></span></h2>
+        <p>
+          A finite <strong>reference segment</strong>: click two points, or press and drag. Points that land on joints,
+          corners, edge midpoints or other reference points are held there by a coincident constraint. Its endpoints snap
+          and measure, its midpoint is a snap and alignment target, and the segment takes horizontal / vertical /
+          parallel / perpendicular / equal constraints and length dimensions like a body edge. Snapping and picking reach
+          only as far as the segment itself. It replaces the infinite guideline of earlier versions: draw it as long as
+          you need it.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-arc">
+        <h2>Arc <span class="keys"><kbd>A</kbd></span></h2>
+        <p>
+          A reference arc: click its start and end points, then a point it should pass through. Its three points are
+          handles and references; placements snap onto the arc itself, and a line can be made
+          <a href="#tool-tangent">tangent</a> to it. Its radius follows its three points, so Equal can copy it but never
+          set it.
+        </p>
+      </section>
+
+      <section class="topic" id="tool-text">
+        <h2>Text <span class="keys"><kbd>Shift</kbd>+<kbd>T</kbd></span></h2>
+        <p>
+          A label. Click where it goes, type, press <kbd>Enter</kbd>. Clicked on a body, the label is anchored to that
+          body and rides with it; on empty space it stays where it is. The height (in working units) is set in the field
+          that appears in the toolbar's properties strip while the tool is armed. Double-click a label to edit it, drag
+          it to move it, select and <kbd>Delete</kbd> to remove it. Labels are drawing aids: never simulated or exported.
+        </p>
+      </section>
+
       <section class="topic" id="tool-split">
         <h2>Split <span class="keys"><kbd>X</kbd></span></h2>
         <p>
           Cut a body in two. Click a point on its outline, route the cut through the inside with more clicks, and click
-          the outline again to finish. Joints stay with whichever half they land in. <a href="#combine">Combine</a> is
-          the inverse.
+          the outline again to finish. Existing corners keep their rounding, the cut corners start sharp; holes stay
+          whole on their side (a cut through a hole is refused), and joints stay with whichever half they land in. The
+          <a href="#combine">Boolean operations</a> are the other direction: they build one body out of several.
         </p>
       </section>
 
       <section class="topic" id="combine">
         <h2>Combine <span class="keys"><kbd>N</kbd></span></h2>
+        <figure class="ui" data-glyph-row="group:sec-boolean"><figcaption>The Boolean group: Split, Combine, Subtract, Intersect.</figcaption></figure>
         <p>
-          Merge the selected bodies into one. They must overlap or share an edge; the first selected keeps its colour.
-          Select several bodies with <kbd>Ctrl</kbd>+click or a box selection, then press the combine button.
+          The three Boolean operations work on a <strong>multi-selection</strong> — <kbd>Ctrl</kbd>+click the bodies, or
+          box-select them — and share one convention: the <strong>first selected body survives</strong> (the one you
+          Ctrl+clicked first, or the bottom-most in a box selection), keeping its colour, joints, grounding, group and
+          stacking position, and the others are consumed. Corners that survive keep their rounding, new corners are
+          sharp, holes carry over (a round hole stays a true disk), and dimensions on corners that survive follow them.
+          Bodies built from joints are turned into an editable outline first.
         </p>
+        <p>
+          <strong>Combine</strong> merges the selected bodies into one — the union of their shapes. They must overlap or
+          share an edge (bodies that only touch at a corner are refused). Pins between the combined bodies disappear,
+          since they would be inside one body; motors and rails carry over and groups merge. A region the union closes
+          off becomes a new hole.
+        </p>
+        <figure data-svg="img/boolean-before.svg">
+          <figcaption>The starting point for the examples below: a plate selected first, then a disk inside it and a disk crossing its edge.</figcaption>
+        </figure>
+      </section>
+
+      <section class="topic" id="subtract">
+        <h2>Subtract</h2>
+        <p>
+          Cut the other selected bodies out of the first selected one. A cutter lying entirely inside becomes a
+          <strong>hole of the cutter's own shape</strong> — a disk body punches a true round hole, a rounded rectangle a
+          rounded one — and a cutter crossing the outline leaves a <strong>notch</strong>. The cutters are consumed, and
+          their joints and constraints go with them; copy a cutter first if you want to keep it. Refused, with a message,
+          when a cutter doesn't overlap the first body (touching along an edge doesn't count), or when the cut would
+          remove the body, split it into several pieces (use <a href="#tool-split">Split</a>) or leave it touching itself
+          at a point.
+        </p>
+        <figure data-svg="img/boolean-subtract.svg">
+          <figcaption>After Subtract: the inner disk became a round hole, the outer one a notch.</figcaption>
+        </figure>
+      </section>
+
+      <section class="topic" id="intersect">
+        <h2>Intersect</h2>
+        <p>
+          Keep only the <strong>overlap</strong> of the selected bodies: the first selected survives, reshaped to the
+          region common to all of them, and the others are consumed. Holes inside the overlap stay. Refused when a body
+          doesn't overlap the first, when the bodies share no area, or when the overlap comes in several separate pieces.
+        </p>
+        <figure data-svg="img/boolean-intersect.svg">
+          <figcaption>After Intersect of the plate and the crossing disk: the plate keeps only the shared region.</figcaption>
+        </figure>
       </section>
 
       <section class="topic" id="tool-joint">
@@ -217,15 +346,18 @@
         <p>
           Add a joint point. Click on a body to attach the joint to it; joints on the same body move rigidly together.
           Click on empty space for a <strong>free joint</strong>, which can be grounded as an anchor or used to build a body
-          around later. A joint placed on a <a href="#tool-rail">rail</a> becomes a rider on that rail.
+          around later. With object snap on, the joint lands on the nearest corner, edge midpoint, centre, hole centre or
+          joint in range. A joint placed on a <a href="#tool-rail">rail</a> becomes a rider on that rail. An attached
+          joint always lands — and stays — inside its body.
         </p>
       </section>
 
       <section class="topic" id="tool-connect">
-        <h2>Connect (pin) <span class="keys"><kbd>C</kbd></span></h2>
+        <h2>Connect (pin) <span class="keys"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd></span></h2>
         <p>
           Pin two joints together so they share a position but rotate freely. Click the first joint, then the second;
-          the second moves onto the first. Pins are the hinges of a linkage.
+          the second moves onto the first. Pins are the hinges of a linkage. Click a rail instead of a second joint to
+          attach the joint to it as a rider.
         </p>
       </section>
 
@@ -247,11 +379,12 @@
       </section>
 
       <section class="topic" id="tool-rail">
-        <h2>Rail <span class="keys"><kbd>K</kbd></span></h2>
+        <h2>Rail <span class="keys">no default key</span></h2>
         <p>
           Draw a track between two joints. Two joints on the same body make a <strong>moving rail</strong> that travels
           with that body; two free joints make a <strong>fixed track</strong> in the world. Joints placed on a rail ride
-          along it like a pin in a slot. Rails draw as double-headed arrows.
+          along it like a pin in a slot. Rails draw as double-headed arrows. Give the tool a key through the
+          <a href="#shortcuts-panel">Shortcuts panel</a> if you use it often.
         </p>
       </section>
 
@@ -271,58 +404,37 @@
         </figure>
       </section>
 
-      <section class="topic" id="tool-guide">
-        <h2>Guideline <span class="keys"><kbd>L</kbd></span></h2>
-        <p>
-          Place an infinite construction line through two points. Points land on joints, corners and edges, and snapping
-          prefers guidelines over the grid, so they are the quickest way to line things up. Drag a guideline's handles
-          to re-aim it. For finite reference geometry see the <a href="#tool-line">Line</a>, <a href="#tool-arc">Arc</a>
-          and shape tools in the <a href="#roles">Reference role</a>.
-        </p>
-      </section>
-
-      <section class="topic" id="tool-line">
-        <h2>Line <span class="keys"><kbd>Shift</kbd>+<kbd>L</kbd></span></h2>
-        <p>
-          A reference segment: click two points, or press and drag. Points that land on joints, corners or other
-          reference points are held there by a coincident constraint. Its endpoints snap and measure, and the segment
-          takes horizontal / vertical / parallel / perpendicular / equal constraints like a body edge.
-        </p>
-      </section>
-
-      <section class="topic" id="tool-arc">
-        <h2>Arc <span class="keys"><kbd>Shift</kbd>+<kbd>A</kbd></span></h2>
-        <p>
-          A reference arc: click its start and end points, then a point it should pass through. Its three points are
-          handles and references; placements snap onto the arc itself.
-        </p>
-      </section>
-
-      <section class="topic" id="tool-text">
-        <h2>Text <span class="keys"><kbd>Shift</kbd>+<kbd>T</kbd></span></h2>
-        <p>
-          A label. Click where it goes, type, press <kbd>Enter</kbd>. Clicked on a body, the label is anchored to that
-          body and rides with it; on empty space it stays where it is. The height (in working units) is set in the
-          toolbar field while the tool is armed. Double-click a label to edit it, drag it to move it, select and
-          <kbd>Delete</kbd> to remove it. Labels are drawing aids: never simulated or exported.
-        </p>
-      </section>
-
       <section class="topic" id="tool-patternLinear">
         <h2>Linear pattern <span class="keys"><kbd>I</kbd></span></h2>
         <p>
-          Repeat a hole or a joint along one or two directions. Click the hole or joint, then where the next instance
-          goes; a second click adds a second direction and makes a grid. Count and spacing are edited on the labels drawn
-          beside the pattern. Members that do not fit inside the body are flagged.
+          Repeat a hole or a joint along one or two directions. Click the hole (inside its cut-out) or the joint, then
+          where the next instance goes: the row appears and its <strong>×count</strong> label opens, so type the count and
+          press <kbd>Enter</kbd>. The tool stays armed for an optional second direction — click where the first
+          instance of the other direction goes to make a grid — or press <kbd>Enter</kbd> / <kbd>Esc</kbd> to keep a
+          single row. A direction within ~5° of horizontal / vertical gets the matching constraint, like a body edge.
         </p>
+        <p>
+          <strong>Several features at once:</strong> <kbd>Ctrl</kbd>+click several holes and joints of one body
+          (<kbd>Ctrl</kbd>+click a picked one to drop it; the layout preview shows once you release Ctrl). They repeat
+          as a group, so every instance reproduces their relative placement, and <kbd>Ctrl</kbd>+click still adds or
+          removes seeds after the row exists. The first pick is the anchor the dotted line starts from.
+        </p>
+        <figure data-svg="img/pattern-linear.svg">
+          <figcaption>A two-seed linear pattern: a round hole and a smaller hole repeated together four times, with the spacing and count labels.</figcaption>
+        </figure>
       </section>
 
       <section class="topic" id="tool-patternCircular">
         <h2>Circular pattern <span class="keys"><kbd>Q</kbd></span></h2>
         <p>
-          Repeat a hole or a joint around a centre. Click the hole or joint, then the centre of rotation. Count, angle
-          and whether the members rotate with their position are edited on the canvas labels.
+          Repeat a hole or a joint — or, with <kbd>Ctrl</kbd>+click, several features of one body — around a centre.
+          Pick the seed(s), then click the centre of rotation (it snaps to joints, hole centres, corners and the grid):
+          six instances spread evenly and the count label opens for typing. The angle between instances and whether the
+          members turn with the arc are edited on the canvas labels — see <a href="#el-pattern">Pattern</a>.
         </p>
+        <figure data-svg="img/pattern-circular.svg">
+          <figcaption>A bolt hole repeated six times around a flange, with the count and angle labels at the centre.</figcaption>
+        </figure>
       </section>
 
       <!-- ============================================================ -->
@@ -330,12 +442,70 @@
 
       <section class="topic" id="constraints">
         <h2>Sketch constraints</h2>
-        <figure class="ui" data-glyph-row="group:sketch-group"><figcaption>The constraint tools and the badge-visibility toggle.</figcaption></figure>
+        <figure class="ui" data-glyph-row="group:sec-constraints"><figcaption>The Constraints group: the auto-constraints switch, the nine constraint tools and the badge-visibility eye.</figcaption></figure>
         <p>
-          Constraints are geometric rules between edges, rails and points that the sketch solver keeps satisfied in
-          Draw mode. Each one draws a small badge; the eye button in this group shows or hides all badges, and a badge
-          can be selected and deleted like anything else. Implicit constraints are also offered while you drag: pause
-          near a horizontal or vertical alignment and it snaps in.
+          Constraints are geometric rules between points, lines and circles that the sketch solver keeps satisfied in
+          Draw mode: <a href="#tool-coincident">Coincident</a>, <a href="#tool-equal">Equal</a>,
+          <a href="#tool-horizontal">Horizontal</a>, <a href="#tool-vertical">Vertical</a>,
+          <a href="#tool-parallel">Parallel</a>, <a href="#tool-perpendicular">Perpendicular</a>,
+          <a href="#tool-tangent">Tangential</a>, <a href="#tool-symmetric">Symmetrical</a> and
+          <a href="#tool-fixed">Fixed</a>. The geometry moves to satisfy a constraint the moment you place it, and it
+          keeps holding through every later edit — drags included. Each constraint draws a small violet
+          <strong>badge</strong> beside its element (◎ H V ∥ ⊥ =, a padlock for Fixed, a dashed mirror with a dot each
+          side for Symmetrical, a circle touching a line for Tangential), faded until you hover the element. Hovering a
+          badge highlights the elements it constrains; click it to select it, <kbd>Delete</kbd> to remove the constraint.
+          The <strong>eye</strong> on the group's caption shows or hides all badges (constraints keep working while hidden).
+        </p>
+        <p>
+          <strong>A refusal is always explained.</strong> A constraint that can't be satisfied is rejected — nothing
+          moves, a toast says why, and the items it collided with flash red for a few seconds so you can find them:
+          <em>"Coincident can't be applied: it conflicts with the Horizontal constraint and the 40 mm dimension
+          (flashing red)."</em> A pick the tool can't use is explained the same way rather than ignored (<em>"Parallel
+          needs two lines…"</em>, <em>"That element is already fixed."</em>), and so is a dimension value the sketch
+          can't reach.
+        </p>
+        <p>
+          <strong>Who moves.</strong> The more mobile side gives way: reference geometry is construction and moves before
+          body corners and joints; the element you are dragging never gets tugged back; a component instance's shape
+          belongs to its definition and never changes (the constraint moves the whole instance instead); a point locked
+          with Fixed never moves at all. The common cases need no tool: see
+          <a href="#implicit-constraints">implicit constraints while dragging</a>, and the auto-constraints applied
+          while you draw (near-level edges, a corner placed on a joint).
+        </p>
+      </section>
+
+      <section class="topic" id="implicit-constraints">
+        <h2>Implicit constraints while dragging</h2>
+        <figure class="ui" data-glyph-row="autocon-btn"><figcaption>The switch at the left of the Constraints group turns implicit constraints on and off.</figcaption></figure>
+        <p>
+          While dragging a body, joint, corner node or hole centre, <strong>hold</strong> the dragged point over another
+          element for about half a second — a corner, hole centre, joint, reference point, the <strong>midpoint</strong>
+          of an edge / rail / reference segment, or an edge, rail or reference segment — and it becomes an
+          <strong>alignment candidate</strong>, lit violet. A point under the cursor always wins over the line it lies
+          on, so holding the middle of an edge arms its midpoint and holding elsewhere along it arms the edge. Now move
+          on: when the dragged point lines up horizontally or vertically with a candidate point, lands on a candidate
+          point, or lands on a candidate line, a dotted violet line with the constraint's badge (H, V or ◎) previews the
+          alignment. <strong>Release while it shows</strong> and the geometry is nudged exactly into alignment and the
+          constraint is created — the same one the tools make, badge and all. Dropping a point right <em>on</em> a
+          candidate point makes a coincident.
+        </p>
+        <figure data-svg="img/implicit-drag.svg">
+          <figcaption>Mid-drag: the plate's corner was held to arm it, and the dragged joint now lines up vertically with it.</figcaption>
+        </figure>
+        <p>
+          <strong>Two candidates stay armed at once</strong>, so one drag can land vertical to one reference and
+          horizontal to another, or on a reference line and level with a corner: each shows its own dotted line and
+          badge, and the release places both and lands the geometry exactly on the intersection. Hovering a third
+          element drops the oldest candidate; <kbd>Esc</kbd> drops the most recent one while the drag goes on. Two
+          alignments that pull the same way (two horizontals, say) can't both be exact, so only the more recently armed
+          one previews; a point-on-point coincident uses up both directions and always previews alone. A placement that
+          can't be satisfied loses only that one constraint, with a message; anything else previewed is still placed.
+        </p>
+        <p>
+          The <strong>switch</strong> at the left of the Constraints group — a tall pill with a slider, deliberately unlike
+          the square tools beside it — turns the whole thing off and on. Like the snap toggles it starts on and is not
+          remembered between sessions. The auto-constraints applied while you <em>draw</em> are a separate thing and stay
+          on.
         </p>
       </section>
 
@@ -343,56 +513,78 @@
         <h2>Coincident <span class="keys"><kbd>O</kbd></span></h2>
         <p>
           <strong>What it does:</strong> two points are held at the same place, or a point is held somewhere on a
-          line (an edge, rail or guideline), while everything else stays free. This is how a body corner stays
-          attached to a joint, or a joint stays on an edge, as you edit around it. Bodies drawn onto existing points
-          get coincident constraints automatically.
+          line (a body edge, a rail or a reference segment), while everything else stays free. This is how a body
+          corner stays attached to a joint, or a joint stays on an edge, as you edit around it. Shapes drawn onto
+          existing points get coincident constraints automatically, and a drag dropped
+          <a href="#implicit-constraints">on an armed point</a> gets one too.
         </p>
-        <p><strong>To add one:</strong> click two points, or a point and a line. Its badge is a small circled dot at the shared point.</p>
+        <p>
+          <strong>To add one:</strong> click two points (joints, body corners, a regular polygon's centre, reference
+          points), or a point and a line in either order. Its badge is a small circled dot at the shared point.
+        </p>
       </section>
       <section class="topic" id="tool-horizontal">
         <h2>Horizontal <span class="keys"><kbd>H</kbd></span></h2>
         <p>
-          <strong>What it does:</strong> keeps an edge or rail level, or two points at the same height, in world
-          axes. The sketch solver re-levels it after every edit, so you can drag other corners without the line
-          tilting. Dragging near level also offers it as an implicit constraint.
+          <strong>What it does:</strong> keeps a body edge, rail or reference segment level, or two points at the same
+          height, in world axes. The sketch solver re-levels it after every edit, so you can drag other corners without
+          the line tilting. Dragging into a level alignment also offers it as an
+          <a href="#implicit-constraints">implicit constraint</a>.
         </p>
-        <p><strong>To add one:</strong> click an edge or rail, or two points. Its badge is an <em>H</em> glyph on the line.</p>
+        <p><strong>To add one:</strong> click a line, or two points. Its badge is an <em>H</em> glyph on the line.</p>
       </section>
       <section class="topic" id="tool-vertical">
         <h2>Vertical <span class="keys"><kbd>V</kbd></span></h2>
         <p>
-          <strong>What it does:</strong> keeps an edge or rail upright, or two points on the same vertical line,
-          in world axes. Like Horizontal, it holds through every later edit and is offered implicitly while dragging.
+          <strong>What it does:</strong> keeps a body edge, rail or reference segment upright, or two points on the same
+          vertical line, in world axes. Like Horizontal, it holds through every later edit and is offered implicitly
+          while dragging.
         </p>
-        <p><strong>To add one:</strong> click an edge or rail, or two points. Its badge is a <em>V</em> glyph on the line.</p>
+        <p><strong>To add one:</strong> click a line, or two points. Its badge is a <em>V</em> glyph on the line.</p>
       </section>
       <section class="topic" id="tool-parallel">
         <h2>Parallel <span class="keys"><kbd>P</kbd></span></h2>
         <p>
-          <strong>What it does:</strong> keeps two lines (edges or rails, on the same body or different ones) at
-          the same angle without fixing that angle: turn one and the other follows.
+          <strong>What it does:</strong> keeps two lines (body edges, rails or reference segments, on the same body or
+          different ones) at the same angle without fixing that angle: turn one and the other follows. A linear
+          pattern's dotted direction line counts as a line too.
         </p>
         <p><strong>To add one:</strong> click the two lines. A matching pair of badges marks both.</p>
       </section>
       <section class="topic" id="tool-perpendicular">
         <h2>Perpendicular <span class="keys"><kbd>T</kbd></span></h2>
         <p>
-          <strong>What it does:</strong> keeps two lines (edges or rails) at a right angle to each other, whatever
-          their absolute orientation. Useful for square corners that must stay square while the body is reshaped.
+          <strong>What it does:</strong> keeps two lines (body edges, rails or reference segments) at a right angle to
+          each other, whatever their absolute orientation. Useful for square corners that must stay square while the
+          body is reshaped.
         </p>
         <p><strong>To add one:</strong> click the two lines. A matching pair of badges marks both.</p>
       </section>
       <section class="topic" id="tool-equal">
-        <h2>Equal length <span class="keys"><kbd>E</kbd></span></h2>
+        <h2>Equal <span class="keys"><kbd>E</kbd></span></h2>
         <p>
-          <strong>What it does:</strong> keeps two lines (edges or rails) the same length: stretch one and the other
-          stretches with it. Combine it with a driving <a href="#dimensions">dimension</a> on one of them to size both.
+          <strong>What it does:</strong> keeps two <em>lines</em> the same length — stretch one and the other stretches
+          with it — or two <em>radii</em> the same: a disk body's rim, a round hole, a rounded corner's arc, a reference
+          circle or a reference arc, in any mix. Combine it with a driving <a href="#dimensions">dimension</a> on one of
+          them to size both. Equals chain: A = B and B = C keep all three alike.
         </p>
-        <p><strong>To add one:</strong> click the two lines. A matching pair of badges marks both.</p>
+        <p>
+          <strong>To add one:</strong> click two lines (body edges, rails or reference segments), or two circles / rounded
+          corners — the second takes the first one's value. A line and a circle together are refused, and a sharp corner
+          has no arc to click (round it a little first). One <em>=</em> badge sits at each element; on radii it turns red
+          while they differ.
+        </p>
+        <p>
+          <strong>Who follows, for radii:</strong> a driving diameter or radius dimension anywhere in the chain wins (a
+          second dimension that disagrees is rejected, both flashing); a reference arc and component geometry can only be
+          copied, never resized; otherwise the element you resize directly — rim or radius handle, <kbd>[</kbd> /
+          <kbd>]</kbd>, a reference circle's handle — is the reference, and the partners follow (their size dimensions go
+          back to driven, like the resized outline's own). A disk that follows keeps its tangent lines on the new rim.
+        </p>
       </section>
 
       <section class="topic" id="tool-fixed">
-        <h2>Fixed <span class="keys"><kbd>L</kbd></span></h2>
+        <h2>Fixed <span class="keys"><kbd>F</kbd></span></h2>
         <p>
           <strong>What it does:</strong> locks one element where it is. A <em>point</em> — a joint, a body corner, a
           regular polygon&rsquo;s centre, a reference point — keeps its exact position: nothing moves it again, not
@@ -404,12 +596,16 @@
           <strong>To add one:</strong> click the point or the line. One click is the whole gesture, and its badge is a small
           <strong>padlock</strong> on the locked element &mdash; the same icon as the toolbar button.
         </p>
+        <figure data-svg="img/constraint-fixed.svg">
+          <figcaption>A locked corner and a locked reference line, each with its padlock badge.</figcaption>
+        </figure>
         <p>
           Use it to nail a mechanism down while you sketch the rest against it: everything constrained to a locked
           element yields to it instead of dragging it along. Two locks that contradict each other (a coincident between
           two locked points, a parallel between two lines locked on different tracks) are refused, and the conflicting
           items flash red. Mirroring a locked body re-anchors its locks to the mirrored geometry &mdash; the lock holds
-          it <em>there</em> rather than fighting a move you asked for.
+          it <em>there</em> rather than fighting a move you asked for. A locked element looks like any other apart from
+          its badge, so when a body deforms around a point under a drag, look for the padlock.
         </p>
       </section>
 
@@ -423,10 +619,14 @@
           offset; their endpoints stay free, so the two need not be the same length or line up end to end.
         </p>
         <p>
-          <strong>To add one:</strong> click the two points (or the two lines), then the mirror line &mdash; a body edge,
-          a rail or a reference segment. Its badge is a small <strong>dashed mirror with a dot each side</strong>, the
-          same picture as the toolbar button, on both elements and on the mirror line.
+          <strong>To add one:</strong> three clicks — the two points (or the two lines), then the mirror line &mdash; a
+          body edge, a rail or a reference segment; the status bar says which click comes next. Its badge is a small
+          <strong>dashed mirror with a dot each side</strong>, the same picture as the toolbar button, on both elements
+          and on the mirror line; hovering one links the pair.
         </p>
+        <figure data-svg="img/constraint-symmetric.svg">
+          <figcaption>Two disks held symmetrical about a vertical reference line: a badge on each disk and on the mirror.</figcaption>
+        </figure>
         <p>
           Who moves follows the usual rule: the more mobile side gives way. A free reference line used as the mirror is
           itself re-placed onto the pair&rsquo;s bisector by its first symmetry; once it carries two symmetries, is
@@ -444,38 +644,92 @@
           body edge, a rail or a reference segment.
         </p>
         <p>
-          <strong>To add one:</strong> click the circle (its rim) and the line, in either order. Its badge &mdash; a small
-          <strong>circle touching a line</strong>, the same picture as the toolbar button &mdash; sits at the contact point.
+          <strong>To add one:</strong> click the circle (its rim) and the line, in either order; while the tool is armed a
+          circle under the cursor highlights as its whole rim, and the status bar says which pick is still missing. Its
+          badge &mdash; a small <strong>circle touching a line</strong>, the same picture as the toolbar button &mdash; sits
+          at the contact point; hovering it highlights the rim and the line.
         </p>
+        <figure data-svg="img/constraint-tangent.svg">
+          <figcaption>A disk tangent to the top edge of a plate: one badge, at the contact point.</figcaption>
+        </figure>
         <p>
           The radius never changes for a tangent: a disk is sized by its <a href="#dimensions">diameter dimension</a> or
           its rim handle, and a reference arc moves as a rigid piece. Who moves follows the usual rule &mdash; the more
           mobile side gives way: a free reference circle comes to a body edge, a disk comes to an edge locked with
           <a href="#tool-fixed">Fixed</a>, a locked disk pushes the edge, and two free bodies meet halfway. Dragging the
-          disk slides it along the line; driving its diameter moves the line out to the new rim.
+          disk slides it along the line; driving its diameter moves the line out to the new rim; a circle dragged through
+          its line re-attaches on the far side.
         </p>
         <p>
           To <strong>blend a line smoothly into an arc</strong>, add the tangent and then a
           <a href="#tool-coincident">Coincident</a> between the arc&rsquo;s end and the line&rsquo;s end: the line then
           touches the arc exactly at the shared end, and dragging that end swings the line with it.
         </p>
+        <figure data-svg="img/tangent-blend.svg">
+          <figcaption>Two reference lines blending into a reference arc: a tangent and a coincident at each end.</figcaption>
+        </figure>
       </section>
 
       <section class="topic" id="tool-measure">
         <h2>Measure <span class="keys"><kbd>D</kbd></span></h2>
         <p>
-          Place a dimension: click two references (points or lines), then click where the value should sit. A first
-          click on a round hole makes a diameter dimension; on a rounded corner's arc, a radius dimension. Dimensions
-          placed in Simulate mode are live read-outs that follow the motion.
+          Place a dimension: click two references — points (joints, body corners, hole corners, reference points, a
+          regular polygon's centre, or any point inside a body) or lines (body and hole edges, rails, reference
+          segments, a pattern's direction) — then click where the value should sit. Or click <strong>one line</strong> and
+          then click on nothing: that places the line's own length, a plain dimension between its two ends (hovering
+          empty space previews it; hovering another reference highlights it, and clicking it makes the usual line-to-point
+          or line-to-line dimension instead). Click the <strong>rim of a round hole</strong> or disk as the first pick for a
+          <strong>diameter</strong> dimension (⌀), or a <strong>rounded corner's arc</strong> for a <strong>radius</strong>
+          dimension (R) — neither needs a second reference.
         </p>
+        <p>
+          What a pair measures follows from what you picked: two points give a horizontal, vertical or direct distance
+          depending on where you place the value (above or below the pair → horizontal, beside it → vertical, in the
+          diagonal zones → direct); a point and a line, the perpendicular distance; two lines, their distance while
+          parallel and their angle otherwise. Dimensions placed in Simulate mode are live read-outs that follow the
+          motion; each mode keeps its own set.
+        </p>
+        <figure data-svg="img/dimension-sizes.svg">
+          <figcaption>A diameter dimension on a round hole and a radius dimension on a rounded corner.</figcaption>
+        </figure>
       </section>
 
       <section class="topic" id="dimensions">
         <h2>Dimensions</h2>
         <p>
-          A dimension starts <strong>driven</strong>: it reports the current value. Double-click its label and type a
-          number to make it <strong>driving</strong>: the geometry moves to match and stays there while you edit
-          elsewhere. Clear the value to make it driven again. The eye button in the measure group hides all dimensions.
+          A dimension starts <strong>driven</strong>: it reports the current value, in parentheses. Double-click its
+          label and type a number to make it <strong>driving</strong>: the geometry moves to match and stays there while
+          you edit elsewhere. Clear the value to make it driven again. A value the sketch can't reach is refused, with a
+          toast naming what held the geometry and a red flash on it. The <strong>eye</strong> on the Measure group's
+          caption hides all dimensions, in both modes.
+        </p>
+        <p>
+          A point–point dimension's <strong>direction is fixed when it is placed</strong>. The pill leads with a small
+          arrow saying which — horizontal, vertical, or a rising diagonal for a direct distance — and dragging the pill
+          afterwards only moves the pill. <strong>Click the arrow</strong> to change the direction: each click cycles
+          horizontal → vertical → direct, and a driving dimension keeps its value and re-solves along the new direction
+          (or the change is refused with the usual flash). A pill dragged past the end of its dimension line gets a dashed
+          <strong>leader</strong> back to it, so the value still reads as belonging to it. Diameter, radius, point–line,
+          line–line and angle dimensions carry no arrow.
+        </p>
+        <figure data-svg="img/dimension-directions.svg">
+          <figcaption>Horizontal, vertical and direct dimensions between the corners of a plate, each led by its direction arrow; the bottom one's label was dragged past the end and gets a leader.</figcaption>
+        </figure>
+        <p>
+          <strong>What a driving dimension moves.</strong> The first driving dimension on an otherwise-unconstrained
+          body <strong>scales the whole body</strong> uniformly — unless an end of it is on a <strong>hole</strong>: a
+          hole's own width, diameter or distance from a corner changes just that hole, and the outline stays. Further
+          dimensions move only the involved nodes while every constraint and driving dimension holds, and a body moved by
+          a dimension moves as a whole, holes and joints riding along. A driving diameter or radius sets that disk or
+          corner directly (every corner of the outline when they are uniform), and every radius made
+          <a href="#tool-equal">Equal</a> to it. A dimension on a pattern's seed drives it like any hole and every
+          instance copies the result; only a distance <em>between</em> two instances is refused — that is the pattern's
+          spacing, edited on its label.
+        </p>
+        <p>
+          <strong>On components</strong> a dimension never changes a shape: between two instances it moves one of them
+          rigidly (a grounded one stays put); between two mobile parts of one component it re-poses the internal
+          mechanism; internal to one rigid piece it is rejected, since that is dimensioned inside the definition.
         </p>
       </section>
 
@@ -484,55 +738,90 @@
 
       <section class="topic" id="editing">
         <h2>Selecting and editing</h2>
-        <figure class="ui" data-glyph-row="group:edit-group"><figcaption>The edit group.</figcaption></figure>
+        <figure class="ui" data-glyph-row="group:sec-transform"><figcaption>The Transform group: mirror, stacking order, rotate.</figcaption></figure>
         <ul>
           <li><strong>Select</strong> by clicking; <kbd>Ctrl</kbd>+click adds to the selection; drag a box from empty space to select everything inside.</li>
-          <li><strong>Move</strong> by dragging a selected body or joint. Snapping follows the <a href="#grid">grid</a>, guidelines and <a href="#object-snap">object snap</a>.</li>
-          <li><strong>Edit a shape</strong>: a selected body shows its corner handles; drag them, double-click an edge to add a corner, double-click a corner to remove it.</li>
+          <li><strong>Move</strong> by dragging a selected body or joint. Snapping follows the <a href="#grid">grid</a>, reference geometry and <a href="#object-snap">object snap</a>; hold <kbd>Shift</kbd> to move rigidly with the linked neighbours instead.</li>
+          <li><strong>Edit a shape</strong>: a selected body shows its <a href="#el-handles">corner handles</a>; drag them, double-click an edge to add a corner, double-click a corner to remove it (a regular polygon keeps its shape — change its side count instead).</li>
           <li><strong>Feature selection</strong>: with one body selected, <kbd>Shift</kbd>+drag a box to select some of its corners, holes and joints and move, delete or copy them together.</li>
           <li><strong>Delete</strong> with <kbd>Delete</kbd> or <kbd>Backspace</kbd>; <strong>undo</strong> with <kbd>Ctrl</kbd>+<kbd>Z</kbd>, redo with <kbd>Ctrl</kbd>+<kbd>Y</kbd>.</li>
-          <li><strong>Copy and paste</strong> with <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd>: a body travels with its joints, internal constraints and dimensions; the paste lands at the pointer.</li>
-          <li><strong>Group</strong> with <kbd>Ctrl</kbd>+<kbd>G</kbd> so several bodies select and move as one; press it again on a group to dissolve it.</li>
+          <li><strong>Copy and paste</strong> with <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd>: a body travels with its joints, internal constraints and dimensions; the paste lands at the pointer. A feature selection pastes its holes and joints into the selected body.</li>
+          <li><strong>Group</strong> with <kbd>Ctrl</kbd>+<kbd>G</kbd> so several bodies select and move as one; press it again on a group to dissolve it. <a href="#group-edit">Double-click a member</a> to edit the parts inside.</li>
         </ul>
         <figure data-svg="img/plate-selected.svg">
           <figcaption>A selected plate with two round holes, showing its corner handles.</figcaption>
         </figure>
       </section>
 
+      <section class="topic" id="group-edit">
+        <h2>Editing inside a group</h2>
+        <p>
+          A <a href="#el-group">group</a> is one object — until you <strong>double-click a member</strong>. That opens the
+          group for editing from the inside, the way a component definition opens: its bodies and joints select, drag and
+          reshape <strong>one at a time</strong>, while everything outside drops to 20% strength and goes inert — it can't
+          be selected or dragged until you leave, but it is still a snap and constraint target, so you can align and
+          dimension the group's parts against the rest of the drawing. Dimensions, constraint badges and patterns that
+          <strong>touch the group</strong> stay at full strength and stay editable; those that don't fade with the
+          surroundings. The grid never fades: it is the paper, not the drawing.
+        </p>
+        <figure data-svg="img/group-edit.svg">
+          <figcaption>Inside a two-bar group: its members at full strength, the plate outside veiled.</figcaption>
+        </figure>
+        <figure class="ui" data-ui="crumb-group">
+          <figcaption>The breadcrumb bar while a group is open.</figcaption>
+        </figure>
+        <p>
+          A breadcrumb bar at the top left names what you are inside (<em>Assembly ▸ Group (2 parts)</em>). Leave with
+          <kbd>Esc</kbd> (twice if something is selected), a double-click on empty space, or a click on a crumb; the group
+          is selected whole again. It is a Draw-mode <em>view</em> of your own document: nothing is saved, nothing lands
+          in undo, and it ends by itself if the group is dissolved or undone away. Note that <kbd>Ctrl</kbd>+<kbd>G</kbd>
+          inside a group dissolves it — the selection is the group.
+        </p>
+      </section>
+
       <section class="topic" id="tool-rotate">
         <h2>Rotate <span class="keys"><kbd>R</kbd></span></h2>
         <p>
           Turn the selected body about its centroid, or grab one of its nodes to turn it about that node. The angle
-          snaps to multiples of 45° near them. With several bodies selected the whole set turns together.
+          snaps to multiples of 45° near them. With several bodies selected the whole set turns together. Rotate is a
+          mode rather than a one-shot tool; press <kbd>Esc</kbd> or pick another tool to leave it.
         </p>
       </section>
 
       <section class="topic" id="mirror">
         <h2>Mirror</h2>
         <p>
-          Flip the selection left-right or top-bottom in place, about the selection's own centre. Joints and constraints
-          inside the selection mirror with it.
+          Flip the selection left-right or top-bottom in place, about the selection's own centre. Joints, constraints
+          and dimensions inside the selection mirror with it; a Fixed lock re-anchors to the mirrored geometry. A
+          component instance mirrors into its definition's mirror image and stays linked to it.
         </p>
       </section>
 
       <section class="topic" id="stacking-order">
         <h2>Stacking order <span class="keys"><kbd>PageUp</kbd> / <kbd>PageDown</kbd></span></h2>
-        <p>Bring the selected body in front of everything else, or send it behind. Purely visual.</p>
+        <p>
+          Bring the selected body in front of everything else, or send it behind. Purely visual — but clicks always pick
+          the topmost body, so this also decides what a click lands on. The order is saved with the file.
+        </p>
       </section>
 
       <section class="topic" id="body-colour">
         <h2>Body colour</h2>
         <p>
-          With a body selected, the colour swatch recolours it. With nothing selected, it sets the colour new bodies
-          get.
+          The swatch in the <strong>Colour</strong> group sets the active colour. With nothing selected it is the colour
+          new bodies get; with a body selected it shows that body's colour and editing it recolours the body. With a
+          multi-selection or a group selected it recolours <strong>every body in it</strong> at once (showing the first
+          member's colour when they differ). Component instances are left out — an instance takes its colour from its
+          definition, so open the definition to recolour it; a toast says when some were skipped.
         </p>
       </section>
 
       <section class="topic" id="units">
         <h2>Working units</h2>
         <p>
-          One world unit is one of the chosen unit (millimetres by default). Changing the unit moves nothing; it only
-          changes how the grid, dimensions and exports interpret the numbers.
+          One world unit is one of the chosen unit (millimetres by default), set from the dropdown in the Grid group.
+          Changing the unit moves nothing; it only changes how the grid, dimensions, imports and exports interpret the
+          numbers. The choice is saved with the file.
         </p>
       </section>
 
@@ -545,7 +834,9 @@
           A component packs a selection into a reusable <strong>definition</strong> and replaces it with an
           <strong>instance</strong>. Every instance follows its definition: edit one and all of them change. With an
           instance selected, the button forks it into a new independent component; with nothing selected it creates an
-          empty component and opens it for editing. Instances can be mirrored and rotated like bodies.
+          empty component and opens it for editing. Instances can be mirrored and rotated like bodies. Their shapes are
+          design-locked: constraints and dimensions on an instance move it as a whole (or pose its internal mechanism)
+          rather than reshaping it.
         </p>
       </section>
 
@@ -553,15 +844,18 @@
         <h2>Component browser</h2>
         <p>
           Lists every definition in the document. From here you insert an instance (click the canvas to place it),
-          rename, edit or delete a definition. Hovering a row highlights its instances on the canvas.
+          rename, edit or delete a definition, and drag rows to reorder the list. Hovering a row highlights its
+          instances on the canvas; hovering an instance highlights its row.
         </p>
       </section>
 
       <section class="topic" id="component-context">
         <h2>Editing a definition in context</h2>
         <p>
-          Double-click an instance to open its definition; all normal tools work inside. A breadcrumb at the top left
-          shows where you are and takes you back out. <kbd>Ctrl</kbd>+double-click opens the definition with the whole
+          Double-click an instance to open its definition; all normal tools work inside. The <strong>breadcrumb
+          bar</strong> at the top left shows where you are — definitions can nest, and an open
+          <a href="#group-edit">group</a> adds a crumb of its own — and clicking a crumb takes you back out (so does
+          <kbd>Esc</kbd> with nothing selected). <kbd>Ctrl</kbd>+double-click opens the definition with the whole
           enclosing assembly drawn faded around it: this <strong>context ghost</strong> is inert, but you can snap to it
           and place temporary dimensions onto it to position the definition against its surroundings. The eye on each
           breadcrumb chooses how many enclosing levels are shown.
@@ -573,6 +867,7 @@
 
       <section class="topic" id="animation">
         <h2>Running the animation <span class="keys"><kbd>Space</kbd></span></h2>
+        <figure class="ui" data-glyph-row="group:sec-anim"><figcaption>The Animation group: play / pause and auto-pause.</figcaption></figure>
         <p>
           In Simulate mode the play button drives every <a href="#tool-linearActuator">linear actuator</a> and
           <a href="#tool-motor">motor</a> at once. Pausing and playing resumes smoothly from the current pose. The
@@ -582,16 +877,16 @@
       </section>
 
       <section class="topic" id="tool-linearActuator">
-        <h2>Linear actuator <span class="keys"><kbd>A</kbd></span></h2>
+        <h2>Linear actuator <span class="keys"><kbd>Shift</kbd>+<kbd>A</kbd></span></h2>
         <p>
           Click a slider or rail to make it self-driving: its carriage travels back and forth between the rail's ends
           during animation. Select it to set the speed and the motion profile (triangle for constant speed, sine for a
-          smooth ease at the ends).
+          smooth ease at the ends) in the toolbar's properties strip.
         </p>
       </section>
 
       <section class="topic" id="tool-motor">
-        <h2>Motor <span class="keys"><kbd>M</kbd></span></h2>
+        <h2>Motor <span class="keys"><kbd>Shift</kbd>+<kbd>M</kbd></span></h2>
         <p>
           Pick a pivot joint and then a crank pin on the same body: in animation the crank pin orbits the pivot at the
           configured angular speed. Select the motor to set its speed.
@@ -610,9 +905,9 @@
       <section class="topic" id="solver-tuning">
         <h2>Solver tuning</h2>
         <p>
-          The sliders in the mode group adjust how hard the simulation works each frame: iterations per animation frame,
-          the clean-up budget, the structural tolerance and the break tolerance. The defaults suit most mechanisms;
-          raise the iterations if long chains lag behind the pointer.
+          The four controls in the properties strip (Simulate mode) adjust how hard the simulation works each frame:
+          iterations per animation frame, the clean-up budget, the structural tolerance and the break tolerance. The
+          defaults suit most mechanisms; raise the iterations if long chains lag behind the pointer.
         </p>
       </section>
 
@@ -620,36 +915,60 @@
       <h1 class="chapter">View and workspace</h1>
 
       <section class="topic" id="view">
-        <h2>View <span class="keys"><kbd>F</kbd> fit, <kbd>Shift</kbd>+<kbd>R</kbd> rotate</span></h2>
-        <figure class="ui" data-glyph-row="fit-btn rotate-view-btn"><figcaption>Fit to screen and the view-rotation dial.</figcaption></figure>
+        <h2>View <span class="keys"><kbd>Shift</kbd>+<kbd>F</kbd> fit, <kbd>Ctrl</kbd>+<kbd>R</kbd> rotate</span></h2>
+        <figure class="ui" data-glyph-row="group:sec-view"><figcaption>The View group: rotate the view, fit to screen, theme.</figcaption></figure>
         <p>
           Fit centres the whole mechanism on screen. The rotate-view dial turns the whole picture (snapping to 5°,
-          <kbd>Shift</kbd> for any angle); type an exact angle under its centre, double-click the centre for 0°. The
-          rotation is purely visual: the document, its axes, grid and snapping all stay in world axes.
+          <kbd>Shift</kbd> for any angle); type an exact angle under its centre, double-click the centre or press
+          <kbd>0</kbd> for upright. The rotation is purely visual: the document, its axes, grid and snapping all stay in
+          world axes, and labels stay upright.
         </p>
       </section>
 
-      <section class="topic" id="grid">
-        <h2>Grid and snap</h2>
+      <section class="topic" id="grid" data-glyph="grid-btn">
+        <h2>Grid</h2>
+        <figure class="ui" data-ui="grid-group">
+          <figcaption>The Grid group: spacing and units on top, line style and colour below, the eye on the caption.</figcaption>
+        </figure>
         <p>
-          The grid button shows or hides the grid; the snap button makes placement and dragging land on grid points.
-          The spacing is chosen from the list next to them, in working units; type your own value to add it to the
-          list.
+          The <strong>eye</strong> on the group's caption shows or hides the grid; snapping to it is the Snap button in the
+          <a href="#object-snap">Snapping</a> group, and the two are independent (you can snap to a hidden grid). The
+          <strong>spacing</strong> is chosen from the list, in working units; type your own value in the Custom field to
+          add it to the list. The <strong>units</strong> dropdown beside it declares what one world unit means.
+        </p>
+        <p>
+          The grid's look is yours: the <strong>style</strong> picker shows a sample of the line itself — solid, dashed or
+          dotted lines, or points (a dot at each intersection, the least obtrusive) — and the <strong>colour</strong>
+          swatch tints it. The colour is kept per theme, since a tone that reads against the dark background disappears
+          against the light one; the swatch edits the theme you are in, and <strong>right-click</strong> it to return that
+          theme to its default tone. Both settings are remembered. Lines and dots keep the same on-screen weight at any
+          zoom; the points grid stops drawing when it would merge into a wash.
         </p>
       </section>
 
       <section class="topic" id="object-snap">
-        <h2>Object snap</h2>
+        <h2>Snapping</h2>
+        <figure class="ui" data-glyph-row="group:sec-snap"><figcaption>The Snapping group: snap to grid, object snap.</figcaption></figure>
         <p>
-          With object snap on, a dragged body is carried by the corner, edge midpoint, edge or centre nearest to where
-          you grabbed it (highlighted), and that feature snaps onto the same features of other bodies, rails and
-          guidelines.
+          <strong>Snap</strong> makes placement and dragging land on grid points — or, in preference to the grid, on
+          nearby reference geometry (projected onto a reference edge within its span, onto a rim, or onto the
+          intersection of two reference edges).
+        </p>
+        <p>
+          <strong>Object snap</strong> makes objects snap to each other. A dragged body is carried by the feature nearest
+          to where you grabbed it — a corner, then an edge midpoint, then an edge, else its centre (highlighted, and
+          previewed as you hover) — and that feature snaps onto the same features of other bodies, joints, rails and
+          reference geometry: corners, the midpoints of edges, rails and reference segments, centres, edges. An edge snaps
+          onto parallel edges only, sliding until the two are flush. When a point target and a line are both in range the
+          <strong>point wins</strong>, so sliding along an edge jumps onto its midpoint as you pass it. Object snap also
+          applies to reshaping (a dragged corner node or hole centre snaps onto the other features) and to placement (a
+          new joint or hole centre lands on the nearest corner, midpoint, centre or joint in range).
         </p>
       </section>
 
       <section class="topic" id="theme">
         <h2>Light and dark theme</h2>
-        <p>Toggles the interface between the dark and light palettes. The choice is remembered; this manual follows it.</p>
+        <p>Toggles the interface between the dark and light palettes. The choice is remembered; this manual follows it, and so does the grid colour you set for each theme.</p>
       </section>
 
       <!-- ============================================================ -->
@@ -657,12 +976,14 @@
 
       <section class="topic" id="files">
         <h2>Saving and loading <span class="keys"><kbd>Ctrl</kbd>+<kbd>S</kbd>, <kbd>Ctrl</kbd>+<kbd>O</kbd></span></h2>
+        <figure class="ui" data-glyph-row="group:sec-file"><figcaption>The File group: open, save, export, auto-backup, shortcuts, delete everything.</figcaption></figure>
         <p>
           Documents are JSON files. In Chromium browsers <kbd>Ctrl</kbd>+<kbd>S</kbd> saves in place: the first save asks
           where, later saves overwrite silently, and the title shows a dot while the document has unsaved changes.
           <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> saves as a new file. Elsewhere, saving downloads a timestamped
-          copy. Load with <kbd>Ctrl</kbd>+<kbd>O</kbd> or drop a file onto the canvas; DXF files are imported as bodies.
-          The trash button clears the whole document (or, inside a component, just that definition).
+          copy. Load with <kbd>Ctrl</kbd>+<kbd>O</kbd> or drop a file onto the canvas; DXF files are imported as bodies,
+          at true scale, with their fillets and circles editable. The trash button clears the whole document (or, inside
+          a component, just that definition). Your work is also auto-saved in the browser and restored when you return.
         </p>
       </section>
 
@@ -670,7 +991,9 @@
         <h2>Export cut files</h2>
         <p>
           Writes a DXF (for CAM: routers, plasma) or an SVG in millimetres (for laser software) of the selected bodies,
-          or all bodies when nothing is selected. Optionally adds a drill hole at every joint, on its own layer.
+          or all bodies when nothing is selected. Rounded corners, disks and rounded hulls export as exact arcs, every
+          hole as its own loop. Optionally adds a drill hole at every joint, on its own layer. Reference geometry and
+          labels never export.
         </p>
       </section>
 
@@ -680,6 +1003,32 @@
           Periodically writes timestamped copies of the mechanism into a folder you choose, a set time after the first
           change since the last backup or save, and prunes the folder to the last few copies. The panel shows the
           countdown to the next backup. The clock button turns amber when backups are paused waiting for folder access.
+        </p>
+      </section>
+
+      <section class="topic" id="shortcuts-panel">
+        <h2>Keyboard shortcuts panel</h2>
+        <figure class="ui" data-ui="keymap-panel">
+          <figcaption>The Shortcuts panel, opened from the keyboard button in the File group.</figcaption>
+        </figure>
+        <p>
+          Every shortcut in Disjointed comes from one file, and the keyboard button in the <strong>File</strong> group
+          opens a small panel with three actions. <strong>Export</strong> writes <code>disjointed-keymap.json</code> — the
+          shortcuts exactly as they are right now. <strong>Import…</strong> reads one back; tooltips update the moment it
+          loads. <strong>Reset</strong> returns to the shortcuts Disjointed ships with.
+        </p>
+        <p>
+          The file is a <code>keymap/1</code> document — the format <strong>KeyMapper</strong> reads, a board that lays
+          every key out at once so you can drag bindings around and see the clashes and the free letters as you go.
+          Export from here, rearrange there, import the result. Your keymap is kept in this browser, not in the mechanism
+          file, so it follows you between mechanisms and not between machines.
+        </p>
+        <p>
+          A command can have more than one key (<kbd>Delete</kbd> and <kbd>Backspace</kbd> both delete) or none at all:
+          about twenty commands ship unbound — Export, the mirrors, the grid and snap toggles, zoom, the theme, Rail,
+          Subtract and Intersect among them — and a keymap can give any of them a key. <kbd>Esc</kbd> is hardwired.
+          The shortcuts that answer while you are typing in a field are only Save, Save as, Open and <kbd>F1</kbd>. The
+          list in <a href="#shortcuts">Keyboard shortcuts</a> is the shipped layout.
         </p>
       </section>
 
@@ -696,7 +1045,7 @@
           <a href="#body-colour">colour swatch</a>.
         </p>
         <figure data-svg="img/legend.svg">
-          <figcaption>Left to right, top row: a free joint, a body with a plain joint, two bars pinned together, a grounded joint, two plates welded. Bottom row: a guideline, a dimension, a horizontal-constraint badge.</figcaption>
+          <figcaption>Left to right, top row: a free joint, a body with a plain joint, two bars pinned together, a grounded joint, two plates welded. Bottom row: a reference line, a dimension, a horizontal-constraint badge.</figcaption>
         </figure>
       </section>
 
@@ -712,8 +1061,10 @@
       <section class="topic" id="el-group">
         <h2>Group</h2>
         <p>
-          Several bodies that select and move as one and behave as a single rigid body in simulation. Clicking any
-          member selects the whole group. Made and dissolved with <kbd>Ctrl</kbd>+<kbd>G</kbd>.
+          Several bodies (and free joints) that select and move as one and behave as a single rigid body in simulation.
+          Clicking any member selects the whole group, shown with a dashed outline. Made and dissolved with
+          <kbd>Ctrl</kbd>+<kbd>G</kbd>. <strong>Double-click a member</strong> to <a href="#group-edit">edit the parts
+          inside</a>, with the rest of the drawing faded out.
         </p>
       </section>
 
@@ -723,7 +1074,8 @@
           A cut-out in a body. Holes have the same corner handles and rounding as the outline and are exported with
           it as inner contours. Round holes can carry a diameter <a href="#el-dimension">dimension</a> and be
           repeated by a <a href="#el-pattern">pattern</a>. Cut with any shape tool in the <a href="#roles">Cut
-          role</a> (a shape crossing the outline makes a notch instead).
+          role</a> (a shape crossing the outline makes a notch instead), or by <a href="#subtract">subtracting</a> a
+          body that lies inside another. Holes don't restrict where joints can go.
         </p>
         <figure data-svg="img/plate-selected.svg">
           <figcaption>A selected plate with two round holes.</figcaption>
@@ -736,7 +1088,8 @@
           When a body is selected, small squares mark its control corners and small circles sit on each rounded
           corner. Drag a square to move the corner (the outline follows), drag a circle along the corner to change its
           radius, <kbd>Ctrl</kbd>-drag a circle to round every corner alike. Double-click an edge to add a corner,
-          double-click a corner to remove it. The same handles appear on holes.
+          double-click a corner to remove it. The same handles appear on holes. A regular polygon shows a centre
+          crosshair and an <a href="#tool-polygon">"n sides" tag</a> instead of letting you add or remove corners.
         </p>
       </section>
 
@@ -746,17 +1099,18 @@
           A point attached to a body. On its own it is just a marked point that moves with the body; it becomes a
           hinge, an anchor or a slider once a constraint uses it. Its fill tells its role: plain, blue when
           <a href="#el-pin">pinned</a>, yellow when <a href="#el-ground">grounded</a>, green when it
-          <a href="#el-rider">rides a rail</a>. Placed with the <a href="#tool-joint">Joint tool</a>; delete it and
-          its constraints go with it.
+          <a href="#el-rider">rides a rail</a>. A joint drawn red with a dashed ring has been stranded outside its body by
+          a shape change — drag it back in. Placed with the <a href="#tool-joint">Joint tool</a>; delete it and its
+          constraints go with it.
         </p>
       </section>
 
       <section class="topic" id="el-free-joint" data-glyph="tool-joint">
         <h2>Free joint</h2>
         <p>
-          A joint that belongs to no body. Use one as a fixed anchor by <a href="#tool-ground">grounding</a> it, as an
-          end of a fixed <a href="#el-rail">track</a>, or as a corner to build a body around with the
-          <a href="#tool-polyline">Polyline tool</a>.
+          A joint that belongs to no body, drawn with a dashed ring while nothing holds it. Use one as a fixed anchor
+          by <a href="#tool-ground">grounding</a> it, as an end of a fixed <a href="#el-rail">track</a>, or as a corner
+          to build a body around with the <a href="#tool-polyline">Polyline tool</a>.
         </p>
       </section>
 
@@ -773,7 +1127,8 @@
         <h2>Weld</h2>
         <p>
           A pin that also locks the two bodies' relative angle, so they move as one rigid piece while staying
-          separate parts. Made with the <a href="#tool-weld">Weld tool</a>; clicking a weld with it turns it back into a pin.
+          separate parts; its centre is drawn square. Made with the <a href="#tool-weld">Weld tool</a>; clicking a weld
+          with it turns it back into a pin.
         </p>
       </section>
 
@@ -791,8 +1146,9 @@
         <p>
           A track between two joints, drawn as a double-headed arrow. When both end joints sit on one body the rail
           moves with it; when they are free joints it is fixed in the world. Joints placed on it become
-          <a href="#el-rider">riders</a>. Drawn with the <a href="#tool-rail">Rail tool</a> or, together with its
-          carriage, by the <a href="#tool-slider">Slider tool</a>.
+          <a href="#el-rider">riders</a>. Its midpoint is a snap and alignment target, and the rail itself takes line
+          constraints and dimensions like a body edge. Drawn with the <a href="#tool-rail">Rail tool</a> or, together with
+          its carriage, by the <a href="#tool-slider">Slider tool</a>.
         </p>
         <figure data-svg="img/slider-crank.svg">
           <figcaption>A fixed rail carrying the slider block of a slider-crank.</figcaption>
@@ -812,8 +1168,9 @@
         <h2>Slider</h2>
         <p>
           A rider whose body is also locked to the rail's direction, so the body translates without rotating: a
-          prismatic joint. Built in two clicks with the <a href="#tool-slider">Slider tool</a>; click it with the tool
-          again to unlock the rotation. A slider can be driven by a <a href="#el-actuator">linear actuator</a>.
+          prismatic joint, drawn with a small carriage rectangle. Built in two clicks with the
+          <a href="#tool-slider">Slider tool</a>; click it with the tool again to unlock the rotation. A slider can be
+          driven by a <a href="#el-actuator">linear actuator</a>.
         </p>
       </section>
 
@@ -821,7 +1178,7 @@
         <h2>Linear actuator</h2>
         <p>
           A self-driving rail: in animation its carriage travels back and forth between the rail's ends at the
-          configured speed and profile. Select it to edit them in the toolbar. Made with the
+          configured speed and profile. Select it to edit them in the toolbar's properties strip. Made with the
           <a href="#tool-linearActuator">Linear actuator tool</a>; run it with <a href="#animation">play</a>.
         </p>
       </section>
@@ -835,15 +1192,18 @@
         </p>
       </section>
 
-      <section class="topic" id="el-guide" data-glyph="tool-guide">
+      <section class="topic" id="el-guide" data-glyph="tool-line tool-arc">
         <h2>Reference geometry</h2>
         <p>
-          Dash-dot construction elements with a crosshair handle at each defining point: infinite
-          <a href="#tool-guide">guidelines</a>, <a href="#tool-line">segments</a> and polylines, circles,
-          <a href="#tool-arc">arcs</a> and <a href="#tool-text">text labels</a>. They take part in snapping, measurements
-          and constraints but are not part of the mechanism, are hidden in Simulate mode and never export. Drag a handle
-          to reshape one (a selected circle shows a rim handle to resize it), drag elsewhere on it to move it whole;
-          select and <kbd>Delete</kbd> to remove it. Placed with the reference tools, or any shape tool in the
+          Dash-dot construction elements with a crosshair handle at each defining point: <a href="#tool-line">segments</a>
+          and polylines, polygons, circles, <a href="#tool-arc">arcs</a> and <a href="#tool-text">text labels</a> — all
+          finite. They take part in snapping (in preference to the grid), implicit constraints, measurements and
+          constraints, but are not part of the mechanism, are hidden in Simulate mode and never export. Reference geometry
+          is construction: a constraint between it and real geometry moves the reference element first, unless the element
+          is attached to geometry or carries several demands, in which case it becomes the reference and the geometry
+          comes to it — so any number of corners can be held on one line and dragged together. Drag a handle to reshape
+          one (a selected circle shows a rim handle to resize it), drag elsewhere on it to move it whole; select and
+          <kbd>Delete</kbd> to remove it. Placed with the reference tools, or any shape tool in the
           <a href="#roles">Reference role</a>.
         </p>
       </section>
@@ -851,10 +1211,13 @@
       <section class="topic" id="el-dimension" data-glyph="tool-measure">
         <h2>Dimension</h2>
         <p>
-          A measurement between two references with its value on a label. A driven dimension just reports;
-          double-click the label and type a value to make it driving, and the geometry moves to match. Drag the label
-          to reposition it. In Simulate mode dimensions are live read-outs. See <a href="#dimensions">Dimensions</a>
-          and the <a href="#tool-measure">Measure tool</a>.
+          A measurement between two references with its value on a label. A driven dimension just reports (in
+          parentheses); double-click the label and type a value to make it driving, and the geometry moves to match. Drag
+          the label to reposition it — only the label moves; a point–point dimension's direction is fixed when it is
+          placed and shown by the arrow at the front of the pill, and <strong>clicking that arrow</strong> cycles it
+          horizontal → vertical → direct. A label dragged past the end of its line gets a dashed leader. In Simulate mode
+          dimensions are live read-outs. See <a href="#dimensions">Dimensions</a> and the <a href="#tool-measure">Measure
+          tool</a>.
         </p>
       </section>
 
@@ -863,38 +1226,50 @@
         <p>
           A temporary, muted dimension between the definition you are editing and the faded
           <a href="#el-ghost">context ghost</a> around it. It is never saved and lives only while this definition is
-          open. Double-click its value and type a number to move the live side to that distance once.
+          open. Double-click its value and type a number to move the live side to that distance once; its direction
+          arrow cycles like a normal dimension's.
         </p>
       </section>
 
       <section class="topic" id="el-constraint" data-glyph="sketch-vis-btn">
         <h2>Constraint badge</h2>
         <p>
-          The small glyph marking a sketch constraint on an edge, rail or point pair. Each kind has its own topic:
+          The small glyph marking a sketch constraint on an edge, rail, circle or point. Each kind has its own topic:
           <a href="#tool-coincident">coincident</a>, <a href="#tool-horizontal">horizontal</a>,
           <a href="#tool-vertical">vertical</a>, <a href="#tool-parallel">parallel</a>,
-          <a href="#tool-perpendicular">perpendicular</a>, <a href="#tool-equal">equal</a>. Click a badge to select
-          it, <kbd>Delete</kbd> to remove the constraint. The eye
-          button in the constraint group hides all badges. See <a href="#constraints">Sketch constraints</a>.
+          <a href="#tool-perpendicular">perpendicular</a>, <a href="#tool-equal">equal</a>,
+          <a href="#tool-fixed">fixed</a>, <a href="#tool-symmetric">symmetrical</a>,
+          <a href="#tool-tangent">tangential</a>. Hover a badge to see what it constrains, click it to select it,
+          <kbd>Delete</kbd> to remove the constraint. A badge drawn red marks a constraint that can't currently hold. The
+          eye on the Constraints group's caption hides all badges. See <a href="#constraints">Sketch constraints</a>.
         </p>
       </section>
 
       <section class="topic" id="el-pattern" data-glyph="tool-patternLinear tool-patternCircular">
         <h2>Pattern</h2>
         <p>
-          A hole or joint repeated along one or two directions, or around a centre. Its dotted axis line, handles and
-          labels are drawn beside the members: drag a handle to re-aim it, click a label to edit count, spacing or
-          angle. Members that do not fit are flagged. Made with the <a href="#tool-patternLinear">linear</a> and
-          <a href="#tool-patternCircular">circular</a> pattern tools.
+          One or more holes or joints of a body repeated along one or two directions, or around a centre — a live
+          array: move, reshape or dimension a seed and every instance follows. Drawn in green beside the members: a
+          linear direction shows a dotted line from the seed through every instance, an arrowed <strong>spacing</strong>
+          label beside the first step and a <strong>×count</strong> label past the last; a circular pattern shows a
+          crosshair at the centre with ×count, the <strong>angle</strong> between instances (<em>even</em>, or degrees)
+          and a <strong>↻ turn / ↑ fixed</strong> badge. Double-click any label to type a new value; click a label or the
+          dotted line to select the pattern, then drag the square at the last instance to re-aim it or the centre
+          crosshair to move it. The dotted line is a line reference for constraints and dimensions.
+        </p>
+        <p>
+          Instances that would fall outside the body or overlap another feature are ringed red. Delete with the pattern
+          selected to remove the instances and keep the seed; delete a seed to make its instances independent. Made with
+          the <a href="#tool-patternLinear">linear</a> and <a href="#tool-patternCircular">circular</a> pattern tools.
         </p>
       </section>
 
       <section class="topic" id="el-instance" data-glyph="make-comp-btn">
         <h2>Component instance</h2>
         <p>
-          A placed copy of a component definition. Its bodies and joints select as one unit, and every instance
-          follows its definition. Double-click it to edit the definition; <kbd>Ctrl</kbd>+double-click to edit it in
-          the context of the surrounding assembly. See <a href="#components">Components</a>.
+          A placed copy of a component definition. Its bodies and joints select as one unit (dashed outline), and every
+          instance follows its definition. Double-click it to edit the definition; <kbd>Ctrl</kbd>+double-click to edit
+          it in the context of the surrounding assembly. See <a href="#components">Components</a>.
         </p>
       </section>
 
@@ -914,15 +1289,28 @@
 
       <section class="topic" id="shortcuts">
         <h2>Keyboard shortcuts</h2>
+        <p>
+          The layout Disjointed ships with. Every key here can be changed through the
+          <a href="#shortcuts-panel">Shortcuts panel</a>; commands without a key (Export, the mirrors, the grid and snap
+          toggles, zoom, the theme, Rail, Subtract, Intersect, the component buttons and the panel itself) can be given
+          one there.
+        </p>
         <ul>
-          <li><kbd>Tab</kbd> Draw / Simulate &middot; <kbd>Space</kbd> run animation &middot; <kbd>F</kbd> fit view &middot; <kbd>Shift</kbd>+<kbd>R</kbd> rotate view &middot; <kbd>Esc</kbd> cancel</li>
-          <li>Roles: <kbd>1</kbd> body &middot; <kbd>2</kbd> cut &middot; <kbd>3</kbd> reference &middot; <kbd>Ctrl</kbd>+click flips Body / Cut for one shape</li>
-          <li>Shapes: <kbd>B</kbd> polyline (body) &middot; <kbd>U</kbd> polyline (cut) &middot; <kbd>Shift</kbd>+<kbd>B</kbd> rectangle &middot; <kbd>Shift</kbd>+<kbd>C</kbd> circle &middot; <kbd>Shift</kbd>+<kbd>P</kbd> regular polygon &middot; <kbd>Shift</kbd>+<kbd>S</kbd> slot &middot; <kbd>Shift</kbd>+<kbd>L</kbd> line &middot; <kbd>Shift</kbd>+<kbd>A</kbd> arc &middot; <kbd>Shift</kbd>+<kbd>T</kbd> text</li>
-          <li>Tools: <kbd>X</kbd> split &middot; <kbd>N</kbd> combine &middot; <kbd>J</kbd> joint &middot; <kbd>W</kbd> weld &middot; <kbd>C</kbd> connect &middot; <kbd>G</kbd> ground &middot; <kbd>K</kbd> rail &middot; <kbd>S</kbd> slider &middot; <kbd>L</kbd> guideline &middot; <kbd>R</kbd> rotate &middot; <kbd>I</kbd> linear pattern &middot; <kbd>Q</kbd> circular pattern &middot; <kbd>A</kbd> actuator &middot; <kbd>M</kbd> motor &middot; <kbd>D</kbd> measure</li>
-          <li>Constraints: <kbd>O</kbd> coincident &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>E</kbd> equal &middot; <kbd>L</kbd> fixed &middot; <kbd>Y</kbd> symmetrical &middot; <kbd>Z</kbd> tangential</li>
-          <li>Editing: <kbd>Delete</kbd> &middot; <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd> undo, redo &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>V</kbd> copy, paste &middot; <kbd>Ctrl</kbd>+<kbd>G</kbd> group &middot; <kbd>[</kbd> / <kbd>]</kbd> corner radius &middot; <kbd>PageUp</kbd> / <kbd>PageDown</kbd> stacking</li>
-          <li>Files: <kbd>Ctrl</kbd>+<kbd>S</kbd> save &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save as &middot; <kbd>Ctrl</kbd>+<kbd>O</kbd> open</li>
-          <li>Help: <kbd>?</kbd> open / close the manual &middot; <kbd>F1</kbd> table of contents</li>
+          <li><strong>File</strong>: <kbd>Ctrl</kbd>+<kbd>O</kbd> open… &middot; <kbd>Ctrl</kbd>+<kbd>S</kbd> save &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> save as…</li>
+          <li><strong>Edit</strong>: <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> redo &middot; <kbd>Ctrl</kbd>+<kbd>C</kbd> copy &middot; <kbd>Ctrl</kbd>+<kbd>V</kbd> paste &middot; <kbd>Ctrl</kbd>+<kbd>G</kbd> group / ungroup &middot; <kbd>Delete</kbd> / <kbd>Backspace</kbd> delete &middot; <kbd>Esc</kbd> cancel &middot; <kbd>Enter</kbd> finish &middot; <kbd>]</kbd> more corner radius &middot; <kbd>[</kbd> less corner radius</li>
+          <li><strong>Mode</strong>: <kbd>Tab</kbd> draw / simulate</li>
+          <li><strong>Animation</strong>: <kbd>Space</kbd> run / pause animation</li>
+          <li><strong>Shape role</strong>: <kbd>1</kbd> body role &middot; <kbd>2</kbd> cut role &middot; <kbd>3</kbd> reference role</li>
+          <li><strong>Shapes</strong>: <kbd>B</kbd> polyline (body) &middot; <kbd>Ctrl</kbd>+<kbd>U</kbd> polyline (cut) &middot; <kbd>Shift</kbd>+<kbd>B</kbd> rectangle &middot; <kbd>C</kbd> circle &middot; <kbd>Shift</kbd>+<kbd>P</kbd> regular polygon &middot; <kbd>Shift</kbd>+<kbd>S</kbd> slot &middot; <kbd>L</kbd> line &middot; <kbd>A</kbd> arc &middot; <kbd>Shift</kbd>+<kbd>T</kbd> text &middot; <kbd>↑</kbd> more sides &middot; <kbd>↓</kbd> fewer sides</li>
+          <li><strong>Patterns</strong>: <kbd>I</kbd> linear pattern &middot; <kbd>Q</kbd> circular pattern</li>
+          <li><strong>Body operations</strong>: <kbd>X</kbd> split &middot; <kbd>N</kbd> combine</li>
+          <li><strong>Joints & mating</strong>: <kbd>J</kbd> joint &middot; <kbd>W</kbd> weld &middot; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> connect &middot; <kbd>G</kbd> ground &middot; <kbd>S</kbd> slider</li>
+          <li><strong>Actuators</strong>: <kbd>Shift</kbd>+<kbd>A</kbd> linear actuator &middot; <kbd>Shift</kbd>+<kbd>M</kbd> motor</li>
+          <li><strong>Transform</strong>: <kbd>PageDown</kbd> send to back &middot; <kbd>PageUp</kbd> bring to front &middot; <kbd>R</kbd> rotate</li>
+          <li><strong>Constraints</strong>: <kbd>O</kbd> coincident &middot; <kbd>E</kbd> equal &middot; <kbd>H</kbd> horizontal &middot; <kbd>V</kbd> vertical &middot; <kbd>P</kbd> parallel &middot; <kbd>T</kbd> perpendicular &middot; <kbd>Z</kbd> tangential &middot; <kbd>Y</kbd> symmetrical &middot; <kbd>F</kbd> fixed</li>
+          <li><strong>Measure</strong>: <kbd>D</kbd> measure</li>
+          <li><strong>View</strong>: <kbd>Shift</kbd>+<kbd>F</kbd> fit to screen &middot; <kbd>Ctrl</kbd>+<kbd>R</kbd> rotate the view &middot; <kbd>0</kbd> view upright</li>
+          <li><strong>Help</strong>: <kbd>?</kbd> help drawer &middot; <kbd>F1</kbd> manual contents</li>
         </ul>
       </section>
 
@@ -932,15 +1320,17 @@
         <p>
           Click the help button (or press <kbd>?</kbd>) to open this manual beside the canvas. While it is open the
           pointer is a question mark and every control you click shows its topic here instead of acting; clicking the
-          canvas shows the topic for the armed tool or the current mode. Close it with the help button, <kbd>?</kbd>,
-          <kbd>Esc</kbd> or the ✕ to get back to work. <kbd>F1</kbd> opens the manual at the table of contents. Drag
-          the drawer's left edge to resize it; the arrow button opens the manual in its own tab.
+          canvas shows the topic for whatever is drawn there — a body, a hole, a joint, a rail, a badge, a dimension, a
+          pattern, an instance — or, on empty canvas, for the armed tool or the current mode. Close it with the help
+          button, <kbd>?</kbd>, <kbd>Esc</kbd> or the ✕ to get back to work. <kbd>F1</kbd> opens the manual at the table of
+          contents. Drag the drawer's left edge to resize it; the arrow button opens the manual in its own tab.
         </p>
       </section>
     </main>
     <a id="top-link" href="#toc">Contents</a>
     <script src="glyphs.js"></script>
     <script src="topics.js"></script>
+    <script src="ui.js"></script>
     <script src="help.js"></script>
   </body>
 </html>

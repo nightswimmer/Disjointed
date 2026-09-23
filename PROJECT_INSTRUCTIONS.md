@@ -7,10 +7,11 @@ pitfalls, and what is in flight. Anything else belongs in code comments or READM
 Where things are documented:
 - **README.md** — the complete user-facing reference (every tool, gesture, shortcut, panel). When a
   behaviour question comes up, read it there; do not duplicate it here.
-- **public/help/** — the in-app manual (same content as README, illustrated). Its updates are
-  currently **deferred** (see *In flight*).
+- **public/help/** — the in-app manual (same content as README, illustrated). Brought fully up
+  to date on 2026-09-23 and kept in step with UI changes since (see *Manual* under *UI
+  conventions*).
 - **HANDOFF.md** — unfinished work: the rest of the shortcut remap (next up), the shape-tools
-  roadmap (phases 2–4), smaller follow-ups, and the list of pending manual edits.
+  roadmap (phases 2–4) and smaller follow-ups.
 - **public/keymap.json** — every shortcut, as data, and **the shipped keymap itself** since
   2026-09-15: `src/commands.ts` imports it at build time, so replacing the file remaps the app.
 - Code comments carry the local *why* for most non-obvious branches; `scripts/*.ts` are the
@@ -27,8 +28,9 @@ motion; actuators / motors animate.
 ## Tech stack & commands
 - Vite + TypeScript + HTML5 Canvas, no UI framework, no runtime dependencies. Node 24.
 - `npm run dev` / `build` / `preview`; `npm test` runs every `scripts/*.ts` (tsx, headless, no DOM);
-  `npm run manual` regenerates the manual's SVG illustrations + glyph tables with Playwright driving
-  the **installed Chrome** (`channel: "chrome"`), and fails if a topic the app can ask for is missing.
+  `npm run manual` regenerates the manual's SVG illustrations, UI markup snapshots and glyph tables
+  with Playwright driving the **installed Chrome** (`channel: "chrome"`), and fails if a topic the
+  app can ask for is missing or a referenced image / snapshot was not generated.
 - Keymap scripts: `npm run keymap:file` rewrites `public/keymap.json`'s **metadata** from the
   registry and keeps every binding — needed only after *adding a command*, which it appends with
   an empty binding list; it refuses to write over a file it cannot parse, since that would throw
@@ -63,6 +65,7 @@ motion; actuators / motors animate.
 | `notify.ts` | Toasts — the project-wide replacement for `alert` |
 | `filestore.ts` | File System Access API wrappers + IndexedDB handle storage |
 | `toolbar.ts` | Toolbar section rack: drag a group by its caption to reorder (live FLIP reflow), order in localStorage |
+| `public/ui.css` / `style.css` | The **look** of the controls and panels (palette, buttons, fields, combos, sections, toggles, crumb bar, panels), linked from `index.html` before the bundle and shared with the manual / the **page**: layout, where overlays sit, drag states, editors, toasts, help drawer |
 | `help.ts` / `helpmap.ts` | Help drawer + help mode; DOM-free UI→topic map shared with the manual generator |
 | `automation.ts` / `svgcontext.ts` | Playwright hook; canvas-API-shaped SVG recorder (manual illustrations) |
 | `public/help/`, `scripts/manual/` | The manual and its generator (`shoot.ts`, `shots.ts`, `fixtures.ts`) |
@@ -411,6 +414,28 @@ motion; actuators / motors animate.
   in the Constraints group): a `tb-tall` pill with a slider under its glyph. The pill stays
   **neutral when on** — it overrides `button.active`, because an accent-filled button means "this
   tool is armed" everywhere else — and the accent lives on the slider track instead.
+- **Manual (`public/help/`, `scripts/manual/`)**: one topic per tool, control and canvas element —
+  `npm run manual` fails on a topic the app can ask for that the page lacks, and on a referenced
+  image it didn't generate. Fixtures are built with the Scene API, which does **not** solve:
+  draw the geometry already satisfying its constraints. `fitView` frames bodies only and the
+  SVG crop clamps to the canvas, so shots with annotations or reference geometry carry a
+  `zoom` (≈0.4–0.5 with bodies; >1 for a reference-only scene) — which is also what keeps the
+  11 px badges legible once the manual shows a capture at its own width. UI is shown as
+  **markup snapshots** (`kind: "html"`: the generator copies the element's `outerHTML` into
+  `public/help/ui.js`; `help.js` renders it `inert`, styled by `../ui.css`), so one snapshot
+  follows both themes and every restyle; `png` shots stay as the fallback for anything CSS
+  alone can't render (none today). A snapshot keeps its ids, so an element appears once per
+  page. Glyph keys are `tool-x`, `role-x`, else
+  the element id (`mode-toggle` carries both mode icons); `group:sec-*` rows expand a toolbar
+  section. Run `npm run keymap:docs` before `npm run manual`: the shortcut list is generated,
+  never edited.
+- **Styles are split by role, not by feature** (2026-09-23): `public/ui.css` holds how a control
+  or panel *looks*; `src/style.css` holds the page and where overlays *sit* (position, edges,
+  z-index, max-height). Put a new rule on the right side — a look rule in style.css is missing
+  from the manual's snapshots, a placement rule in ui.css would throw a snapshot out of its
+  figure. `index.html` links ui.css root-absolute (`/ui.css`, how Vite addresses `public/`;
+  the build rewrites it for the relative base) ahead of the bundled style.css, so the app's
+  cascade order is unchanged; in dev Vite injects style.css at run time, also after it.
 - Every mutation goes through `markDirty` → snapshot history + autosave + component-context sync +
   pose-baseline reset. `canonicalData()` is the root document without sim poses.
 - Session-only state (grid, snap, osnap, visibility toggles, solver tuning) is not persisted;
@@ -564,22 +589,12 @@ Each script is a plain assertion list — read it for the exact cases.
   edge) as boundary spurs and refused valid cuts as "pinched". Reproduce such cases from the
   user's `test.json` headlessly before theorising — the synthetic exact-position cases all passed.
 
-## In flight (2026-09-15)
-- A run of **UI-tweak commits**. During it the in-app manual is deliberately **not** updated;
-  every manual-relevant change is logged in HANDOFF.md ("pending manual updates") for one later pass.
-  The shortcut list in that pass is now a **generator run** (`npm run keymap:docs`), not an edit.
-  Currently pending there: guideline removal, parametric polygons and the "n sides" tag,
-  projected corner-pair size dimensions, single-click line dimensions, the two-candidate /
-  point-on-point implicit constraints with their new toolbar switch, the Fixed constraint,
-  line midpoints as snap / implicit-constraint / placement targets, the fixed dimension
-  direction with its pill glyph / glyph button / off-line leader, the Symmetrical
-  constraint, the Tangential constraint, group isolation (double-click into a group),
-  recolouring a whole selection, the spoken refusals / longer conflict flash, dimensions on a
-  patterned seed, multi-seed (Ctrl+click) patterns, the green pattern accent, Equal on radii
-  (label now "Equal"), and stale what's-this strings. Manual exceptions so far: **text-only**
-  `tool-fixed`, `tool-symmetric` and `tool-tangent` topics had to be written, because
-  `npm run manual` hard-fails on a topic the app can ask for and every `data-tool` button
-  implies one — all three still need the illustration pass like the rest.
+## In flight (2026-09-23)
+- **The manual pass is done (2026-09-23).** Every topic was rewritten for the current UI and the
+  pending list in HANDOFF.md was consumed: 22 shots (three of them UI markup snapshots), new topics `subtract`,
+  `intersect`, `implicit-constraints`, `group-edit`, `shortcuts-panel`, the Guideline topic
+  gone, the stale what's-this strings reworded. The UI-tweak deferral is over: a UI change now
+  updates the manual in the same commit.
 - **The shortcuts were remapped (2026-09-15) and the layout is not settled.** Fixed `F`, Circle
   `C`, Line `L`, Arc `A`, fit view `Shift+F`, view dial `Ctrl+R`, polyline-as-cut `Ctrl+U`,
   Connect `Ctrl+Shift+C`, actuator `Shift+A`, motor `Shift+M`, **Rail unassigned**. Two of those
@@ -599,7 +614,7 @@ Each script is a plain assertion list — read it for the exact cases.
 - Shape-tools phase 1 shipped (v20/v21); phases 2–4 and follow-ups are in HANDOFF.md.
 - **Subtract / Intersect shipped (2026-09-22)** with Combine's conventions (first selected
   survives, tools consumed, one-piece results only, no keys); the un-discussed choices are listed
-  in HANDOFF.md as open questions. Their manual topics are pending with the rest.
+  in HANDOFF.md as open questions. Manual topics: `subtract`, `intersect`.
 - The toolbar was regrouped into draggable groups for **draw mode**; sim mode inherits the rack
   but its own grouping (Animation + solver tuning) has not been designed yet — see HANDOFF.md.
 
@@ -613,9 +628,10 @@ Each script is a plain assertion list — read it for the exact cases.
   closed-form propagation for tree branches (loop cores stay iterative). Also the "Assembly
   impossible" flicker while dragging an actuator's rider in a closed loop (candidate: project the
   driver target onto the rail first).
-- **Manual**: richer topic text, gesture-sequence illustrations (before/mid/after via `run` steps),
-  PNG panel shots (path exists, no shots), pattern/component/ghost fixtures; option to let controls
-  act *and* navigate in help mode (one-line change in `help.ts`). The draw-mode toolbar is ~1480 px wide and wraps groups below that.
+- **Manual**: no component / context-ghost / Simulate-mode pictures yet (those fixtures are the
+  next to write), no before/mid/after sequences for the shape tools, tutorial steps unillustrated;
+  option to let controls act *and* navigate in help mode (one-line change in `help.ts`). The
+  draw-mode toolbar is ~1480 px wide and wraps groups below that.
 - **Patterns**: "make independent" UI undecided (`dissolvePattern` exists); labels not draggable;
   whole-body patterns; patterns inside defs don't expand as patterns. A dimension on a **turned
   circular member's** own corners is refused (the member couplings are translation-only, so the

@@ -7,6 +7,12 @@ window.DISJOINTED_TOPIC_IDS = {
  "combine": [
   "combine-btn"
  ],
+ "subtract": [
+  "subtract-btn"
+ ],
+ "intersect": [
+  "intersect-btn"
+ ],
  "mirror": [
   "mirror-h-btn",
   "mirror-v-btn"
@@ -25,13 +31,19 @@ window.DISJOINTED_TOPIC_IDS = {
  "constraints": [
   "sketch-vis-btn"
  ],
+ "implicit-constraints": [
+  "autocon-btn"
+ ],
  "grid": [
   "grid-btn",
-  "snap-btn",
   "grid-size-btn",
-  "grid-size-menu"
+  "grid-size-menu",
+  "grid-color",
+  "grid-style-btn",
+  "grid-style-menu"
  ],
  "object-snap": [
+  "snap-btn",
   "osnap-btn"
  ],
  "dimensions": [
@@ -56,6 +68,10 @@ window.DISJOINTED_TOPIC_IDS = {
   "backup-btn",
   "backup-panel"
  ],
+ "shortcuts-panel": [
+  "keymap-btn",
+  "keymap-panel"
+ ],
  "theme": [
   "theme-btn"
  ],
@@ -72,9 +88,6 @@ window.DISJOINTED_TOPIC_IDS = {
  "tool-motor": [
   "motor-speed"
  ],
- "tool-polygon": [
-  "poly-sides"
- ],
  "tool-text": [
   "text-size",
   "text-edit"
@@ -90,7 +103,8 @@ window.DISJOINTED_TOPIC_IDS = {
  ],
  "canvas": [
   "scene",
-  "hint"
+  "hint",
+  "statusbar"
  ],
  "impossible": [
   "sim-error"

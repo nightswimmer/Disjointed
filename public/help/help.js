@@ -5,7 +5,9 @@
      highlights it and scrolls it into view. Unknown topics land on the table of contents.
    - Table of contents: generated from the chapter headings and topic sections.
    - Figures: <figure data-svg="img/x.svg"> is fetched and inlined (so the SVG's CSS
-     variables follow the theme); <img data-dark="..." data-light="..."> swaps per theme. */
+     variables follow the theme); <figure data-ui="key"> shows the app markup the generator
+     copied into ui.js, styled by the app's own ../ui.css (so it follows the theme like the
+     app does); <img data-dark="..." data-light="..."> swaps per theme. */
 (function () {
   "use strict";
 
@@ -27,6 +29,16 @@
   setTheme(params.get("theme") || "dark");
 
   // --- table of contents -----------------------------------------------------------
+  // A heading's name alone: without its shortcut keys or the toolbar glyphs added to it.
+  function headingName(h2) {
+    var s = "";
+    for (var i = 0; i < h2.childNodes.length; i++) {
+      var c = h2.childNodes[i];
+      if (c.nodeType === 3) s += c.textContent;
+      else if (c.nodeType === 1 && !c.classList.contains("keys") && !c.classList.contains("glyphs")) s += c.textContent;
+    }
+    return s.replace(/\s+/g, " ").trim();
+  }
   function buildToc() {
     var list = document.getElementById("toc-list");
     if (!list) return;
@@ -46,7 +58,7 @@
         var item = document.createElement("li");
         var a = document.createElement("a");
         a.href = "#" + n.id;
-        a.textContent = (h2.childNodes[0] && h2.childNodes[0].textContent || h2.textContent).trim();
+        a.textContent = headingName(h2);
         item.appendChild(a);
         ul.appendChild(item);
       }
@@ -190,8 +202,47 @@
     }
   }
 
+  // UI snapshots: the generator copies an element's markup out of the running app
+  // (public/help/ui.js, keyed by shot id); rendered here with the app's stylesheet and made
+  // inert, it is a picture made of real elements, not a set of controls.
+  function addUiSnapshots() {
+    var U = window.DISJOINTED_UI || {};
+    var figs = document.querySelectorAll("figure[data-ui]");
+    for (var i = 0; i < figs.length; i++) {
+      var fig = figs[i];
+      var key = fig.getAttribute("data-ui");
+      var cap = fig.querySelector("figcaption");
+      var box = document.createElement("div");
+      if (U[key]) {
+        box.className = "ui-snapshot";
+        box.setAttribute("inert", "");
+        box.innerHTML = U[key];
+      } else {
+        fig.classList.add("pending");
+        box.textContent = "Illustration not available (" + key + ")";
+      }
+      fig.insertBefore(box, cap);
+    }
+  }
+
+  // UI screenshots (the png fallback) are captured at 2x: show each at its CSS size.
+  function fitShots() {
+    var shots = document.querySelectorAll("img.ui-shot");
+    for (var i = 0; i < shots.length; i++) {
+      (function (img) {
+        var fit = function () {
+          if (img.naturalWidth) img.style.maxWidth = img.naturalWidth / 2 + "px";
+        };
+        if (img.complete) fit();
+        img.addEventListener("load", fit);
+      })(shots[i]);
+    }
+  }
+
   addGlyphs();
   addGlyphRows();
+  addUiSnapshots();
   buildToc();
+  fitShots();
   goto(location.hash, false);
 })();

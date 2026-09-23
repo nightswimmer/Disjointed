@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="395" height="441" viewBox="1524 436 790 882">
+<g transform="matrix(5.685 0 0 5.685 1920 878)">
+  <path d="M-360 -154.442L-360 154.442M-320 -154.442L-320 154.442M-280 -154.442L-280 154.442M-240 -154.442L-240 154.442M-200 -154.442L-200 154.442M-160 -154.442L-160 154.442M-120 -154.442L-120 154.442M-80 -154.442L-80 154.442M-40 -154.442L-40 154.442M0 -154.442L0 154.442M40 -154.442L40 154.442M80 -154.442L80 154.442M120 -154.442L120 154.442M160 -154.442L160 154.442M200 -154.442L200 154.442M240 -154.442L240 154.442M280 -154.442L280 154.442M320 -154.442L320 154.442M-337.731 -160L337.731 -160M-337.731 -120L337.731 -120M-337.731 -80L337.731 -80M-337.731 -40L337.731 -40M-337.731 0L337.731 0M-337.731 40L337.731 40M-337.731 80L337.731 80M-337.731 120L337.731 120" fill="none" stroke="var(--dj-grid, #26282f)" stroke-width="0.3518"/>
+  <path d="M0 -60L51.962 -30L51.962 30L0 60L-51.962 30L-51.962 -30Z" fill="#5bd6a6" fill-rule="evenodd" fill-opacity="0.333"/>
+  <path d="M0 -60L51.962 -30L51.962 30L0 60L-51.962 30L-51.962 -30Z" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="1.0554"/>
+  <path d="M-2.287 0L2.287 0M0 -2.287L0 2.287" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="0.4222" opacity="0.7"/>
+  <path d="M0.88 0A0.88 0.88 0 0 1 -0.88 0A0.88 0.88 0 0 1 0.88 0" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="0.4222" opacity="0.7"/>
+  <path d="M-1.759 -61.759h3.518v3.518h-3.518Z" fill="var(--dj-ink, #ffffff)"/>
+  <path d="M-1.759 -61.759h3.518v3.518h-3.518Z" fill="none" stroke="var(--dj-surface, #1e1f24)" stroke-width="0.7036"/>
+  <path d="M50.203 -31.759h3.518v3.518h-3.518Z" fill="var(--dj-ink, #ffffff)"/>
+  <path d="M50.203 -31.759h3.518v3.518h-3.518Z" fill="none" stroke="var(--dj-surface, #1e1f24)" stroke-width="0.7036"/>
+  <path d="M50.203 28.241h3.518v3.518h-3.518Z" fill="var(--dj-ink, #ffffff)"/>
+  <path d="M50.203 28.241h3.518v3.518h-3.518Z" fill="none" stroke="var(--dj-surface, #1e1f24)" stroke-width="0.7036"/>
+  <path d="M-1.759 58.241h3.518v3.518h-3.518Z" fill="var(--dj-ink, #ffffff)"/>
+  <path d="M-1.759 58.241h3.518v3.518h-3.518Z" fill="none" stroke="var(--dj-surface, #1e1f24)" stroke-width="0.7036"/>
+  <path d="M-53.721 28.241h3.518v3.518h-3.518Z" fill="var(--dj-ink, #ffffff)"/>
+  <path d="M-53.721 28.241h3.518v3.518h-3.518Z" fill="none" stroke="var(--dj-surface, #1e1f24)" stroke-width="0.7036"/>
+  <path d="M-53.721 -31.759h3.518v3.518h-3.518Z" fill="var(--dj-ink, #ffffff)"/>
+  <path d="M-53.721 -31.759h3.518v3.518h-3.518Z" fill="none" stroke="var(--dj-surface, #1e1f24)" stroke-width="0.7036"/>
+</g>
+<g transform="matrix(2 0 0 2 0 0)">
+  <path d="M940.906 243.45H979.094A5 5 0 0 1 984.094 248.45V256.45A5 5 0 0 1 979.094 261.45H940.906A5 5 0 0 1 935.906 256.45V248.45A5 5 0 0 1 940.906 243.45Z" fill="var(--dj-surface, #1e1f24)" fill-opacity="0.902"/>
+  <path d="M940.906 243.45H979.094A5 5 0 0 1 984.094 248.45V256.45A5 5 0 0 1 979.094 261.45H940.906A5 5 0 0 1 935.906 256.45V248.45A5 5 0 0 1 940.906 243.45Z" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="1"/>
+  <text x="960" y="252.95" fill="var(--dj-ink, #ffffff)" text-anchor="middle" dominant-baseline="central" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12px">6 sides</text>
+</g>
+<g transform="matrix(5.685 0 0 5.685 1920 878)">
+  <path d="M1.583 -54.371A1.583 1.583 0 0 1 -1.583 -54.371A1.583 1.583 0 0 1 1.583 -54.371" fill="var(--dj-surface, #1e1f24)"/>
+  <path d="M1.583 -54.371A1.583 1.583 0 0 1 -1.583 -54.371A1.583 1.583 0 0 1 1.583 -54.371" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="0.7036"/>
+  <path d="M48.67 -27.186A1.583 1.583 0 0 1 45.504 -27.186A1.583 1.583 0 0 1 48.67 -27.186" fill="var(--dj-surface, #1e1f24)"/>
+  <path d="M48.67 -27.186A1.583 1.583 0 0 1 45.504 -27.186A1.583 1.583 0 0 1 48.67 -27.186" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="0.7036"/>
+  <path d="M48.67 27.186A1.583 1.583 0 0 1 45.504 27.186A1.583 1.583 0 0 1 48.67 27.186" fill="var(--dj-surface, #1e1f24)"/>
+  <path d="M48.67 27.186A1.583 1.583 0 0 1 45.504 27.186A1.583 1.583 0 0 1 48.67 27.186" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="0.7036"/>
+  <path d="M1.583 54.371A1.583 1.583 0 0 1 -1.583 54.371A1.583 1.583 0 0 1 1.583 54.371" fill="var(--dj-surface, #1e1f24)"/>
+  <path d="M1.583 54.371A1.583 1.583 0 0 1 -1.583 54.371A1.583 1.583 0 0 1 1.583 54.371" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="0.7036"/>
+  <path d="M-45.504 27.186A1.583 1.583 0 0 1 -48.67 27.186A1.583 1.583 0 0 1 -45.504 27.186" fill="var(--dj-surface, #1e1f24)"/>
+  <path d="M-45.504 27.186A1.583 1.583 0 0 1 -48.67 27.186A1.583 1.583 0 0 1 -45.504 27.186" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="0.7036"/>
+  <path d="M-45.504 -27.186A1.583 1.583 0 0 1 -48.67 -27.186A1.583 1.583 0 0 1 -45.504 -27.186" fill="var(--dj-surface, #1e1f24)"/>
+  <path d="M-45.504 -27.186A1.583 1.583 0 0 1 -48.67 -27.186A1.583 1.583 0 0 1 -45.504 -27.186" fill="none" stroke="var(--dj-ink, #ffffff)" stroke-width="0.7036"/>
+</g>
+</svg>

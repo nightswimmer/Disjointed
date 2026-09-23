@@ -713,7 +713,8 @@ conflicting items flash red); anything else previewed is still placed.
 - `F1` opens the manual at its table of contents. The manual also has a short tutorial that
   builds a four-bar linkage, and a keyboard-shortcut reference.
 - Drag the drawer's left edge to resize it; the arrow button opens the manual in its own tab.
-  Its pictures are vector drawings made by the app's own renderer and follow the light / dark
+  Its pictures of the mechanism are vector drawings made by the app's own renderer, and its
+  pictures of the interface are the interface's own controls, so both follow the light / dark
   theme.
 
 ### Save, load & backups
@@ -790,7 +791,9 @@ The manual lives in `public/help/` and is a static page. Its illustrations are g
 drawn by hand: `scripts/manual/shoot.ts` drives the real app in your installed Chrome through
 Playwright (no browser download), builds fixture mechanisms with the Scene API, performs the
 gestures, and captures the canvas through the app's own renderer as SVG (theme colours become
-CSS variables, so one file serves both themes). Add a shot in `scripts/manual/shots.ts` and a
+CSS variables, so one file serves both themes); toolbar sections and panels are copied as
+markup and rendered with the app's own stylesheet (`public/ui.css`, which the app and the
+manual share — `src/style.css` keeps only the page layout). Add a shot in `scripts/manual/shots.ts` and a
 `<section class="topic" id="…">` in `public/help/index.html`; the generator fails if a topic
 the app can ask for is missing.
 
